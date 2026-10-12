@@ -19,13 +19,21 @@ const (
 	RunWarning    = "warning" // finished, but some files were skipped
 	RunFailed     = "failed"
 	RunCanceled   = "canceled"
-	RunLost       = "lost" // agent stopped reporting
+	RunLost       = "lost"   // agent stopped reporting
+	RunMissed     = "missed" // scheduled run could not start in its window and catch-up is off
+)
+
+// Run triggers.
+const (
+	TriggerSchedule = "schedule" // started by the agent at the scheduled time
+	TriggerCatchUp  = "catch-up" // started by the agent after a missed window (PC was off or busy)
+	TriggerManual   = "manual"   // "Run now" / restore from the web UI
 )
 
 // Terminal reports whether a run state is final.
 func Terminal(state string) bool {
 	switch state {
-	case RunSuccess, RunWarning, RunFailed, RunCanceled, RunLost:
+	case RunSuccess, RunWarning, RunFailed, RunCanceled, RunLost, RunMissed:
 		return true
 	}
 	return false
@@ -70,18 +78,84 @@ type JobSpec struct {
 	Restore *RestoreSpec `json:"restore,omitempty"`
 }
 
-// PollRequest is the agent heartbeat.
-type PollRequest struct {
-	Hostname     string  `json:"hostname"`
-	OS           string  `json:"os"`
-	AgentVersion string  `json:"agent_version"`
-	RunningRuns  []int64 `json:"running_runs"`
+// JobConfig is a backup job as pushed to the agent. The agent owns the
+// schedule: it decides when to start the job on its own clock.
+type JobConfig struct {
+	ID       int64    `json:"id"`
+	Name     string   `json:"name"`
+	Kind     string   `json:"kind"`
+	BackupID string   `json:"backup_id"`
+	Sources  []string `json:"sources,omitempty"`
+	Excludes []string `json:"excludes,omitempty"`
+	Volumes  []string `json:"volumes,omitempty"`
+	UseVSS   bool     `json:"use_vss"`
+	// Schedule is a cron expression evaluated in the PC's local time zone; empty = manual only.
+	Schedule string `json:"schedule"`
+	// WindowMinutes: a scheduled run may start up to this long after its time.
+	WindowMinutes int `json:"window_minutes"`
+	// CatchUp: if the window was missed (PC off, asleep or busy), run as soon as possible
+	// instead of recording the run as missed.
+	CatchUp bool `json:"catch_up"`
 }
 
-// PollResponse carries new work and cancellations.
+// AgentConfig is everything the agent needs to run scheduled backups on its
+// own, even while the management server is unreachable.
+type AgentConfig struct {
+	Rev    string      `json:"rev"` // content hash; the agent reports it back in PollRequest
+	Target PBSTarget   `json:"target"`
+	Jobs   []JobConfig `json:"jobs"`
+}
+
+// Spec turns a job config into an executable job spec.
+func (c *AgentConfig) Spec(j JobConfig) JobSpec {
+	return JobSpec{JobID: j.ID, Kind: j.Kind, Target: c.Target, BackupID: j.BackupID,
+		Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS}
+}
+
+// JobState is the agent's view of a job's schedule, reported on every poll.
+type JobState struct {
+	JobID          int64 `json:"job_id"`
+	NextRun        int64 `json:"next_run,omitempty"` // unix seconds, 0 = not scheduled
+	LastSlot       int64 `json:"last_slot,omitempty"`
+	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
+	Running        bool  `json:"running,omitempty"`
+}
+
+// PollRequest is the agent heartbeat.
+type PollRequest struct {
+	Hostname     string     `json:"hostname"`
+	OS           string     `json:"os"`
+	AgentVersion string     `json:"agent_version"`
+	RunningRuns  []int64    `json:"running_runs"`
+	ConfigRev    string     `json:"config_rev"`
+	Schedule     []JobState `json:"schedule"`
+	TimeZone     string     `json:"time_zone"`
+}
+
+// PollResponse carries config updates, on-demand work and cancellations.
 type PollResponse struct {
-	Jobs   []JobSpec `json:"jobs"`
-	Cancel []int64   `json:"cancel"`
+	Config *AgentConfig `json:"config,omitempty"` // only sent when ConfigRev differs
+	Jobs   []JobSpec    `json:"jobs"`             // manual runs and restores requested in the UI
+	Cancel []int64      `json:"cancel"`
+}
+
+// RunRegister announces a run the agent started on its own (scheduled or
+// catch-up), or a scheduled run it had to skip. It is idempotent on UUID, so
+// the agent can retry until the server is reachable.
+type RunRegister struct {
+	UUID         string `json:"uuid"`
+	JobID        int64  `json:"job_id"`
+	Kind         string `json:"kind"`
+	Trigger      string `json:"trigger"`
+	State        string `json:"state"` // "running" or "missed"
+	ScheduledFor int64  `json:"scheduled_for"`
+	StartedAt    int64  `json:"started_at"`
+	Message      string `json:"message,omitempty"`
+}
+
+// RunRegisterResponse returns the server's id for the run.
+type RunRegisterResponse struct {
+	RunID int64 `json:"run_id"`
 }
 
 // Progress is a periodic progress snapshot.

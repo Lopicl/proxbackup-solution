@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"pbspc/internal/api"
+	"pbspc/internal/schedule"
 	"pbspc/pkg/pbs"
 )
 
@@ -124,6 +125,14 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
+	// Host or fingerprint changes are part of every client's config: push them.
+	if cs, err := s.store.Clients(ctx); err == nil {
+		for _, c := range cs {
+			if c.TargetID == t.ID {
+				s.wakeClient(c.ID)
+			}
+		}
+	}
 	writeJSON(w, t)
 }
 
@@ -194,6 +203,9 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 	last := s.store.LastSuccess(ctx)
 	for _, c := range cs {
 		c.LastSuccess = last[c.ID]
+		if cfg, err := s.agentConfig(ctx, c); err == nil {
+			c.ConfigSynced = cfg.Rev == c.ConfigRev
+		}
 		if runs, _ := s.store.Runs(ctx, RunFilter{ClientID: c.ID, Limit: 1}); len(runs) > 0 {
 			c.LastRun = runs[0]
 		}
@@ -215,8 +227,9 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 	}
 	c.LastSuccess = s.store.LastSuccess(ctx)[c.ID]
 	jobs, _ := s.store.Jobs(ctx, c.ID)
-	for _, j := range jobs {
-		j.NextRun = s.sched.Next(j.ID)
+	applyAgentState(c, jobs)
+	if cfg, err := s.agentConfig(ctx, c); err == nil {
+		c.ConfigSynced = cfg.Rev == c.ConfigRev
 	}
 	runs, _ := s.store.Runs(ctx, RunFilter{ClientID: c.ID, Limit: 50})
 	writeJSON(w, map[string]any{"client": c, "jobs": orEmpty(jobs), "runs": orEmpty(runs)})
@@ -248,7 +261,6 @@ func (s *Server) handleRevokeClient(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
-	s.sched.Reload(ctx)
 	s.wakeClient(id)
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -387,8 +399,16 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
+	clients := map[int64]*Client{}
 	for _, j := range jobs {
-		j.NextRun = s.sched.Next(j.ID)
+		c := clients[j.ClientID]
+		if c == nil {
+			if c, err = s.store.Client(r.Context(), j.ClientID); err != nil {
+				continue
+			}
+			clients[j.ClientID] = c
+		}
+		applyAgentState(c, []*Job{j})
 	}
 	writeJSON(w, orEmpty(jobs))
 }
@@ -439,7 +459,13 @@ func (s *Server) handleSaveJob(w http.ResponseWriter, r *http.Request) {
 	case !backupIDRe.MatchString(j.BackupID):
 		err = errors.New("invalid backup id")
 	case j.Schedule != "":
-		err = ValidateSchedule(j.Schedule)
+		err = schedule.Validate(j.Schedule)
+	}
+	if j.WindowMinutes <= 0 {
+		j.WindowMinutes = 60
+	}
+	if err == nil && j.WindowMinutes > 7*24*60 {
+		err = errors.New("start window must be at most 7 days")
 	}
 	if err != nil {
 		httpError(w, 400, err)
@@ -449,8 +475,7 @@ func (s *Server) handleSaveJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
-	s.sched.Reload(ctx)
-	j.NextRun = s.sched.Next(j.ID)
+	s.wakeClient(j.ClientID) // push the new configuration right away
 	writeJSON(w, j)
 }
 
@@ -466,14 +491,19 @@ func cleanList(in []string) []string {
 
 func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
-	if err == nil {
-		err = s.store.DeleteJob(r.Context(), id)
-	}
 	if err != nil {
 		httpError(w, 400, err)
 		return
 	}
-	s.sched.Reload(r.Context())
+	j, err := s.store.Job(r.Context(), id)
+	if err == nil {
+		err = s.store.DeleteJob(r.Context(), id)
+	}
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	s.wakeClient(j.ClientID)
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

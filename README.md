@@ -6,7 +6,7 @@ ordinary PBS snapshots: deduplicated, verifiable, syncable, prunable.
 
 | Component | What it is |
 |-----------|------------|
-| `pbspc-agent` | Windows service. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
+| `pbspc-agent` | Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
 | `pbspc-server` | Management server with an embedded web UI: enrollment, jobs and schedules, run history and live logs, snapshot browser, restore, retention, notifications. |
 | `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar v1 archive format. |
 
@@ -36,7 +36,10 @@ make            # builds web UI + bin/pbspc-server (linux/amd64, darwin) + bin/p
    The server creates the PBS namespace `pcs/<client>` and a token that has **DatastoreBackup on
    that namespace only**.
 4. **Jobs:** on the client page, create a *Files* job (default `C:\Users`, daily, with retention) or
-   a *Volume image* job. Click *Run now*, or let the schedule run it.
+   a *Volume image* job. The schedule is pushed to the PC, and the **agent** starts the backup on
+   the PC's own clock. If the PC is off, asleep or busy during the start window, the job either
+   catches up as soon as possible (default) or is recorded as *missed*. *Run now* triggers it
+   from the server immediately.
 
 Ad-hoc use without a server (handy for testing):
 
@@ -90,7 +93,9 @@ The MVP has been verified end to end against **PBS 4.2** (Docker), with the agen
 - PBS's own pxar reader extracting files from our archives
 - server-side verify, prune and retention
 - enrollment and mTLS, least-privilege PBS provisioning
-- scheduling, run events, file and image restores (byte-identical)
+- agent-side scheduling: on-time runs, catch-up after the agent was down, `missed` records with
+  catch-up off, and backups while the management server was offline (reported afterwards)
+- run events, file and image restores (byte-identical)
 
 **Not yet verified on real Windows:** the Windows-only code paths (VSS via `go-vss`, raw volume
 reads, attribute and timestamp restore, the service wrapper). They compile and vet cleanly for

@@ -74,6 +74,7 @@ td.archives { display: flex; flex-wrap: wrap; gap: 6px; }
 .badge.warn { background: #b7791f22; color: var(--warn); }
 .badge.bad { background: #c5303022; color: var(--bad); }
 .badge.info { background: #2b6cb022; color: var(--info); }
+.tag.catchup { border-color: #2b6cb055; color: var(--info); }
 .tag { margin-left: 6px; font-size: 11px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--muted); }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 .dot.on { background: var(--ok); box-shadow: 0 0 0 3px #1f8a4c33; }

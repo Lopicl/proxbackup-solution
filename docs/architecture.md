@@ -13,6 +13,7 @@ same chunk-level deduplication, verification, sync and prune behaviour as any ot
 | Volume image backups | VSS snapshot of the volume device → fixed 4 MiB chunk index (`*.img.fidx`) |
 | Central management | Management server with web UI: clients, jobs, schedules, history, restore |
 | No inbound ports on PCs | Agents dial out to the management server (long-poll over mTLS) |
+| The PC decides when to back up | The server only pushes configuration. Each agent runs its own scheduler on the PC's clock, catches up missed runs if the job allows it, and keeps backing up while the server is down |
 | Ransomware resilience | Agents get a PBS token with **DatastoreBackup** only — they can add backups, never delete or prune them |
 | Interoperability | Snapshots are standard PBS snapshots: visible in the PBS GUI, verifiable, syncable, restorable with `proxmox-backup-client` on Linux |
 
@@ -28,7 +29,7 @@ flowchart LR
   end
 
   subgraph MGMT["Management server (Linux or Windows)"]
-    API["pbspc-server<br/>REST API + scheduler"]
+    API["pbspc-server<br/>REST API + config push"]
     UI["Web UI (React, embedded)"]
     DB[(SQLite)]
     API --- DB
@@ -37,7 +38,7 @@ flowchart LR
 
   PBS[("Proxmox Backup Server")]
 
-  AGENT -- "control plane: HTTPS + mTLS<br/>long-poll for jobs, report status" --> API
+  AGENT -- "control plane: HTTPS + mTLS<br/>long-poll: config, on-demand jobs; report runs" --> API
   AGENT == "data plane: PBS backup/reader protocol<br/>(HTTP/2 upgrade, per-agent API token)" ==> PBS
   API -- "PBS admin API: namespaces, tokens,<br/>ACLs, snapshots, prune" --> PBS
   ADMIN(["Administrator browser"]) --> UI
@@ -98,10 +99,19 @@ restore`, and `pxar` FUSE mounts all work.
   server URL, a secret, and the server CA fingerprint. The agent generates an ECDSA key and
   CSR, and the server returns a client certificate signed by its internal CA. Every later
   call uses mTLS.
-* **Job loop.** The agent long-polls `GET /agent/v1/poll`. Jobs arrive with everything needed
-  to run them: sources, excludes, PBS endpoint, fingerprint, datastore, namespace, a scoped
-  API token, and an optional encryption key. Progress and logs stream back via
-  `POST /agent/v1/runs/{id}/events`.
+* **Configuration.** The agent long-polls `POST /agent/v1/poll` and sends the revision of the
+  configuration it has. When the server's revision differs, it pushes the full config: the PBS
+  target (endpoint, fingerprint, datastore, namespace, scoped API token) and all enabled jobs
+  with their schedules. The agent stores it in `jobs.json` (0600). Saving a job in the UI wakes
+  the poll, so changes arrive within seconds when the PC is online. At startup the agent tries a
+  quick sync (≤10 s) before its first schedule check, so changes made while the PC was off take
+  effect immediately.
+* **Scheduling (agent-side).** See [Client-side scheduling](#client-side-scheduling) below.
+  "Run now" and restores are the only work the server dispatches.
+* **Reporting.** The agent registers runs it started itself with `POST /agent/v1/runs`, which is
+  idempotent on a run UUID. Progress and logs then go to `POST /agent/v1/runs/{id}/events`. If
+  the server is unreachable, the backup still runs. The report is spooled to disk (`spool/`) and
+  delivered when the server is back, with the original start and finish times.
 * **File backup.** For each volume touched by the sources, the agent creates one VSS
   snapshot, then walks `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN\…`. Each source path
   is streamed into the pxar encoder, then the chunker, then the uploader. Each source becomes
@@ -130,9 +140,9 @@ restore`, and `pxar` FUSE mounts all work.
   3. grants `DatastoreBackup` on `/datastore/<store>/<ns>` to that token.
 
   The agent only ever receives the scoped token.
-* **Scheduler.** Cron expressions per job (robfig/cron) plus an optional jitter window. Missed
-  runs are queued until the PC comes online, and are skipped if older than the job's
-  `max_delay`.
+* **No scheduler.** The server does not start backups. It validates schedules, pushes them,
+  and shows what the agents report: next run, pending catch-up, config sync state, and the PC's
+  time zone.
 * **Retention.** After each successful run, the server calls PBS `prune` for the backup group
   with the job's keep-last/hourly/daily/weekly/monthly/yearly policy, using the admin token.
   Garbage collection is left to PBS's own schedule.
@@ -144,6 +154,39 @@ restore`, and `pxar` FUSE mounts all work.
 A small systray process started at login. It shows last backup time and status, offers
 "Back up now" and "Restore files…" (opens the web UI deep link or a local picker), and can
 pause backups while the user is on battery or a metered network.
+
+## Client-side scheduling
+
+The agent owns the schedule. Every 20 s, after waking from sleep, and right after a config
+update or finished run, it checks each job's cron expression against the PC's local clock.
+For each job it remembers the last slot it handled (`schedule.json`), so restarts never re-run
+a slot.
+
+| Situation at a scheduled slot | `catch_up = on` (default) | `catch_up = off` |
+|---|---|---|
+| Agent free, within the job's **start window** (default 60 min) | start, trigger `schedule` | start, trigger `schedule` |
+| PC was off/asleep or the agent wasn't running, window passed | start immediately, trigger `catch-up` | record a `missed` run |
+| Same job still running from the previous slot | start right after it finishes (`catch-up`) | record a `missed` run |
+| Waited in the queue behind another job past the window | run as `catch-up` | record a `missed` run |
+
+* Several missed slots, e.g. after three days off, are coalesced into **one** catch-up run.
+* New jobs and changed schedules start counting from "now". They never catch up on slots from
+  before the change.
+* Schedules use the PC's local time zone, which is reported to the server and shown in the UI.
+* `missed` runs appear in the history and trigger failure notifications, with warning severity.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Waiting
+  Waiting --> Due: slot reached (or found on wake-up/restart)
+  Due --> Running: within window and agent free
+  Due --> Running: window passed, catch-up on
+  Due --> Pending: same job still running, catch-up on
+  Pending --> Running: previous run finished
+  Due --> Missed: window passed / busy, catch-up off
+  Running --> Waiting: report result (spooled if server offline)
+  Missed --> Waiting: report "missed"
+```
 
 ## Data model (management server)
 
@@ -157,9 +200,9 @@ erDiagram
   ENROLLMENT_CODE |o--o| CLIENT : "used by"
 
   PBS_TARGET { int id string name string url string fingerprint string datastore string root_ns string admin_token_id string admin_token_secret }
-  CLIENT { int id string name string hostname string os string agent_version string cert_serial string pbs_token_id string pbs_token_secret string ns datetime last_seen }
-  JOB { int id int client_id int target_id string kind string sources_json string excludes_json string schedule string retention_json bool enabled }
-  RUN { int id int job_id int client_id string status datetime started datetime finished int bytes_total int bytes_uploaded int chunks_new int chunks_reused string snapshot string error }
+  CLIENT { int id string name string hostname string os string agent_version string cert_serial string pbs_token_id string pbs_token_secret string ns datetime last_seen string config_rev string schedule_state_json string time_zone }
+  JOB { int id int client_id int target_id string kind string sources_json string excludes_json string schedule int window_minutes bool catch_up string retention_json bool enabled }
+  RUN { int id string uuid int job_id int client_id string trigger string status datetime scheduled_for datetime started datetime finished int bytes_total int bytes_uploaded int chunks_new int chunks_reused string snapshot string error }
   RUN_LOG { int id int run_id datetime ts string level string msg }
   ENROLLMENT_CODE { int id string secret_hash datetime expires string client_name bool used }
 ```
@@ -176,9 +219,11 @@ sequenceDiagram
   participant V as VSS
   participant P as PBS
 
-  S->>S: cron fires for job 7
-  A->>S: GET /agent/v1/poll (mTLS)
-  S-->>A: job spec (sources, ns, scoped token, fingerprint)
+  A->>S: POST /agent/v1/poll (mTLS, config_rev)
+  S-->>A: config (jobs, schedules, ns, scoped token, fingerprint) if changed
+  Note over A: agent clock reaches 21:00 (job 7's schedule)
+  A->>S: POST /agent/v1/runs {uuid, job 7, trigger: schedule} (spooled if offline)
+  S-->>A: run_id 42
   A->>V: Create snapshot(C:)
   A->>P: GET /api2/json/backup (Upgrade: proxmox-backup-protocol-v1)
   P-->>A: 101 Switching Protocols → HTTP/2
@@ -220,7 +265,8 @@ cmd/pbspc-agent/        Windows agent entrypoint (service + CLI: enroll, backup,
 pkg/pbs/                PBS protocol: blob, chunker, backup & reader sessions, admin API
 pkg/pxar/               pxar v1 encoder/decoder
 internal/agent/         job runner, VSS, file walker, image reader, server client
-internal/server/        HTTP API, store (SQLite), scheduler, PBS provisioning, notify
+internal/server/        HTTP API, store (SQLite), config push, PBS provisioning, notify
+internal/schedule/      cron parsing and "is a slot due?" logic shared by agent and server
 internal/api/           shared JSON types between agent and server
 web/                    React + Vite admin UI (built into internal/server/webdist)
 docs/                   this document

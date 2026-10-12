@@ -66,6 +66,7 @@ const stateClass: Record<string, string> = {
   warning: 'warn',
   failed: 'bad',
   lost: 'bad',
+  missed: 'warn',
   canceled: 'muted',
   queued: 'info',
   dispatched: 'info',

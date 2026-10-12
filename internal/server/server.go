@@ -1,5 +1,6 @@
-// Package server implements pbspc-server: the management API, web UI,
-// scheduler and the control-plane endpoint agents connect to.
+// Package server implements pbspc-server: the management API, web UI and the
+// control-plane endpoint agents connect to. Agents own their schedules: the
+// server pushes job configuration and records what the agents report.
 package server
 
 import (
@@ -34,7 +35,6 @@ type Server struct {
 	pki    *PKI
 	sealer *Sealer
 	log    *slog.Logger
-	sched  *Scheduler
 	notify *Notifier
 
 	wakeMu sync.Mutex
@@ -57,7 +57,6 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{}}
 	s.notify = &Notifier{s: s}
-	s.sched = NewScheduler(s)
 	return s, nil
 }
 
@@ -66,11 +65,6 @@ func (s *Server) Store() *Store { return s.store }
 
 // Run serves until ctx is canceled.
 func (s *Server) Run(ctx context.Context) error {
-	if err := s.sched.Reload(ctx); err != nil {
-		return err
-	}
-	s.sched.Start()
-	defer s.sched.Stop()
 	go s.housekeeping(ctx)
 
 	ui := &http.Server{

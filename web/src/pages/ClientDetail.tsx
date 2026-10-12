@@ -52,6 +52,17 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         <span>
           Last success <b>{ago(c.last_success)}</b>
         </span>
+        <span title="Schedules are evaluated by the agent on the PC's own clock">
+          PC time zone <b>{c.time_zone || '—'}</b>
+        </span>
+        <span>
+          Config{' '}
+          {c.config_synced ? (
+            <b className="ok-text">in sync</b>
+          ) : (
+            <b className="warn-text" title="The agent picks up the new configuration the next time it connects">pending — applied when the PC connects</b>
+          )}
+        </span>
       </div>
       <nav className="tabs">
         {tabs.map(([k, label]) => (
@@ -99,8 +110,11 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
                     </td>
                     <td>
                       <code>{j.schedule || 'manual'}</code>
+                      {j.schedule && <span className="tag">{j.catch_up ? 'catch-up' : 'skip if missed'}</span>}
                     </td>
-                    <td>{j.next_run ? dateTime(j.next_run) : '—'}</td>
+                    <td>
+                      {j.catch_up_pending ? <span className="badge info">catch-up pending</span> : j.next_run ? dateTime(j.next_run) : '—'}
+                    </td>
                     <td>{keepText(j.retention)}</td>
                     <td className="row-actions">
                       <button
@@ -161,6 +175,8 @@ function newJob(clientId: number, name: string): Partial<Job> {
     volumes: ['C:'],
     use_vss: true,
     schedule: '0 21 * * *',
+    window_minutes: 60,
+    catch_up: true,
     retention: { 'keep-last': 3, 'keep-daily': 14, 'keep-weekly': 8, 'keep-monthly': 12 },
     enabled: true,
   }
@@ -228,7 +244,10 @@ function JobEditor({ job, onClose }: { job: Partial<Job>; onClose: () => void })
           </Field>
         )}
         <div className="grid2">
-          <Field label="Schedule (cron)" hint="minute hour day-of-month month day-of-week, or @daily / @every 6h. Empty = manual.">
+          <Field
+            label="Schedule (cron, PC local time)"
+            hint="minute hour day-of-month month day-of-week, or @daily / @every 6h. Empty = manual. The agent starts the job itself — the server only pushes this configuration."
+          >
             <input value={j.schedule ?? ''} onChange={(e) => set({ schedule: e.target.value })} placeholder="0 21 * * *" />
             <div className="chips">
               {schedulePresets.map(([v, label]) => (
@@ -242,6 +261,19 @@ function JobEditor({ job, onClose }: { job: Partial<Job>; onClose: () => void })
             <input value={j.backup_id ?? ''} onChange={(e) => set({ backup_id: e.target.value })} />
           </Field>
         </div>
+        {j.schedule && (
+          <div className="grid2">
+            <Field label="Start window (minutes)" hint="A scheduled run may start up to this long after its time and still count as on time.">
+              <input type="number" min={1} max={10080} value={j.window_minutes ?? 60} onChange={(e) => set({ window_minutes: Number(e.target.value) })} />
+            </Field>
+            <Field label="If the PC is off, asleep or busy during the window">
+              <select value={j.catch_up ? 'catch' : 'skip'} onChange={(e) => set({ catch_up: e.target.value === 'catch' })}>
+                <option value="catch">Run as soon as it is available again (catch-up)</option>
+                <option value="skip">Skip it and record the run as missed</option>
+              </select>
+            </Field>
+          </div>
+        )}
         <Field label="Retention" hint="Applied by the server after each successful run (PBS prune). All zero keeps everything.">
           <div className="keep">
             {keepKeys.map((k) => (

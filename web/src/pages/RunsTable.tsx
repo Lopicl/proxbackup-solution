@@ -36,18 +36,31 @@ export function RunsTable({ runs, showClient, progress }: { runs: Run[]; showCli
               )}
               <td>
                 {r.job_name || r.kind}
-                {r.trigger === 'schedule' && <span className="tag">sched</span>}
+                {r.trigger === 'schedule' && (
+                  <span className="tag" title={r.scheduled_for ? `scheduled for ${new Date(r.scheduled_for * 1000).toLocaleString()}` : ''}>
+                    sched
+                  </span>
+                )}
+                {r.trigger === 'catch-up' && (
+                  <span className="tag catchup" title={r.scheduled_for ? `missed slot ${new Date(r.scheduled_for * 1000).toLocaleString()}, run when the PC was available` : ''}>
+                    catch-up
+                  </span>
+                )}
               </td>
               <td>
                 <StateBadge state={r.state} />
                 {progress && active && <ProgressBar p={r.progress} />}
               </td>
-              <td title={new Date((r.started_at || r.queued_at) * 1000).toLocaleString()}>{ago(r.started_at || r.queued_at)}</td>
+              {r.state === 'missed' && r.scheduled_for ? (
+                <td title={`was scheduled for ${new Date(r.scheduled_for * 1000).toLocaleString()}`}>{ago(r.scheduled_for)}</td>
+              ) : (
+                <td title={new Date((r.started_at || r.queued_at) * 1000).toLocaleString()}>{ago(r.started_at || r.queued_at)}</td>
+              )}
               <td>{r.started_at && end ? duration(end - r.started_at) : '—'}</td>
               <td className="num">{bytes(data)}</td>
               <td className="num">{bytes(up)}</td>
               <td className="ellipsis" title={r.error || r.snapshot}>
-                {r.error ? <span className="bad-text">{r.error}</span> : <code>{r.snapshot}</code>}
+                {r.error ? <span className={r.state === 'missed' ? 'warn-text' : 'bad-text'}>{r.error}</span> : <code>{r.snapshot}</code>}
               </td>
             </tr>
           )

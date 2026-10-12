@@ -49,6 +49,7 @@ export interface Run {
   snapshot: string
   cancel_requested: boolean
   restore?: RestoreSpec
+  scheduled_for: number
   job_name: string
   client_name: string
 }
@@ -67,6 +68,8 @@ export interface Client {
   last_run?: Run
   last_success: number
   created_at: number
+  config_synced: boolean
+  time_zone: string
 }
 
 export interface Keep {
@@ -89,9 +92,12 @@ export interface Job {
   volumes: string[]
   use_vss: boolean
   schedule: string
+  window_minutes: number
+  catch_up: boolean
   retention: Keep
   enabled: boolean
   next_run?: number
+  catch_up_pending?: boolean
 }
 
 export interface Target {
@@ -203,7 +209,7 @@ export const api = {
     request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours }),
 
   saveJob: (j: Partial<Job>) =>
-    j.id ? request<Job>('PUT', `/jobs/${j.id}`, strip(j, ['id', 'next_run', 'client_id', 'created_at'])) : request<Job>('POST', '/jobs', strip(j, ['next_run'])),
+    j.id ? request<Job>('PUT', `/jobs/${j.id}`, strip(j, ['id', 'next_run', 'catch_up_pending', 'client_id', 'created_at'])) : request<Job>('POST', '/jobs', strip(j, ['next_run', 'catch_up_pending'])),
   deleteJob: (id: number) => request('DELETE', `/jobs/${id}`),
   runJob: (id: number) => request<{ run_id: number }>('POST', `/jobs/${id}/run`),
 

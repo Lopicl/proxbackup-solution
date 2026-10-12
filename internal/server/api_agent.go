@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -25,6 +28,7 @@ func (s *Server) agentRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /agent/v1/enroll", s.handleEnroll)
 	mux.Handle("POST /agent/v1/poll", s.requireAgent(s.handlePoll))
+	mux.Handle("POST /agent/v1/runs", s.requireAgent(s.handleRegisterRun))
 	mux.Handle("POST /agent/v1/runs/{id}/events", s.requireAgent(s.handleEvents))
 	return mux
 }
@@ -125,8 +129,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		return
 	}
 	ctx := r.Context()
-	s.store.TouchClient(ctx, c.ID, req.Hostname, req.OS, req.AgentVersion)
+	s.store.TouchClient(ctx, c.ID, req)
 	s.store.MarkMissingLost(ctx, c.ID, req.RunningRuns)
+	agentRev := req.ConfigRev
 
 	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
 	wait = min(max(wait, 0), 55)
@@ -134,6 +139,14 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 	for {
 		wake := s.wakeChan(c.ID)
 		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID)}
+		cfg, err := s.agentConfig(ctx, c)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if cfg.Rev != agentRev {
+			resp.Config = cfg
+		}
 		runs, err := s.store.DispatchQueued(ctx, c.ID)
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err)
@@ -142,12 +155,12 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		for _, run := range runs {
 			spec, err := s.buildSpec(ctx, c, run)
 			if err != nil {
-				s.store.FinishRun(ctx, run.ID, api.Result{State: api.RunFailed, Error: err.Error()})
+				s.store.FinishRun(ctx, run.ID, api.Result{State: api.RunFailed, Error: err.Error()}, now())
 				continue
 			}
 			resp.Jobs = append(resp.Jobs, *spec)
 		}
-		if len(resp.Jobs) > 0 || len(resp.Cancel) > 0 {
+		if len(resp.Jobs) > 0 || len(resp.Cancel) > 0 || resp.Config != nil {
 			writeJSON(w, resp)
 			return
 		}
@@ -160,6 +173,84 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 			return
 		}
 	}
+}
+
+// agentConfig builds the configuration pushed to an agent: the PBS target
+// (with the client's scoped token) and its enabled jobs. Rev is a content hash.
+func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, error) {
+	t, err := s.store.Target(ctx, c.TargetID)
+	if err != nil {
+		return nil, err
+	}
+	secret, err := s.sealer.Open(c.tokenSecretEnc)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt client token: %w", err)
+	}
+	jobs, err := s.store.Jobs(ctx, c.ID)
+	if err != nil {
+		return nil, err
+	}
+	cfg := &api.AgentConfig{
+		Target: api.PBSTarget{Host: t.Host, Fingerprint: t.Fingerprint, Datastore: t.Datastore, Namespace: c.Namespace,
+			AuthID: c.TokenID, Secret: secret},
+		Jobs: []api.JobConfig{},
+	}
+	for _, j := range jobs {
+		if !j.Enabled {
+			continue
+		}
+		cfg.Jobs = append(cfg.Jobs, api.JobConfig{ID: j.ID, Name: j.Name, Kind: j.Kind, BackupID: j.BackupID,
+			Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS,
+			Schedule: j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp})
+	}
+	b, _ := json.Marshal(cfg)
+	sum := sha256.Sum256(b)
+	cfg.Rev = hex.EncodeToString(sum[:])
+	return cfg, nil
+}
+
+// applyAgentState copies the agent-reported schedule view (next run, pending
+// catch-up) onto jobs for display.
+func applyAgentState(c *Client, jobs []*Job) {
+	for _, j := range jobs {
+		for _, st := range c.ScheduleState {
+			if st.JobID == j.ID {
+				j.NextRun, j.CatchUpPending = st.NextRun, st.CatchUpPending
+			}
+		}
+	}
+}
+
+// handleRegisterRun records a run the agent started on its own schedule (or a
+// scheduled run it had to skip). Idempotent on the run UUID.
+func (s *Server) handleRegisterRun(w http.ResponseWriter, r *http.Request, c *Client) {
+	var reg api.RunRegister
+	if err := decodeJSON(r, &reg); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if len(reg.UUID) < 16 || (reg.State != api.RunRunning && reg.State != api.RunMissed) {
+		httpError(w, http.StatusBadRequest, errors.New("invalid run registration"))
+		return
+	}
+	ctx := r.Context()
+	if reg.JobID > 0 {
+		if j, err := s.store.Job(ctx, reg.JobID); err != nil || j.ClientID != c.ID {
+			reg.JobID = 0 // job deleted meanwhile; keep the run for the record
+		}
+	}
+	id, created, err := s.store.RegisterRun(ctx, c.ID, reg)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if created {
+		s.log.Info("agent started run", "run", id, "client", c.Name, "job", reg.JobID, "trigger", reg.Trigger, "state", reg.State)
+		if reg.State == api.RunMissed {
+			go s.afterRun(context.WithoutCancel(ctx), id)
+		}
+	}
+	writeJSON(w, api.RunRegisterResponse{RunID: id})
 }
 
 // buildSpec turns a run into the self-contained job description sent to the agent.
@@ -208,6 +299,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, c *Client)
 	}
 	var logs []LogLine
 	var result *api.Result
+	var resultAt int64
 	var lastProgress *api.Progress
 	var lastTime int64
 	for _, e := range events {
@@ -223,7 +315,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, c *Client)
 		case "progress":
 			lastProgress = e.Progress
 		case "result":
-			result = e.Result
+			result, resultAt = e.Result, ts
 		}
 	}
 	if len(logs) > 0 {
@@ -238,7 +330,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, c *Client)
 		if !api.Terminal(result.State) {
 			result.State = api.RunFailed
 		}
-		if s.store.FinishRun(ctx, id, *result) {
+		if s.store.FinishRun(ctx, id, *result, resultAt) {
 			s.log.Info("run finished", "run", id, "client", c.Name, "state", result.State, "snapshot", result.Snapshot)
 			go s.afterRun(context.WithoutCancel(ctx), id)
 		}

@@ -59,14 +59,15 @@ type Message struct {
 
 func (n *Notifier) RunFinished(ctx context.Context, r *Run) {
 	ns := n.settings(ctx)
-	failed := r.State == api.RunFailed || r.State == api.RunLost
+	failed := r.State == api.RunFailed || r.State == api.RunLost || r.State == api.RunMissed
 	if (failed && !ns.OnFailure) || (!failed && !ns.OnSuccess) || r.State == api.RunCanceled {
 		return
 	}
 	sev := "info"
 	if failed {
 		sev = "error"
-	} else if r.State == api.RunWarning {
+	}
+	if r.State == api.RunWarning || r.State == api.RunMissed {
 		sev = "warning"
 	}
 	what := r.JobName
@@ -76,6 +77,9 @@ func (n *Notifier) RunFinished(ctx context.Context, r *Run) {
 	subj := fmt.Sprintf("[pbspc] %s: %s on %s", strings.ToUpper(r.State), what, r.ClientName)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Client:   %s\nJob:      %s (%s)\nState:    %s\n", r.ClientName, what, r.Kind, r.State)
+	if r.ScheduledFor > 0 {
+		fmt.Fprintf(&b, "Trigger:  %s (scheduled for %s, PC time)\n", r.Trigger, time.Unix(r.ScheduledFor, 0).Format(time.RFC1123))
+	}
 	if r.Snapshot != "" {
 		fmt.Fprintf(&b, "Snapshot: %s\n", r.Snapshot)
 	}

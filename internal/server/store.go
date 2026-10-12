@@ -65,7 +65,37 @@ func OpenStore(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return s, nil
+}
+
+// migrate adds columns introduced after the initial schema (idempotent).
+func (s *Store) migrate() error {
+	cols := []struct{ table, name, def string }{
+		{"jobs", "window_minutes", "INTEGER NOT NULL DEFAULT 60"},
+		{"jobs", "catch_up", "INTEGER NOT NULL DEFAULT 1"},
+		{"runs", "uuid", "TEXT NOT NULL DEFAULT ''"},
+		{"runs", "scheduled_for", "INTEGER NOT NULL DEFAULT 0"},
+		{"clients", "config_rev", "TEXT NOT NULL DEFAULT ''"},
+		{"clients", "schedule_state", "TEXT NOT NULL DEFAULT '[]'"},
+		{"clients", "time_zone", "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, c := range cols {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, c.table, c.name).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.name, c.def)); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS runs_uuid ON runs(client_id, uuid) WHERE uuid<>''`)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -107,25 +137,34 @@ type Client struct {
 	LastRun     *Run   `json:"last_run,omitempty"`
 	LastSuccess int64  `json:"last_success"`
 	CertSerial  string `json:"-"`
+	// Reported by the agent.
+	ConfigRev     string         `json:"config_rev"`
+	ScheduleState []api.JobState `json:"schedule_state"`
+	TimeZone      string         `json:"time_zone"`
+	ConfigSynced  bool           `json:"config_synced"`
 
 	tokenSecretEnc []byte
 }
 
 type Job struct {
-	ID        int64           `json:"id"`
-	ClientID  int64           `json:"client_id"`
-	Name      string          `json:"name"`
-	Kind      string          `json:"kind"`
-	BackupID  string          `json:"backup_id"`
-	Sources   []string        `json:"sources"`
-	Excludes  []string        `json:"excludes"`
-	Volumes   []string        `json:"volumes"`
-	UseVSS    bool            `json:"use_vss"`
-	Schedule  string          `json:"schedule"`
-	Retention pbs.KeepOptions `json:"retention"`
-	Enabled   bool            `json:"enabled"`
-	CreatedAt int64           `json:"created_at"`
-	NextRun   int64           `json:"next_run,omitempty"`
+	ID            int64           `json:"id"`
+	ClientID      int64           `json:"client_id"`
+	Name          string          `json:"name"`
+	Kind          string          `json:"kind"`
+	BackupID      string          `json:"backup_id"`
+	Sources       []string        `json:"sources"`
+	Excludes      []string        `json:"excludes"`
+	Volumes       []string        `json:"volumes"`
+	UseVSS        bool            `json:"use_vss"`
+	Schedule      string          `json:"schedule"`
+	WindowMinutes int             `json:"window_minutes"`
+	CatchUp       bool            `json:"catch_up"`
+	Retention     pbs.KeepOptions `json:"retention"`
+	Enabled       bool            `json:"enabled"`
+	CreatedAt     int64           `json:"created_at"`
+	// Reported by the agent (it owns the schedule).
+	NextRun        int64 `json:"next_run,omitempty"`
+	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
 }
 
 type Run struct {
@@ -144,6 +183,7 @@ type Run struct {
 	Error           string           `json:"error"`
 	Snapshot        string           `json:"snapshot"`
 	CancelRequested bool             `json:"cancel_requested"`
+	ScheduledFor    int64            `json:"scheduled_for"`
 	Restore         *api.RestoreSpec `json:"restore,omitempty"`
 	JobName         string           `json:"job_name"`
 	ClientName      string           `json:"client_name"`
@@ -261,15 +301,18 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 
 // ---- clients ----
 
-const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at`
+const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
+	config_rev, schedule_state, time_zone`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
+	var sched string
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
-		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt)
+		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
+	json.Unmarshal([]byte(sched), &c.ScheduleState)
 	c.Online = !c.Revoked && time.Since(time.Unix(c.LastSeen, 0)) < 2*time.Minute
 	return c, err
 }
@@ -315,8 +358,17 @@ func (s *Store) CreateClient(ctx context.Context, c *Client) error {
 	return nil
 }
 
-func (s *Store) TouchClient(ctx context.Context, id int64, hostname, osName, version string) {
-	s.db.ExecContext(ctx, `UPDATE clients SET last_seen=?, hostname=?, os=?, agent_version=? WHERE id=?`, now(), hostname, osName, version, id)
+func (s *Store) TouchClient(ctx context.Context, id int64, req api.PollRequest) {
+	sched, _ := json.Marshal(nonNilStates(req.Schedule))
+	s.db.ExecContext(ctx, `UPDATE clients SET last_seen=?, hostname=?, os=?, agent_version=?, config_rev=?, schedule_state=?, time_zone=?
+		WHERE id=?`, now(), req.Hostname, req.OS, req.AgentVersion, req.ConfigRev, sched, req.TimeZone, id)
+}
+
+func nonNilStates(s []api.JobState) []api.JobState {
+	if s == nil {
+		return []api.JobState{}
+	}
+	return s
 }
 
 func (s *Store) RevokeClient(ctx context.Context, id int64) error {
@@ -384,12 +436,13 @@ func (s *Store) ReleaseEnrollment(ctx context.Context, id int64) {
 
 // ---- jobs ----
 
-const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at`
+const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at, window_minutes, catch_up`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	j := &Job{}
 	var src, exc, vol, ret string
-	err := sc.Scan(&j.ID, &j.ClientID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &vol, &j.UseVSS, &j.Schedule, &ret, &j.Enabled, &j.CreatedAt)
+	err := sc.Scan(&j.ID, &j.ClientID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &vol, &j.UseVSS, &j.Schedule, &ret, &j.Enabled, &j.CreatedAt,
+		&j.WindowMinutes, &j.CatchUp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -433,8 +486,9 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	vol, _ := json.Marshal(nonNil(j.Volumes))
 	ret, _ := json.Marshal(j.Retention)
 	if j.ID == 0 {
-		res, err := s.db.ExecContext(ctx, `INSERT INTO jobs(client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, now())
+		res, err := s.db.ExecContext(ctx, `INSERT INTO jobs(client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention,
+			enabled, created_at, window_minutes, catch_up) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, now(), j.WindowMinutes, j.CatchUp)
 		if err != nil {
 			return err
 		}
@@ -442,7 +496,8 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?, schedule=?,
-		retention=?, enabled=? WHERE id=?`, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.ID)
+		retention=?, enabled=?, window_minutes=?, catch_up=? WHERE id=?`,
+		j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.WindowMinutes, j.CatchUp, j.ID)
 	return err
 }
 
@@ -461,14 +516,14 @@ func nonNil(s []string) []string {
 // ---- runs ----
 
 const runCols = `r.id, r.job_id, r.client_id, r.kind, r.state, r.trigger, r.restore_spec, r.queued_at, r.started_at, r.finished_at,
-	r.last_event_at, r.progress, r.result, r.error, r.snapshot, r.cancel_requested, COALESCE(j.name,''), COALESCE(c.name,'')`
+	r.last_event_at, r.progress, r.result, r.error, r.snapshot, r.cancel_requested, COALESCE(j.name,''), COALESCE(c.name,''), r.scheduled_for`
 const runFrom = ` FROM runs r LEFT JOIN jobs j ON j.id=r.job_id LEFT JOIN clients c ON c.id=r.client_id`
 
 func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	r := &Run{}
 	var rs, prog, res string
 	err := sc.Scan(&r.ID, &r.JobID, &r.ClientID, &r.Kind, &r.State, &r.Trigger, &rs, &r.QueuedAt, &r.StartedAt, &r.FinishedAt,
-		&r.LastEventAt, &prog, &res, &r.Error, &r.Snapshot, &r.CancelRequested, &r.JobName, &r.ClientName)
+		&r.LastEventAt, &prog, &res, &r.Error, &r.Snapshot, &r.CancelRequested, &r.JobName, &r.ClientName, &r.ScheduledFor)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -547,6 +602,31 @@ func (s *Store) QueueRun(ctx context.Context, jobID, clientID int64, kind, trigg
 	return res.LastInsertId()
 }
 
+// RegisterRun records a run the agent started (or skipped) on its own.
+// It is idempotent on (client, uuid) so agents can retry safely.
+func (s *Store) RegisterRun(ctx context.Context, clientID int64, reg api.RunRegister) (int64, bool, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM runs WHERE client_id=? AND uuid=?`, clientID, reg.UUID).Scan(&id)
+	if err == nil {
+		return id, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, err
+	}
+	state, started, finished, errMsg := api.RunRunning, reg.StartedAt, int64(0), ""
+	if reg.State == api.RunMissed { // never started: record when it was skipped
+		state, started, finished, errMsg = api.RunMissed, 0, reg.StartedAt, reg.Message
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO runs(job_id, client_id, kind, state, trigger, queued_at, started_at, finished_at,
+		last_event_at, error, uuid, scheduled_for) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		reg.JobID, clientID, reg.Kind, state, reg.Trigger, reg.StartedAt, started, finished, now(), errMsg, reg.UUID, reg.ScheduledFor)
+	if err != nil {
+		return 0, false, err
+	}
+	id, _ = res.LastInsertId()
+	return id, true, nil
+}
+
 // DispatchQueued marks all queued runs of a client as dispatched and returns them.
 func (s *Store) DispatchQueued(ctx context.Context, clientID int64) ([]*Run, error) {
 	rows, err := s.db.QueryContext(ctx, `UPDATE runs SET state='dispatched', last_event_at=? WHERE client_id=? AND state='queued' RETURNING id`, now(), clientID)
@@ -604,11 +684,16 @@ func (s *Store) RunStarted(ctx context.Context, id int64, at int64) {
 }
 
 // FinishRun stores the final result; returns false if the run was already terminal.
-func (s *Store) FinishRun(ctx context.Context, id int64, r api.Result) bool {
+// finishedAt is when the agent finished the run: reports can arrive much later
+// (e.g. spooled while the server was offline), so the arrival time is not used.
+func (s *Store) FinishRun(ctx context.Context, id int64, r api.Result, finishedAt int64) bool {
 	b, _ := json.Marshal(r)
+	if finishedAt <= 0 || finishedAt > now()+300 {
+		finishedAt = now()
+	}
 	res, err := s.db.ExecContext(ctx, `UPDATE runs SET state=?, result=?, error=?, snapshot=?, finished_at=?, last_event_at=?,
 		started_at=CASE WHEN started_at=0 THEN ? ELSE started_at END WHERE id=? AND state IN ('dispatched','running','lost')`,
-		r.State, b, r.Error, r.Snapshot, now(), now(), now(), id)
+		r.State, b, r.Error, r.Snapshot, finishedAt, now(), finishedAt, id)
 	if err != nil {
 		return false
 	}
