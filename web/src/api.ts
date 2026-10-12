@@ -1,0 +1,230 @@
+// Typed client for the pbspc-server admin API.
+
+export interface Progress {
+  phase: string
+  files: number
+  dirs: number
+  bytes_read: number
+  bytes_uploaded: number
+  bytes_total?: number
+  current_archive?: string
+  skipped: number
+}
+
+export interface Result {
+  state: string
+  error?: string
+  snapshot?: string
+  bytes_total: number
+  bytes_uploaded: number
+  chunks_new: number
+  chunks_reused: number
+  files: number
+  skipped: number
+}
+
+export interface RestoreSpec {
+  backup_id: string
+  backup_time: number
+  archive: string
+  paths?: string[]
+  target_dir: string
+  overwrite: 'skip' | 'overwrite' | 'if-newer'
+}
+
+export interface Run {
+  id: number
+  job_id: number
+  client_id: number
+  kind: string
+  state: string
+  trigger: string
+  queued_at: number
+  started_at: number
+  finished_at: number
+  last_event_at: number
+  progress: Progress
+  result: Result
+  error: string
+  snapshot: string
+  cancel_requested: boolean
+  restore?: RestoreSpec
+  job_name: string
+  client_name: string
+}
+
+export interface Client {
+  id: number
+  name: string
+  hostname: string
+  os: string
+  agent_version: string
+  target_id: number
+  namespace: string
+  token_id: string
+  last_seen: number
+  online: boolean
+  last_run?: Run
+  last_success: number
+  created_at: number
+}
+
+export interface Keep {
+  'keep-last'?: number
+  'keep-hourly'?: number
+  'keep-daily'?: number
+  'keep-weekly'?: number
+  'keep-monthly'?: number
+  'keep-yearly'?: number
+}
+
+export interface Job {
+  id: number
+  client_id: number
+  name: string
+  kind: 'files' | 'image'
+  backup_id: string
+  sources: string[]
+  excludes: string[]
+  volumes: string[]
+  use_vss: boolean
+  schedule: string
+  retention: Keep
+  enabled: boolean
+  next_run?: number
+}
+
+export interface Target {
+  id: number
+  name: string
+  host: string
+  fingerprint: string
+  datastore: string
+  root_ns: string
+  admin_auth_id: string
+  pbs_user: string
+}
+
+export interface Snapshot {
+  'backup-type': string
+  'backup-id': string
+  'backup-time': number
+  size: number
+  owner: string
+  protected: boolean
+  files: { filename: string; size: number; 'crypt-mode': string }[]
+  verification?: { state: string }
+}
+
+export interface LogLine {
+  id: number
+  ts: number
+  level: string
+  msg: string
+}
+
+export interface Dashboard {
+  clients: number
+  online: number
+  stale: number
+  active_runs: number
+  failed_recent: number
+  recent_runs: Run[]
+  active: Run[]
+}
+
+export interface NotifySettings {
+  webhook_url: string
+  smtp_host: string
+  smtp_port: number
+  smtp_user: string
+  smtp_password?: string
+  smtp_password_set?: boolean
+  smtp_from: string
+  smtp_to: string
+  smtp_tls: string
+  on_success: boolean
+  on_failure: boolean
+  stale_days: number
+}
+
+export class ApiError extends Error {
+  status: number
+  constructor(status: number, msg: string) {
+    super(msg)
+    this.status = status
+  }
+}
+
+let onUnauthorized: () => void = () => {}
+export function setUnauthorizedHandler(fn: () => void) {
+  onUnauthorized = fn
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetch('/api' + path, {
+    method,
+    credentials: 'same-origin',
+    headers: {
+      'X-PBSPC-Request': '1',
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  const text = await res.text()
+  const data = text ? JSON.parse(text) : null
+  if (!res.ok) {
+    if (res.status === 401 && path !== '/login') onUnauthorized()
+    throw new ApiError(res.status, data?.error ?? res.statusText)
+  }
+  return data as T
+}
+
+export const api = {
+  login: (username: string, password: string) => request<{ username: string }>('POST', '/login', { username, password }),
+  logout: () => request('POST', '/logout'),
+  me: () => request<{ username: string; version: string }>('GET', '/me'),
+  dashboard: () => request<Dashboard>('GET', '/dashboard'),
+
+  targets: () => request<Target[]>('GET', '/targets'),
+  saveTarget: (t: Partial<Target> & { admin_secret?: string }) =>
+    t.id ? request<Target>('PUT', `/targets/${t.id}`, strip(t, ['id'])) : request<Target>('POST', '/targets', t),
+  deleteTarget: (id: number) => request('DELETE', `/targets/${id}`),
+  testTarget: (t: Partial<Target> & { admin_secret?: string }) =>
+    request<{ version: string; release: string; datastores: string[]; datastore_found: boolean }>('POST', '/targets/test', t),
+
+  clients: () => request<Client[]>('GET', '/clients'),
+  client: (id: number) => request<{ client: Client; jobs: Job[]; runs: Run[] }>('GET', `/clients/${id}`),
+  revokeClient: (id: number) => request('DELETE', `/clients/${id}`),
+  snapshots: (id: number) => request<Snapshot[]>('GET', `/clients/${id}/snapshots`),
+  restore: (id: number, spec: RestoreSpec) => request<{ run_id: number }>('POST', `/clients/${id}/restore`, spec),
+
+  createEnrollment: (client_name: string, target_id: number, ttl_hours: number) =>
+    request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours }),
+
+  saveJob: (j: Partial<Job>) =>
+    j.id ? request<Job>('PUT', `/jobs/${j.id}`, strip(j, ['id', 'next_run', 'client_id', 'created_at'])) : request<Job>('POST', '/jobs', strip(j, ['next_run'])),
+  deleteJob: (id: number) => request('DELETE', `/jobs/${id}`),
+  runJob: (id: number) => request<{ run_id: number }>('POST', `/jobs/${id}/run`),
+
+  runs: (q: { client_id?: number; active?: boolean; limit?: number } = {}) => {
+    const p = new URLSearchParams()
+    if (q.client_id) p.set('client_id', String(q.client_id))
+    if (q.active) p.set('active', '1')
+    if (q.limit) p.set('limit', String(q.limit))
+    return request<Run[]>('GET', `/runs?${p}`)
+  },
+  run: (id: number) => request<Run>('GET', `/runs/${id}`),
+  runLogs: (id: number, after: number) => request<LogLine[]>('GET', `/runs/${id}/logs?after=${after}`),
+  cancelRun: (id: number) => request('POST', `/runs/${id}/cancel`),
+
+  notifySettings: () => request<NotifySettings>('GET', '/settings/notifications'),
+  saveNotifySettings: (s: NotifySettings) => request<NotifySettings>('PUT', '/settings/notifications', strip(s, ['smtp_password_set'])),
+  testNotify: () => request('POST', '/settings/notifications/test'),
+}
+
+function strip<T extends object>(o: T, keys: string[]): Partial<T> {
+  const c = { ...o } as Record<string, unknown>
+  for (const k of keys) delete c[k]
+  return c as Partial<T>
+}

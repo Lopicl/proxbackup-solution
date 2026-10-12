@@ -1,0 +1,8 @@
+/bin/
+web/node_modules/
+# built UI is embedded at compile time; keep only the placeholder in git
+internal/server/webdist/app/
+.nimbalyst/
+*.db
+*.db-wal
+*.db-shm
