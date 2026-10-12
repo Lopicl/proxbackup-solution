@@ -1,5 +1,5 @@
-// Command pbspc-agent is the Windows backup agent. It runs as a Windows
-// service, receives jobs from pbspc-server and backs up directly to a
+// Command proxbackup-agent is the Windows backup agent. It runs as a Windows
+// service, receives jobs from proxbackup-server and backs up directly to a
 // Proxmox Backup Server. It also has standalone commands for ad-hoc use.
 package main
 
@@ -16,29 +16,29 @@ import (
 
 	"github.com/kardianos/service"
 
-	"pbspc/internal/agent"
-	"pbspc/internal/api"
+	"proxbackup/internal/agent"
+	"proxbackup/internal/api"
 )
 
 // version is set at build time from ./VERSION (see Makefile).
 var version = "dev"
 
-const usage = `pbspc-agent — Proxmox Backup Server agent for Windows
+const usage = `proxbackup-agent — Proxmox Backup Server agent for Windows
 
 Usage:
-  pbspc-agent enroll <token>         enroll with a pbspc-server (token from the web UI)
-  pbspc-agent install | uninstall    install/remove the Windows service
-  pbspc-agent start | stop           start/stop the service
-  pbspc-agent run                    run in the foreground (what the service executes)
-  pbspc-agent backup  [flags]        ad-hoc file backup straight to PBS (no server needed)
-  pbspc-agent image   [flags]        ad-hoc volume image backup
-  pbspc-agent restore [flags]        restore an archive from PBS
-  pbspc-agent version
+  proxbackup-agent enroll <token>         enroll with a proxbackup-server (token from the web UI)
+  proxbackup-agent install | uninstall    install/remove the Windows service
+  proxbackup-agent start | stop           start/stop the service
+  proxbackup-agent run                    run in the foreground (what the service executes)
+  proxbackup-agent backup  [flags]        ad-hoc file backup straight to PBS (no server needed)
+  proxbackup-agent image   [flags]        ad-hoc volume image backup
+  proxbackup-agent restore [flags]        restore an archive from PBS
+  proxbackup-agent version
 
 Global flags:
   -data-dir string   agent state directory (default %s)
 
-Run "pbspc-agent backup -h" for the ad-hoc flags.
+Run "proxbackup-agent backup -h" for the ad-hoc flags.
 `
 
 func main() {
@@ -58,7 +58,7 @@ func main() {
 	case "enroll":
 		fs.Parse(args)
 		if fs.NArg() != 1 {
-			fatalf("usage: pbspc-agent enroll <token>")
+			fatalf("usage: proxbackup-agent enroll <token>")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
@@ -81,7 +81,7 @@ func main() {
 }
 
 func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "pbspc-agent: "+format+"\n", args...)
+	fmt.Fprintf(os.Stderr, "proxbackup-agent: "+format+"\n", args...)
 	os.Exit(1)
 }
 
@@ -125,7 +125,7 @@ func (p *program) Stop(service.Service) error {
 func serviceCommand(cmd, dataDir string, log *slog.Logger) error {
 	p := &program{dataDir: dataDir, log: log}
 	svc, err := service.New(p, &service.Config{
-		Name:        "pbspc-agent",
+		Name:        "proxbackup-agent",
 		DisplayName: "ProxBackup Agent",
 		Description: "Backs up this PC to Proxmox Backup Server (managed by ProxBackup Console).",
 		Arguments:   []string{"run", "-data-dir", dataDir},
@@ -180,7 +180,7 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 	host := fs.String("pbs", "", "PBS host[:port]")
 	fp := fs.String("fingerprint", "", "PBS certificate SHA-256 fingerprint")
 	authID := fs.String("auth-id", "", "API token id (user@realm!name)")
-	secretFile := fs.String("secret-file", "", "file containing the API token secret (or env PBSPC_SECRET)")
+	secretFile := fs.String("secret-file", "", "file containing the API token secret (or env PROXBACKUP_SECRET)")
 	store := fs.String("store", "", "datastore")
 	ns := fs.String("ns", "", "namespace")
 	id := fs.String("id", "", "backup id (default: hostname)")
@@ -194,7 +194,7 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 	fs.Var(&paths, "path", "restore: only restore this archive path (repeatable)")
 	fs.Parse(args)
 
-	secret := os.Getenv("PBSPC_SECRET")
+	secret := os.Getenv("PROXBACKUP_SECRET")
 	if *secretFile != "" {
 		b, err := os.ReadFile(*secretFile)
 		if err != nil {

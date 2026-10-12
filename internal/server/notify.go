@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"pbspc/internal/api"
+	"proxbackup/internal/api"
 )
 
 // NotifySettings are stored in the settings table under "notifications".
@@ -74,7 +74,7 @@ func (n *Notifier) RunFinished(ctx context.Context, r *Run) {
 	if what == "" {
 		what = r.Kind
 	}
-	subj := fmt.Sprintf("[pbspc] %s: %s on %s", strings.ToUpper(r.State), what, r.ClientName)
+	subj := fmt.Sprintf("[ProxBackup] %s: %s on %s", strings.ToUpper(r.State), what, r.ClientName)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Client:   %s\nJob:      %s (%s)\nState:    %s\n", r.ClientName, what, r.Kind, r.State)
 	if r.ScheduledFor > 0 {
@@ -117,7 +117,7 @@ func (n *Notifier) CheckStale(ctx context.Context) {
 				when = time.Unix(t, 0).Format(time.RFC1123)
 			}
 			n.send(ctx, ns, Message{Event: "client.stale", Severity: "warning", Client: c.Name,
-				Subject: fmt.Sprintf("[pbspc] %s has no backup for %d days", c.Name, ns.StaleDays),
+				Subject: fmt.Sprintf("[ProxBackup] %s has no backup for %d days", c.Name, ns.StaleDays),
 				Text:    fmt.Sprintf("Client %s: last successful backup %s. Last seen %s.\n", c.Name, when, time.Unix(c.LastSeen, 0).Format(time.RFC1123))})
 		}
 	}
@@ -271,8 +271,8 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("no webhook or SMTP server configured"))
 		return
 	}
-	errs := s.notify.send(r.Context(), ns, Message{Event: "test", Severity: "info", Subject: "[pbspc] test notification",
-		Text: "This is a test notification from pbspc-server.\n"})
+	errs := s.notify.send(r.Context(), ns, Message{Event: "test", Severity: "info", Subject: "[ProxBackup] test notification",
+		Text: "This is a test notification from ProxBackup Console.\n"})
 	if len(errs) > 0 {
 		httpError(w, 502, errors.Join(errs...))
 		return

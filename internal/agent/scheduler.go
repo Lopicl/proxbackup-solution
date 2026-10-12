@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"pbspc/internal/api"
-	"pbspc/internal/schedule"
+	"proxbackup/internal/api"
+	"proxbackup/internal/schedule"
 )
 
 // Scheduler decides when scheduled backups start. The server only pushes the

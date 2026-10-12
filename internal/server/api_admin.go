@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"pbspc/internal/api"
-	"pbspc/internal/schedule"
-	"pbspc/pkg/pbs"
+	"proxbackup/internal/api"
+	"proxbackup/internal/schedule"
+	"proxbackup/pkg/pbs"
 )
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +100,7 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	req.RootNS = strings.Trim(req.RootNS, "/")
 	if req.PBSUser == "" {
-		req.PBSUser = "pbspc@pbs"
+		req.PBSUser = "proxbackup@pbs"
 	}
 	switch {
 	case req.Name == "" || req.Host == "" || req.Datastore == "" || req.AdminAuthID == "":
@@ -387,7 +387,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint()})
 	enc := base64.RawURLEncoding.EncodeToString(tok)
 	writeJSON(w, map[string]string{"client_name": name, "token": enc,
-		"command": `pbspc-agent.exe enroll ` + enc + ` && pbspc-agent.exe install && pbspc-agent.exe start`})
+		"command": `proxbackup-agent.exe enroll ` + enc + ` && proxbackup-agent.exe install && proxbackup-agent.exe start`})
 }
 
 // ---- jobs ----

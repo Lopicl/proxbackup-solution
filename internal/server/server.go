@@ -1,4 +1,4 @@
-// Package server implements pbspc-server: the management API, web UI and the
+// Package server implements proxbackup-server: the management API, web UI and the
 // control-plane endpoint agents connect to. Agents own their schedules: the
 // server pushes job configuration and records what the agents report.
 package server
@@ -43,7 +43,7 @@ type Server struct {
 
 // New opens the data directory and prepares the server.
 func New(cfg Config, log *slog.Logger) (*Server, error) {
-	store, err := OpenStore(filepath.Join(cfg.DataDir, "pbspc.db"))
+	store, err := OpenStore(filepath.Join(cfg.DataDir, "proxbackup.db"))
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (s *Server) Run(ctx context.Context) error {
 	errc := make(chan error, 2)
 	go func() { errc <- ui.ListenAndServeTLS("", "") }()
 	go func() { errc <- agent.ListenAndServeTLS("", "") }()
-	s.log.Info("pbspc-server listening", "ui", "https://"+displayAddr(s.cfg.UIAddr), "agents", s.cfg.AgentAddr, "public_url", s.cfg.PublicURL)
+	s.log.Info("proxbackup-server listening", "ui", "https://"+displayAddr(s.cfg.UIAddr), "agents", s.cfg.AgentAddr, "public_url", s.cfg.PublicURL)
 	select {
 	case <-ctx.Done():
 	case err := <-errc:

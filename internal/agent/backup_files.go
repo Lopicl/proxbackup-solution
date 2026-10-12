@@ -9,9 +9,9 @@ import (
 	"path"
 	"path/filepath"
 
-	"pbspc/internal/api"
-	"pbspc/pkg/pbs"
-	"pbspc/pkg/pxar"
+	"proxbackup/internal/api"
+	"proxbackup/pkg/pbs"
+	"proxbackup/pkg/pxar"
 )
 
 type fileSource struct {

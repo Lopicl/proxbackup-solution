@@ -54,7 +54,7 @@ func LoadOrCreatePKI(dir string, hosts []string) (*PKI, error) {
 		}
 		tmpl := &x509.Certificate{
 			SerialNumber:          randSerial(),
-			Subject:               pkix.Name{CommonName: "pbspc internal CA", Organization: []string{"pbspc"}},
+			Subject:               pkix.Name{CommonName: "ProxBackup internal CA", Organization: []string{"ProxBackup"}},
 			NotBefore:             time.Now().Add(-time.Hour),
 			NotAfter:              time.Now().AddDate(20, 0, 0),
 			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -136,7 +136,7 @@ func (p *PKI) issueServerCert(certPath, keyPath string, hosts []string) error {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: randSerial(),
-		Subject:      pkix.Name{CommonName: "pbspc-server"},
+		Subject:      pkix.Name{CommonName: "proxbackup-server"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().AddDate(2, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -176,7 +176,7 @@ func (p *PKI) SignClientCSR(csrPEM []byte, clientName string) (certPEM []byte, s
 	sn := randSerial()
 	tmpl := &x509.Certificate{
 		SerialNumber: sn,
-		Subject:      pkix.Name{CommonName: clientName, Organization: []string{"pbspc-agent"}},
+		Subject:      pkix.Name{CommonName: clientName, Organization: []string{"proxbackup-agent"}},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().AddDate(5, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -199,14 +199,14 @@ func writePEM(path, typ string, der []byte, mode os.FileMode) error {
 // Sealer encrypts secrets at rest (PBS token secrets, SMTP password) with AES-256-GCM.
 type Sealer struct{ aead cipher.AEAD }
 
-// LoadOrCreateSealer reads the master key from env PBSPC_MASTER_KEY (base64)
+// LoadOrCreateSealer reads the master key from env PROXBACKUP_MASTER_KEY (base64)
 // or dir/master.key, generating the file on first start.
 func LoadOrCreateSealer(dir string) (*Sealer, error) {
 	var key []byte
-	if env := os.Getenv("PBSPC_MASTER_KEY"); env != "" {
+	if env := os.Getenv("PROXBACKUP_MASTER_KEY"); env != "" {
 		k, err := base64.StdEncoding.DecodeString(env)
 		if err != nil || len(k) != 32 {
-			return nil, errors.New("PBSPC_MASTER_KEY must be 32 bytes, base64 encoded")
+			return nil, errors.New("PROXBACKUP_MASTER_KEY must be 32 bytes, base64 encoded")
 		}
 		key = k
 	} else {

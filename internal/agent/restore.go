@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"pbspc/internal/api"
-	"pbspc/pkg/pbs"
-	"pbspc/pkg/pxar"
+	"proxbackup/internal/api"
+	"proxbackup/pkg/pbs"
+	"proxbackup/pkg/pxar"
 )
 
 func (j *job) runRestore(ctx context.Context) (api.Result, error) {
@@ -166,7 +166,7 @@ func (j *job) restoreFile(dec *pxar.Decoder, e *pxar.Entry, target, overwrite st
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
-	tmp := target + ".pbspc-restore"
+	tmp := target + ".proxbackup-restore"
 	f, err := os.Create(tmp)
 	if err != nil {
 		j.skipped.Add(1)

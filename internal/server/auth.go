@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	sessionCookie = "pbspc_session"
+	sessionCookie = "proxbackup_session"
 	sessionTTL    = 12 * time.Hour
-	csrfHeader    = "X-PBSPC-Request" // custom header: browsers won't send it cross-origin without CORS
+	csrfHeader    = "X-PROXBACKUP-Request" // custom header: browsers won't send it cross-origin without CORS
 )
 
 // HashPassword returns an argon2id hash in the form argon2id$<salt>$<hash>.

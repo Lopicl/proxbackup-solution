@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  End-to-end test of pbspc-agent on a real Windows machine (run elevated / as SYSTEM).
+  End-to-end test of proxbackup-agent on a real Windows machine (run elevated / as SYSTEM).
 
 .DESCRIPTION
   Builds a test tree exercising Windows specifics (VSS on a locked file, attributes,
@@ -10,8 +10,8 @@
   Results are written as JSON to $Work\results.json.
 
 .EXAMPLE
-  .\windows-vm-test.ps1 -Agent C:\pbspc\pbspc-agent.exe -PbsHost 192.168.64.1:18007 `
-     -Fingerprint aa:bb:... -AuthId 'admin@pbs!e2e' -Secret xxxx -Store ds1 -Ns pbspc-win
+  .\windows-vm-test.ps1 -Agent C:\proxbackup\proxbackup-agent.exe -PbsHost 192.168.64.1:18007 `
+     -Fingerprint aa:bb:... -AuthId 'admin@pbs!e2e' -Secret xxxx -Store ds1 -Ns proxbackup-win
 #>
 param(
   [Parameter(Mandatory)] [string]$Agent,
@@ -20,9 +20,9 @@ param(
   [Parameter(Mandatory)] [string]$AuthId,
   [Parameter(Mandatory)] [string]$Secret,
   [string]$Store = 'ds1',
-  [string]$Ns = 'pbspc-win',
+  [string]$Ns = 'proxbackup-win',
   [string]$Id = 'win-vm',
-  [string]$Work = 'C:\pbspc-test',
+  [string]$Work = 'C:\proxbackup-test',
   [switch]$SkipImage
 )
 $ErrorActionPreference = 'Stop'
@@ -32,7 +32,7 @@ function Check($name, $ok, $detail = '') {
   $results.checks[$name] = [ordered]@{ ok = [bool]$ok; detail = "$detail" }
   Write-Host ("[{0}] {1} {2}" -f ($(if ($ok) { 'PASS' } else { 'FAIL' })), $name, $detail)
 }
-$env:PBSPC_SECRET = $Secret
+$env:PROXBACKUP_SECRET = $Secret
 $common = @('-pbs', $PbsHost, '-fingerprint', $Fingerprint, '-auth-id', $AuthId, '-store', $Store, '-ns', $Ns, '-id', $Id)
 
 function RunAgent([string[]]$agentArgs) {
@@ -120,11 +120,11 @@ create vdisk file="$vhd" maximum=256 type=expandable
 select vdisk file="$vhd"
 attach vdisk
 create partition primary
-format fs=ntfs quick label=PBSPCTEST
+format fs=ntfs quick label=PROXBACKUPTEST
 assign letter=$letter
 "@ | Set-Content "$Work\dp.txt" -Encoding ASCII
     diskpart /s "$Work\dp.txt" | Out-Null
-    $marker = 'PBSPC-IMAGE-MARKER-' + [guid]::NewGuid()
+    $marker = 'PROXBACKUP-IMAGE-MARKER-' + [guid]::NewGuid()
     Set-Content "$($letter):\marker.txt" $marker
     $r4 = RunAgent (@('image') + $common + @('-id', "$Id-image", '-source', "$($letter):"))
     $results.image_output = $r4.text

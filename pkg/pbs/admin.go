@@ -132,7 +132,7 @@ func (c *Client) EnsureNamespace(ctx context.Context, store, ns string) error {
 	return nil
 }
 
-// EnsureUser creates a PBS realm user (e.g. "pbspc@pbs") if it does not exist.
+// EnsureUser creates a PBS realm user (e.g. "proxbackup@pbs") if it does not exist.
 func (c *Client) EnsureUser(ctx context.Context, userid, comment string) error {
 	err := c.Call(ctx, http.MethodGet, "access/users/"+url.PathEscape(userid), nil, nil)
 	if err == nil {

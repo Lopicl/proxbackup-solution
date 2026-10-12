@@ -1,4 +1,4 @@
-// Command pbspc-server is ProxBackup Console, the management server for ProxBackup agents.
+// Command proxbackup-server is ProxBackup Console, the management server for ProxBackup agents.
 package main
 
 import (
@@ -12,7 +12,7 @@ import (
 	"strings"
 	"syscall"
 
-	"pbspc/internal/server"
+	"proxbackup/internal/server"
 )
 
 // version is set at build time from ./VERSION (see Makefile).
@@ -21,13 +21,13 @@ var version = "dev"
 func main() {
 	cfg := server.Config{Version: version}
 	var hosts string
-	flag.StringVar(&cfg.DataDir, "data-dir", envOr("PBSPC_DATA_DIR", "/var/lib/pbspc"), "data directory (database, CA, keys)")
-	flag.StringVar(&cfg.UIAddr, "ui-addr", envOr("PBSPC_UI_ADDR", ":8443"), "admin web UI listen address")
-	flag.StringVar(&cfg.AgentAddr, "agent-addr", envOr("PBSPC_AGENT_ADDR", ":8444"), "agent API listen address (mTLS)")
-	flag.StringVar(&cfg.PublicURL, "public-url", os.Getenv("PBSPC_PUBLIC_URL"), "agent-facing URL, e.g. https://backup.example.com:8444")
-	flag.StringVar(&hosts, "hostnames", os.Getenv("PBSPC_HOSTNAMES"), "comma separated host names/IPs for the server certificate")
+	flag.StringVar(&cfg.DataDir, "data-dir", envOr("PROXBACKUP_DATA_DIR", "/var/lib/proxbackup"), "data directory (database, CA, keys)")
+	flag.StringVar(&cfg.UIAddr, "ui-addr", envOr("PROXBACKUP_UI_ADDR", ":8443"), "admin web UI listen address")
+	flag.StringVar(&cfg.AgentAddr, "agent-addr", envOr("PROXBACKUP_AGENT_ADDR", ":8444"), "agent API listen address (mTLS)")
+	flag.StringVar(&cfg.PublicURL, "public-url", os.Getenv("PROXBACKUP_PUBLIC_URL"), "agent-facing URL, e.g. https://backup.example.com:8444")
+	flag.StringVar(&hosts, "hostnames", os.Getenv("PROXBACKUP_HOSTNAMES"), "comma separated host names/IPs for the server certificate")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: pbspc-server [flags]\n       pbspc-server passwd [username]   set an admin password\n\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "Usage: proxbackup-server [flags]\n       proxbackup-server passwd [username]   set an admin password\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -65,9 +65,9 @@ func main() {
 		return
 	}
 
-	if pw, err := srv.EnsureAdmin(ctx, os.Getenv("PBSPC_ADMIN_PASSWORD")); err != nil {
+	if pw, err := srv.EnsureAdmin(ctx, os.Getenv("PROXBACKUP_ADMIN_PASSWORD")); err != nil {
 		fatal(err)
-	} else if pw != "" && os.Getenv("PBSPC_ADMIN_PASSWORD") == "" {
+	} else if pw != "" && os.Getenv("PROXBACKUP_ADMIN_PASSWORD") == "" {
 		log.Warn("created initial admin account — change this password", "username", "admin", "password", pw)
 	}
 	if cfg.PublicURL == "" {
@@ -86,6 +86,6 @@ func envOr(k, def string) string {
 }
 
 func fatal(err error) {
-	fmt.Fprintln(os.Stderr, "pbspc-server:", err)
+	fmt.Fprintln(os.Stderr, "proxbackup-server:", err)
 	os.Exit(1)
 }

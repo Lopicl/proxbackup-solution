@@ -24,7 +24,7 @@ import (
 const (
 	protocolBackupV1 = "proxmox-backup-protocol-v1"
 	protocolReaderV1 = "proxmox-backup-reader-protocol-v1"
-	userAgent        = "pbspc/0.1 (proxmox-backup-client compatible)"
+	userAgent        = "proxbackup/0.1 (proxmox-backup-client compatible)"
 	defaultPort      = "8007"
 )
 

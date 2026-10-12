@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"pbspc/internal/api"
+	"proxbackup/internal/api"
 )
 
 // Runner connects the agent to the management server and executes jobs.

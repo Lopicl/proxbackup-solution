@@ -7,13 +7,13 @@
 set -euo pipefail
 
 IMAGE=${PBS_IMAGE:-ayufan/proxmox-backup-server:v4.2.0-1}
-NAME=pbspc-e2e
+NAME=proxbackup-e2e
 PORT=${PBS_PORT:-18007}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 if ! docker inspect "$NAME" >/dev/null 2>&1; then
-  docker run -d --name "$NAME" -p "$PORT:8007" --tmpfs /run -v pbspc-e2e-data:/backups "$IMAGE" >/dev/null
+  docker run -d --name "$NAME" -p "$PORT:8007" --tmpfs /run -v proxbackup-e2e-data:/backups "$IMAGE" >/dev/null
 fi
 for _ in $(seq 1 60); do
   curl -sk -o /dev/null "https://localhost:$PORT/" && break
@@ -33,9 +33,9 @@ docker exec "$NAME" proxmox-backup-manager user generate-token admin@pbs e2e | s
 docker exec "$NAME" proxmox-backup-manager acl update / Admin --auth-id 'admin@pbs!e2e'
 FP=$(docker exec "$NAME" proxmox-backup-manager cert info | sed -n 's/^Fingerprint (sha256): //p')
 
-PBSPC_E2E_HOST="localhost:$PORT" PBSPC_E2E_FINGERPRINT="$FP" PBSPC_E2E_TOKEN_FILE="$WORK/token.json" \
-  PBSPC_E2E_STORE=ds1 go test ./pkg/pbs/ -run E2E -count=1 -v
+PROXBACKUP_E2E_HOST="localhost:$PORT" PROXBACKUP_E2E_FINGERPRINT="$FP" PROXBACKUP_E2E_TOKEN_FILE="$WORK/token.json" \
+  PROXBACKUP_E2E_STORE=ds1 go test ./pkg/pbs/ -run E2E -count=1 -v
 
 if [ "${KEEP:-1}" = 0 ]; then
-  docker rm -f "$NAME" >/dev/null && docker volume rm pbspc-e2e-data >/dev/null
+  docker rm -f "$NAME" >/dev/null && docker volume rm proxbackup-e2e-data >/dev/null
 fi

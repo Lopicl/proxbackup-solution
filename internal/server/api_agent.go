@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"pbspc/internal/api"
-	"pbspc/pkg/pbs"
+	"proxbackup/internal/api"
+	"proxbackup/pkg/pbs"
 )
 
 func (s *Server) caPool() *x509.CertPool {
@@ -409,7 +409,7 @@ func (s *Server) provisionClient(ctx context.Context, t *Target, name string) (n
 		return "", "", "", fmt.Errorf("namespace: %w", err)
 	}
 	user := t.PBSUser
-	if err = pc.EnsureUser(ctx, user, "pbspc managed agents"); err != nil {
+	if err = pc.EnsureUser(ctx, user, "proxbackup managed agents"); err != nil {
 		return "", "", "", fmt.Errorf("user %s: %w", user, err)
 	}
 	// Token privileges are intersected with the owning user's, so the user needs
@@ -418,7 +418,7 @@ func (s *Server) provisionClient(ctx context.Context, t *Target, name string) (n
 		return "", "", "", fmt.Errorf("user ACL: %w", err)
 	}
 	pc.DeleteToken(ctx, user, name) // stale token from a previous enrollment of the same name
-	tokenID, secret, err = pc.CreateToken(ctx, user, name, "pbspc agent "+name)
+	tokenID, secret, err = pc.CreateToken(ctx, user, name, "proxbackup agent "+name)
 	if err != nil {
 		return "", "", "", fmt.Errorf("token: %w", err)
 	}

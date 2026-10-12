@@ -1,4 +1,4 @@
-// Typed client for the pbspc-server admin API.
+// Typed client for the proxbackup-server admin API.
 
 export interface Progress {
   phase: string
@@ -172,7 +172,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     method,
     credentials: 'same-origin',
     headers: {
-      'X-PBSPC-Request': '1',
+      'X-PROXBACKUP-Request': '1',
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,

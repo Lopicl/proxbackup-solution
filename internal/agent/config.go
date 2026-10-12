@@ -19,7 +19,7 @@ import (
 	"runtime"
 	"strings"
 
-	"pbspc/internal/api"
+	"proxbackup/internal/api"
 )
 
 // Config is the persisted agent state.
@@ -38,9 +38,9 @@ func DefaultDataDir() string {
 		if pd == "" {
 			pd = `C:\ProgramData`
 		}
-		return filepath.Join(pd, "pbspc")
+		return filepath.Join(pd, "proxbackup")
 	}
-	return "/var/lib/pbspc-agent"
+	return "/var/lib/proxbackup-agent"
 }
 
 func (c *Config) path(name string) string { return filepath.Join(c.dir, name) }
@@ -50,7 +50,7 @@ func LoadConfig(dir string) (*Config, error) {
 	b, err := os.ReadFile(filepath.Join(dir, "agent.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("agent is not enrolled (run: pbspc-agent enroll <token>)")
+			return nil, errors.New("agent is not enrolled (run: proxbackup-agent enroll <token>)")
 		}
 		return nil, err
 	}
@@ -169,7 +169,7 @@ func newKeyAndCSR(hostname string) (keyPEM, csrPEM []byte, err error) {
 		return nil, nil, err
 	}
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: hostname, Organization: []string{"pbspc-agent"}},
+		Subject: pkix.Name{CommonName: hostname, Organization: []string{"proxbackup-agent"}},
 	}, key)
 	if err != nil {
 		return nil, nil, err

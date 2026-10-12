@@ -6,8 +6,8 @@ ordinary PBS snapshots: deduplicated, verifiable, syncable, prunable.
 
 | Component | What it is |
 |-----------|------------|
-| `pbspc-agent` | **ProxBackup Agent**, a Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
-| `pbspc-server` | **ProxBackup Console**, the on-premises management server with an embedded web UI: enrollment, jobs and schedules, run history and live logs, snapshot browser, restore, retention, notifications. |
+| `proxbackup-agent` | **ProxBackup Agent**, a Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
+| `proxbackup-server` | **ProxBackup Console**, the on-premises management server with an embedded web UI: enrollment, jobs and schedules, run history and live logs, snapshot browser, restore, retention, notifications. |
 | `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar v1 archive format. |
 
 See [docs/architecture.md](docs/architecture.md) for the design, security model and roadmap.
@@ -16,22 +16,22 @@ See [docs/architecture.md](docs/architecture.md) for the design, security model 
 
 ```sh
 git config core.hooksPath .githooks   # once per clone: enables build-number bumping
-make            # builds web UI + bin/pbspc-server (linux/amd64, darwin) + bin/pbspc-agent.exe (windows/amd64)
+make            # builds web UI + bin/proxbackup-server (linux/amd64, darwin) + bin/proxbackup-agent.exe (windows/amd64)
 ```
 
-1. **PBS:** create an API token with admin rights for the server, e.g. `root@pam!pbspc` with
+1. **PBS:** create an API token with admin rights for the server, e.g. `root@pam!proxbackup` with
    *privilege separation off*. Note the certificate fingerprint (Dashboard → *Show Fingerprint*).
 2. **Server:**
    ```sh
-   pbspc-server -data-dir /var/lib/pbspc -public-url https://backup.example.lan:8444 -hostnames backup.example.lan
+   proxbackup-server -data-dir /var/lib/proxbackup -public-url https://backup.example.lan:8444 -hostnames backup.example.lan
    ```
    The initial `admin` password is printed once in the log. You can set it beforehand with
-   `PBSPC_ADMIN_PASSWORD`, or change it later with `pbspc-server passwd`.
+   `PROXBACKUP_ADMIN_PASSWORD`, or change it later with `proxbackup-server passwd`.
    Open `https://backup.example.lan:8443`, then go to *PBS servers → Add* and use *Test connection*.
 3. **Client:** go to *Clients → Add client*. Copy the command it shows to the PC and run it in an
    elevated prompt:
    ```bat
-   pbspc-agent.exe enroll <token> && pbspc-agent.exe install && pbspc-agent.exe start
+   proxbackup-agent.exe enroll <token> && proxbackup-agent.exe install && proxbackup-agent.exe start
    ```
    The server creates the PBS namespace `pcs/<client>` and a token that has **DatastoreBackup on
    that namespace only**.
@@ -44,9 +44,9 @@ make            # builds web UI + bin/pbspc-server (linux/amd64, darwin) + bin/p
 Ad-hoc use without a server (handy for testing):
 
 ```bat
-pbspc-agent.exe backup -pbs pbs.lan -fingerprint aa:bb:... -auth-id "user@pbs!pc" -secret-file token.txt ^
+proxbackup-agent.exe backup -pbs pbs.lan -fingerprint aa:bb:... -auth-id "user@pbs!pc" -secret-file token.txt ^
                        -store ds1 -ns pcs/test -source C:\Users\alice
-pbspc-agent.exe restore ... -id <backup-id> -time <unix-time> -archive c-users-alice.pxar.didx -target C:\Restore
+proxbackup-agent.exe restore ... -id <backup-id> -time <unix-time> -archive c-users-alice.pxar.didx -target C:\Restore
 ```
 
 ## Development
@@ -56,7 +56,7 @@ Requires Go ≥ 1.26 and Node ≥ 20.
 ```sh
 make test          # unit tests (blob/chunker/index/pxar)
 make e2e           # starts a PBS 4.x container and runs the protocol E2E test against it
-cd web && PBSPC_DEV_API=https://127.0.0.1:8443 npm run dev   # UI dev server with API proxy
+cd web && PROXBACKUP_DEV_API=https://127.0.0.1:8443 npm run dev   # UI dev server with API proxy
 ```
 
 ## Versioning
@@ -104,7 +104,7 @@ reads, attribute and timestamp restore, the service wrapper). They compile and v
 Known gaps (see the roadmap):
 
 - no `catalog.pcat1.didx` yet, so the PBS GUI file browser can't list our archives (single-file
-  download via the PBS API works, and so does restore through pbspc)
+  download via the PBS API works, and so does restore through ProxBackup)
 - no client-side encryption
 - no NTFS ACLs or alternate data streams
 - no tray app

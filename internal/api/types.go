@@ -1,4 +1,4 @@
-// Package api defines the JSON contract between pbspc-agent and pbspc-server.
+// Package api defines the JSON contract between proxbackup-agent and proxbackup-server.
 package api
 
 import "time"

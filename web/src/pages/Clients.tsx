@@ -131,7 +131,7 @@ function AddClient({ onClose }: { onClose: () => void }) {
           <p>
             Enrollment token for <b>{result.client_name}</b> created. It can be used once and expires in {ttl} hours.
           </p>
-          <p>On the Windows PC, copy <code>pbspc-agent.exe</code> to a folder (e.g. <code>C:\Program Files\pbspc</code>) and run in an elevated prompt:</p>
+          <p>On the Windows PC, copy <code>proxbackup-agent.exe</code> to a folder (e.g. <code>C:\Program Files\proxbackup</code>) and run in an elevated prompt:</p>
           <pre className="copy" onClick={(e) => navigator.clipboard?.writeText((e.target as HTMLElement).innerText)}>
             {result.command}
           </pre>

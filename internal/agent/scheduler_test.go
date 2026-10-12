@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"pbspc/internal/api"
+	"proxbackup/internal/api"
 )
 
 type schedHarness struct {

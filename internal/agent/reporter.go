@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"pbspc/internal/api"
+	"proxbackup/internal/api"
 )
 
 // reporter delivers a run's events to the server in order. Runs the agent

@@ -10,8 +10,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"pbspc/internal/api"
-	"pbspc/pkg/pbs"
+	"proxbackup/internal/api"
+	"proxbackup/pkg/pbs"
 )
 
 const schema = `
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS targets (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, host TEXT NOT NULL, fingerprint TEXT NOT NULL DEFAULT '',
   datastore TEXT NOT NULL, root_ns TEXT NOT NULL DEFAULT '', admin_auth_id TEXT NOT NULL, admin_secret_enc BLOB NOT NULL,
-  pbs_user TEXT NOT NULL DEFAULT 'pbspc@pbs', created_at INTEGER NOT NULL);
+  pbs_user TEXT NOT NULL DEFAULT 'proxbackup@pbs', created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS clients (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, hostname TEXT NOT NULL DEFAULT '', os TEXT NOT NULL DEFAULT '',
   agent_version TEXT NOT NULL DEFAULT '', cert_serial TEXT UNIQUE, target_id INTEGER NOT NULL REFERENCES targets(id),

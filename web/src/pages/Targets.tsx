@@ -14,7 +14,7 @@ export function Targets() {
       <Card
         title="Backup targets"
         actions={
-          <button className="primary" onClick={() => setEdit({ pbs_user: 'pbspc@pbs', root_ns: 'pcs' })}>
+          <button className="primary" onClick={() => setEdit({ pbs_user: 'proxbackup@pbs', root_ns: 'pcs' })}>
             Add PBS server
           </button>
         }
@@ -128,14 +128,14 @@ function TargetEditor({ t: init, onClose }: { t: Form; onClose: () => void }) {
         </div>
         <div className="grid2">
           <Field label="Admin API token ID">
-            <input value={t.admin_auth_id ?? ''} onChange={(e) => set({ admin_auth_id: e.target.value })} required placeholder="root@pam!pbspc" />
+            <input value={t.admin_auth_id ?? ''} onChange={(e) => set({ admin_auth_id: e.target.value })} required placeholder="root@pam!proxbackup" />
           </Field>
           <Field label="Admin API token secret" hint={t.id ? 'Leave empty to keep the stored secret.' : 'Stored encrypted.'}>
             <input type="password" value={t.admin_secret ?? ''} onChange={(e) => set({ admin_secret: e.target.value })} required={!t.id} autoComplete="off" />
           </Field>
         </div>
         <Field label="PBS user owning the agent tokens" hint="Created automatically if missing (no password, cannot log in).">
-          <input value={t.pbs_user ?? ''} onChange={(e) => set({ pbs_user: e.target.value })} placeholder="pbspc@pbs" />
+          <input value={t.pbs_user ?? ''} onChange={(e) => set({ pbs_user: e.target.value })} placeholder="proxbackup@pbs" />
         </Field>
         {test && <div className="notice">{test}</div>}
         <ErrorBox error={error} />

@@ -1,8 +1,8 @@
 package pbs_test
 
 // End-to-end test against a real Proxmox Backup Server. Skipped unless
-// PBSPC_E2E_HOST, PBSPC_E2E_FINGERPRINT, PBSPC_E2E_TOKEN_FILE and
-// PBSPC_E2E_STORE are set (see scripts/e2e-pbs.sh).
+// PROXBACKUP_E2E_HOST, PROXBACKUP_E2E_FINGERPRINT, PROXBACKUP_E2E_TOKEN_FILE and
+// PROXBACKUP_E2E_STORE are set (see scripts/e2e-pbs.sh).
 
 import (
 	"bytes"
@@ -17,31 +17,31 @@ import (
 	"testing"
 	"time"
 
-	"pbspc/pkg/pbs"
-	"pbspc/pkg/pxar"
+	"proxbackup/pkg/pbs"
+	"proxbackup/pkg/pxar"
 )
 
 func e2eClient(t *testing.T) (*pbs.Client, string) {
-	host := os.Getenv("PBSPC_E2E_HOST")
+	host := os.Getenv("PROXBACKUP_E2E_HOST")
 	if host == "" {
-		t.Skip("PBSPC_E2E_HOST not set")
+		t.Skip("PROXBACKUP_E2E_HOST not set")
 	}
 	var tok struct {
 		TokenID string `json:"tokenid"`
 		Value   string `json:"value"`
 	}
-	b, err := os.ReadFile(os.Getenv("PBSPC_E2E_TOKEN_FILE"))
+	b, err := os.ReadFile(os.Getenv("PROXBACKUP_E2E_TOKEN_FILE"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(b, &tok); err != nil {
 		t.Fatal(err)
 	}
-	c, err := pbs.NewClient(pbs.Config{Host: host, Fingerprint: os.Getenv("PBSPC_E2E_FINGERPRINT"), AuthID: tok.TokenID, Secret: tok.Value})
+	c, err := pbs.NewClient(pbs.Config{Host: host, Fingerprint: os.Getenv("PROXBACKUP_E2E_FINGERPRINT"), AuthID: tok.TokenID, Secret: tok.Value})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c, os.Getenv("PBSPC_E2E_STORE")
+	return c, os.Getenv("PROXBACKUP_E2E_STORE")
 }
 
 type tfile struct {
@@ -75,7 +75,7 @@ func writeTree(t *testing.T, w io.Writer, variant int) {
 	if err := enc.CreateDir([]byte("Documents"), dir); err != nil {
 		t.Fatal(err)
 	}
-	add("Notes.txt", []byte(fmt.Sprintf("hello from pbspc, variant %d\n", variant)))
+	add("Notes.txt", []byte(fmt.Sprintf("hello from proxbackup, variant %d\n", variant)))
 	if err := enc.CreateDir([]byte("Projects"), dir); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestE2EBackupRestore(t *testing.T) {
 	} else {
 		t.Logf("PBS version: %v", v["version"])
 	}
-	ns := "pbspc-e2e"
+	ns := "proxbackup-e2e"
 	if err := c.EnsureNamespace(ctx, store, ns+"/sub"); err != nil {
 		t.Fatal(err)
 	}

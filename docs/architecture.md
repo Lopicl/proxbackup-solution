@@ -22,14 +22,14 @@ same chunk-level deduplication, verification, sync and prune behaviour as any ot
 ```mermaid
 flowchart LR
   subgraph PC["Windows PC (many)"]
-    TRAY["pbspc-tray<br/>(user session)"] -- named pipe --> AGENT
-    AGENT["pbspc-agent<br/>Windows service (LocalSystem)"]
+    TRAY["proxbackup-tray<br/>(user session)"] -- named pipe --> AGENT
+    AGENT["proxbackup-agent<br/>Windows service (LocalSystem)"]
     VSS[(VSS snapshot)]
     AGENT --- VSS
   end
 
   subgraph MGMT["ProxBackup Console (Linux or Windows)"]
-    API["pbspc-server<br/>REST API + config push"]
+    API["proxbackup-server<br/>REST API + config push"]
     UI["Web UI (React, embedded)"]
     DB[(SQLite)]
     API --- DB
@@ -87,14 +87,14 @@ restore`, and `pxar` FUSE mounts all work.
 | LastWriteTime | `mtime` (100 ns resolution → ns) |
 | Symlink reparse point | `SYMLINK` |
 | Junctions / mount points | skipped (prevents loops and double-backup) |
-| Security descriptor (NTFS ACL) | xattr `user.pbspc.ntsd` (self-relative binary SD) *(phase 2)* |
-| Alternate data streams | xattr `user.pbspc.ads.<name>` for small streams *(phase 2)* |
+| Security descriptor (NTFS ACL) | xattr `user.proxbackup.ntsd` (self-relative binary SD) *(phase 2)* |
+| Alternate data streams | xattr `user.proxbackup.ads.<name>` for small streams *(phase 2)* |
 | UTF-16 names | UTF-8 |
 
-### 3. `pbspc-agent`: ProxBackup Agent (Windows service)
+### 3. `proxbackup-agent`: ProxBackup Agent (Windows service)
 
 * Runs as `LocalSystem` (needed for VSS and for reading every file), installed with
-  `pbspc-agent install`.
+  `proxbackup-agent install`.
 * **Enrollment.** An admin creates a one-time enrollment code in the UI. The code bundles the
   server URL, a secret, and the server CA fingerprint. The agent generates an ECDSA key and
   CSR, and the server returns a client certificate signed by its internal CA. Every later
@@ -123,10 +123,10 @@ restore`, and `pxar` FUSE mounts all work.
 * **Restore.** The agent opens a reader session, downloads the index, fetches chunks on
   demand, decodes pxar, and writes files to the original or an alternate path. Overwrite
   policy is set per job.
-* **Local IPC.** A named pipe `\\.\pipe\pbspc-agent` serves the tray app (status, "Back up
+* **Local IPC.** A named pipe `\\.\pipe\proxbackup-agent` serves the tray app (status, "Back up
   now", recent runs). The pipe ACL allows only interactive users plus SYSTEM.
 
-### 4. `pbspc-server`: ProxBackup Console
+### 4. `proxbackup-server`: ProxBackup Console
 
 * A single Go binary with the React SPA embedded (`go:embed`). SQLite via the pure-Go
   `modernc.org/sqlite`, so there is no cgo.
@@ -136,7 +136,7 @@ restore`, and `pxar` FUSE mounts all work.
 * **PBS integration.** The server is configured once with a PBS **admin** token. On
   enrollment it:
   1. creates namespace `<root-ns>/<client-name>` on the datastore,
-  2. creates API token `pbspc@pbs!<client-name>`,
+  2. creates API token `proxbackup@pbs!<client-name>`,
   3. grants `DatastoreBackup` on `/datastore/<store>/<ns>` to that token.
 
   The agent only ever receives the scoped token.
@@ -149,7 +149,7 @@ restore`, and `pxar` FUSE mounts all work.
 * **Notifications.** SMTP and generic webhooks (JSON). Triggers: run failed, run succeeded
   (optional), client offline > N days, last successful backup older than N days.
 
-### 5. `pbspc-tray`: user tray app *(phase 2)*
+### 5. `proxbackup-tray`: user tray app *(phase 2)*
 
 A small systray process started at login. It shows last backup time and status, offers
 "Back up now" and "Restore files…" (opens the web UI deep link or a local picker), and can
@@ -208,14 +208,14 @@ erDiagram
 ```
 
 Secrets (`admin_token_secret`, `pbs_token_secret`, encryption keys) are encrypted at rest
-with a server master key (`PBSPC_MASTER_KEY`, or a key file with 0600 permissions).
+with a server master key (`PROXBACKUP_MASTER_KEY`, or a key file with 0600 permissions).
 
 ## Backup flow
 
 ```mermaid
 sequenceDiagram
-  participant S as pbspc-server
-  participant A as pbspc-agent
+  participant S as proxbackup-server
+  participant A as proxbackup-agent
   participant V as VSS
   participant P as PBS
 
@@ -260,8 +260,8 @@ sequenceDiagram
 ## Repository layout
 
 ```
-cmd/pbspc-server/       ProxBackup Console (management server) entrypoint
-cmd/pbspc-agent/        ProxBackup Agent entrypoint (service + CLI: enroll, backup, restore)
+cmd/proxbackup-server/       ProxBackup Console (management server) entrypoint
+cmd/proxbackup-agent/        ProxBackup Agent entrypoint (service + CLI: enroll, backup, restore)
 pkg/pbs/                PBS protocol: blob, chunker, backup & reader sessions, admin API
 pkg/pxar/               pxar v1 encoder/decoder
 internal/agent/         job runner, VSS, file walker, image reader, server client
@@ -278,7 +278,7 @@ docs/                   this document
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2 except Windows-only paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI |
 | 2 | **`catalog.pcat1.didx` first** (the PBS GUI file browser refuses non-split pxar archives without it), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness |
-| 3 — macOS & Linux agents | First-class `pbspc-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, CI runs the E2E suite on Linux and macOS |
+| 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
 | 6 — MSP cloud console | Cloud-hosted, multi-tenant **ProxBackup Cloud** console for managed service providers: one pane of glass over all customers' sites, cross-customer alerting, policy templates, technician RBAC scoped per customer, reporting and usage metering for billing, PSA/RMM integrations, optional hosted management servers. See [MSP cloud console](#msp-cloud-console) |
@@ -320,7 +320,7 @@ licensing questions, and reuses the same Go agent code.
   as an ISO/USB image (UEFI + legacy BIOS) and as an iPXE/HTTP-boot entry for network recovery.
   Kernel with broad storage/NIC drivers plus ntfs-3g, e2fsprogs, xfsprogs, btrfs-progs, LVM,
   mdadm, cryptsetup and efibootmgr.
-- `pbspc-agent` in recovery mode with a text UI on the console and a small local web UI, so a
+- `proxbackup-agent` in recovery mode with a text UI on the console and a small local web UI, so a
   technician can drive it from a phone or laptop.
 - **Authentication:** an admin generates a one-time *recovery code* in the server UI (short
   lifetime, bound to one client). It grants read-only restore access to that client's
@@ -359,13 +359,13 @@ or into the existing installation of a machine that won't boot.
 reduced security after a manual Recovery-mode change, so a generic rescue image can't be
 booted. The system volume is a sealed, signed APFS snapshot that can't be recreated from a
 backup. Apple's supported path is: reinstall macOS from macOS Recovery, then restore user
-data. For Macs, pbspc will offer **data restore onto a freshly installed macOS** (user folders,
+data. For Macs, ProxBackup will offer **data restore onto a freshly installed macOS** (user folders,
 apps and settings from the file-level archives) instead of bare-metal recovery.
 
 ## MSP cloud console
 
 *Roadmap phase 6.* **ProxBackup Cloud** is a hosted, multi-tenant console for managed service
-providers (MSPs) who run pbspc for many customers. Today each customer has its own
+providers (MSPs) who run proxbackup for many customers. Today each customer has its own
 ProxBackup Console with its own UI, so an MSP has to log in to every one of them. The console
 gives technicians one place to see and manage all customers, without changing where backups
 are stored or who holds the keys.

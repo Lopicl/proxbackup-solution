@@ -64,7 +64,7 @@ func buildArchive(t *testing.T) []byte {
 		m := fileMeta()
 		if name == "hidden.txt" {
 			m.Flags = FlagHidden
-			m.Xattrs = []Xattr{{Name: []byte("user.pbspc.attrs"), Value: []byte{0x22, 0, 0, 0}}}
+			m.Xattrs = []Xattr{{Name: []byte("user.proxbackup.attrs"), Value: []byte{0x22, 0, 0, 0}}}
 		}
 		_, err := enc.AddFile([]byte(name), m, uint64(len(data)), bytes.NewReader([]byte(data)))
 		must(err)

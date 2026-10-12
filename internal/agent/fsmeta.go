@@ -5,13 +5,17 @@ import (
 	"io/fs"
 	"time"
 
-	"pbspc/pkg/pxar"
+	"proxbackup/pkg/pxar"
 )
 
 // Extended attributes used to preserve Windows-specific metadata in pxar.
 const (
-	xattrAttrs = "user.pbspc.attrs" // u32 LE FILE_ATTRIBUTE_* bits
-	xattrCtime = "user.pbspc.ctime" // i64 LE creation time, unix nanoseconds
+	xattrAttrs = "user.proxbackup.attrs" // u32 LE FILE_ATTRIBUTE_* bits
+	xattrCtime = "user.proxbackup.ctime" // i64 LE creation time, unix nanoseconds
+
+	// Names written before the rename to ProxBackup; still read on restore.
+	xattrAttrsLegacy = "user.pbspc.attrs"
+	xattrCtimeLegacy = "user.pbspc.ctime"
 )
 
 // Windows file attribute bits we care about.
@@ -77,11 +81,11 @@ func toPxarMeta(fi fs.FileInfo, m winMeta) pxar.Metadata {
 func fromPxarMeta(md pxar.Metadata) (attrs uint32, hasAttrs bool, ctime time.Time) {
 	for _, x := range md.Xattrs {
 		switch string(x.Name) {
-		case xattrAttrs:
+		case xattrAttrs, xattrAttrsLegacy:
 			if len(x.Value) == 4 {
 				attrs, hasAttrs = binary.LittleEndian.Uint32(x.Value), true
 			}
-		case xattrCtime:
+		case xattrCtime, xattrCtimeLegacy:
 			if len(x.Value) == 8 {
 				ctime = time.Unix(0, int64(binary.LittleEndian.Uint64(x.Value)))
 			}

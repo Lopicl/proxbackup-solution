@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"pbspc/internal/api"
+	"proxbackup/internal/api"
 )
 
 func (j *job) runImage(ctx context.Context) (api.Result, error) {

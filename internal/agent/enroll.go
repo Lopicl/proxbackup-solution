@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"pbspc/internal/api"
+	"proxbackup/internal/api"
 )
 
 // Enroll exchanges a one-time enrollment token for a client certificate and

@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   build: { outDir: '../internal/server/webdist/app', emptyOutDir: true },
   server: {
-    // `npm run dev` proxies API calls to a locally running pbspc-server.
-    proxy: { '/api': { target: process.env.PBSPC_DEV_API ?? 'https://localhost:8443', changeOrigin: true, secure: false } },
+    // `npm run dev` proxies API calls to a locally running proxbackup-server.
+    proxy: { '/api': { target: process.env.PROXBACKUP_DEV_API ?? 'https://localhost:8443', changeOrigin: true, secure: false } },
   },
 })

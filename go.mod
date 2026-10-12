@@ -1,4 +1,4 @@
-module pbspc
+module proxbackup
 
 go 1.26.0
 

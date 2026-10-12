@@ -99,7 +99,7 @@ export function Settings() {
           Agents trust this server through its internal CA (pinned at enrollment). Import the CA into your browser or OS trust store to remove the certificate warning for this
           web UI.
         </p>
-        <a className="button" href="/api/ca.pem" download="pbspc-ca.pem">
+        <a className="button" href="/api/ca.pem" download="proxbackup-ca.pem">
           Download CA certificate
         </a>
       </Card>
