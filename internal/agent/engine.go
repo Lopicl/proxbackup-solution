@@ -123,7 +123,8 @@ func (j *job) snapshotRef(t int64) pbs.SnapshotRef {
 // the group's last snapshot (PBS rejects equal or older times).
 func (j *job) startSession(ctx context.Context, c *pbs.Client) (*pbs.BackupSession, error) {
 	t := time.Now().Unix()
-	s, err := c.StartBackup(ctx, j.snapshotRef(t), pbs.BackupOptions{Compress: true, Concurrency: 4})
+	s, err := c.StartBackup(ctx, j.snapshotRef(t), pbs.BackupOptions{Compress: true, Concurrency: 4,
+		OnUpload: func(n int) { j.uploaded.Add(uint64(n)) }})
 	if err != nil {
 		return nil, fmt.Errorf("start backup session: %w", err)
 	}

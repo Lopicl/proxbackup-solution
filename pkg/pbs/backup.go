@@ -55,6 +55,9 @@ type BackupOptions struct {
 	Concurrency int
 	// Debug asks the server to log verbosely into the backup task log.
 	Debug bool
+	// OnUpload, if set, is called with the encoded size of every chunk sent,
+	// as it is sent (for live progress; Stats only arrive when an archive closes).
+	OnUpload func(encodedBytes int)
 }
 
 // FileInfo is one entry in the snapshot manifest.
@@ -432,6 +435,9 @@ func (w *ArchiveWriter) process(job *chunkJob) error {
 		return err
 	}
 	job.isNew, job.encLen = true, len(raw)
+	if b.opts.OnUpload != nil {
+		b.opts.OnUpload(len(raw))
+	}
 	return nil
 }
 

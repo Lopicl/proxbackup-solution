@@ -73,7 +73,6 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 			return res, fmt.Errorf("%s: %w", src.orig, err)
 		}
 		addStats(&res, st)
-		j.uploaded.Add(st.UploadedBytes)
 		j.logf("info", "%s: %d bytes, %d chunks (%d new, %d reused), %d uploaded",
 			src.archive, st.Size, st.Chunks, st.NewChunks, st.ReusedChunks, st.UploadedBytes)
 	}
@@ -175,7 +174,7 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 		// Must come before IsDir: on Windows, junctions and other non-symlink reparse
 		// points report ModeDir|ModeIrregular. Following them would back up their
 		// targets twice or loop (e.g. "Application Data" junctions in user profiles).
-		w.j.logf("info", "not backing up special file %s (reparse point / %s)", crel, mode.Type())
+		w.j.logf("info", "not following %s (junction or other reparse point)", crel)
 		return nil
 	case mode.IsDir():
 		// Read the listing before emitting the directory so unreadable

@@ -276,8 +276,9 @@ func (s *Store) Target(ctx context.Context, id int64) (*Target, error) {
 
 func (s *Store) SaveTarget(ctx context.Context, t *Target) error {
 	if t.ID == 0 {
+		t.CreatedAt = now()
 		res, err := s.db.ExecContext(ctx, `INSERT INTO targets(name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, created_at)
-			VALUES(?,?,?,?,?,?,?,?,?)`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, now())
+			VALUES(?,?,?,?,?,?,?,?,?)`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.CreatedAt)
 		if err != nil {
 			return err
 		}
@@ -486,9 +487,10 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	vol, _ := json.Marshal(nonNil(j.Volumes))
 	ret, _ := json.Marshal(j.Retention)
 	if j.ID == 0 {
+		j.CreatedAt = now()
 		res, err := s.db.ExecContext(ctx, `INSERT INTO jobs(client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention,
 			enabled, created_at, window_minutes, catch_up) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, now(), j.WindowMinutes, j.CatchUp)
+			j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.CreatedAt, j.WindowMinutes, j.CatchUp)
 		if err != nil {
 			return err
 		}

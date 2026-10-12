@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Non-Windows builds exist for development and CI; they map dot-files to HIDDEN.
@@ -22,6 +24,11 @@ func statMeta(fi fs.FileInfo) winMeta {
 }
 
 func applyMeta(p string, mtime time.Time, attrs uint32, _ bool, _ time.Time) error {
+	if fi, err := os.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		// Set the link's own times; Chtimes would follow it to the target.
+		ts := []unix.Timespec{unix.NsecToTimespec(mtime.UnixNano()), unix.NsecToTimespec(mtime.UnixNano())}
+		return unix.UtimesNanoAt(unix.AT_FDCWD, p, ts, unix.AT_SYMLINK_NOFOLLOW)
+	}
 	if attrs&attrReadonly != 0 {
 		if fi, err := os.Lstat(p); err == nil && fi.Mode().IsRegular() {
 			os.Chmod(p, fi.Mode().Perm()&^0o222)

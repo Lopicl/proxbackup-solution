@@ -70,7 +70,6 @@ func (c *catalog) upload(ctx context.Context, sess *pbs.BackupSession, res *api.
 		return err
 	}
 	addStats(res, st)
-	c.j.uploaded.Add(st.UploadedBytes)
 	c.j.logf("info", "%s: %d bytes, %d uploaded", pbs.CatalogArchiveName, st.Size, st.UploadedBytes)
 	return nil
 }

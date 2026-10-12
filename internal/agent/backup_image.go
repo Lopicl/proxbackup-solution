@@ -71,7 +71,6 @@ func (j *job) runImage(ctx context.Context) (api.Result, error) {
 			return res, fmt.Errorf("%s: %w", v.name, err)
 		}
 		addStats(&res, st)
-		j.uploaded.Add(st.UploadedBytes)
 		j.logf("info", "%s: %d chunks (%d new, %d reused), %d bytes uploaded", v.archive, st.Chunks, st.NewChunks, st.ReusedChunks, st.UploadedBytes)
 	}
 

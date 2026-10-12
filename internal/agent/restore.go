@@ -133,6 +133,11 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 			if err := os.Symlink(e.Target, target); err != nil {
 				j.skipped.Add(1)
 				j.logf("warn", "symlink %s: %v", e.Path, err)
+				continue
+			}
+			attrs, has, ctime := fromPxarMeta(e.Meta)
+			if err := applyMeta(target, time.Unix(e.Meta.MtimeSecs, int64(e.Meta.MtimeNanos)), attrs, has, ctime); err != nil {
+				j.logf("warn", "metadata for %s: %v", e.Path, err)
 			}
 		default:
 			j.logf("info", "skipping %s entry %s", e.Kind, e.Path)
