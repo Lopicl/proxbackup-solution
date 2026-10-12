@@ -161,6 +161,12 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 	meta := statMeta(fi)
 	mode := fi.Mode()
 	switch {
+	case mode&fs.ModeIrregular != 0:
+		// Must come before IsDir: on Windows, junctions and other non-symlink reparse
+		// points report ModeDir|ModeIrregular. Following them would back up their
+		// targets twice or loop (e.g. "Application Data" junctions in user profiles).
+		w.j.logf("info", "not backing up special file %s (reparse point / %s)", crel, mode.Type())
+		return nil
 	case mode.IsDir():
 		// Read the listing before emitting the directory so unreadable
 		// directories are skipped as a whole.
