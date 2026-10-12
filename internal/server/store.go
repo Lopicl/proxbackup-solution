@@ -210,6 +210,17 @@ func (s *Store) UpsertAdmin(ctx context.Context, user, hash string) error {
 	return err
 }
 
+// EnsureExternalAdmin returns the admin row for an account authenticated
+// elsewhere (a PBS user@realm), creating it with an unusable local password.
+func (s *Store) EnsureExternalAdmin(ctx context.Context, user string) (int64, error) {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO admins(username, pw_hash, created_at) VALUES(?,'external:pbs',?)
+		ON CONFLICT(username) DO NOTHING`, user, now()); err != nil {
+		return 0, err
+	}
+	id, _, err := s.AdminByName(ctx, user)
+	return id, err
+}
+
 func (s *Store) AdminByName(ctx context.Context, user string) (int64, string, error) {
 	var id int64
 	var hash string

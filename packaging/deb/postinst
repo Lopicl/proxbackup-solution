@@ -1,0 +1,86 @@
+#!/bin/sh
+# Sets up ProxBackup Console on this Proxmox Backup Server:
+#   - a system user "proxbackup" the service runs as
+#   - an admin API token root@pam!proxbackup-console (secret in /etc/proxbackup/pbs-token)
+#   - /etc/proxbackup/proxbackup.env with this host's names (kept on upgrades)
+#   - the proxbackup-server service on port 8077
+set -e
+
+CONF=/etc/proxbackup
+TOKEN_FILE=$CONF/pbs-token
+ENV_FILE=$CONF/proxbackup.env
+TOKEN_USER=root@pam
+TOKEN_NAME=proxbackup-console
+PORT=8077
+
+[ "$1" = configure ] || exit 0
+
+if ! command -v proxmox-backup-manager >/dev/null 2>&1; then
+	echo "proxbackup-server: proxmox-backup-manager not found; install this package on a Proxmox Backup Server." >&2
+	exit 1
+fi
+
+if ! getent passwd proxbackup >/dev/null; then
+	useradd --system --user-group --home-dir /var/lib/proxbackup --no-create-home \
+		--shell /usr/sbin/nologin --comment "ProxBackup Console" proxbackup
+fi
+install -d -m 0750 -o root -g proxbackup "$CONF"
+
+if [ ! -s "$TOKEN_FILE" ]; then
+	# A token secret is only shown once: recreate the token if we lost it.
+	proxmox-backup-manager user delete-token "$TOKEN_USER" "$TOKEN_NAME" >/dev/null 2>&1 || true
+	out=$(proxmox-backup-manager user generate-token "$TOKEN_USER" "$TOKEN_NAME" \
+		--comment "ProxBackup Console (proxbackup-server package)")
+	secret=$(printf '%s' "$out" | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+	if [ -z "$secret" ]; then
+		echo "proxbackup-server: could not create the PBS API token: $out" >&2
+		exit 1
+	fi
+	(umask 077 && printf '%s\n' "$secret" > "$TOKEN_FILE")
+fi
+chown root:proxbackup "$TOKEN_FILE"
+chmod 0640 "$TOKEN_FILE"
+# The console provisions users, tokens, ACLs and namespaces for each PC.
+proxmox-backup-manager acl update / Admin --auth-id "$TOKEN_USER!$TOKEN_NAME"
+
+if [ ! -f "$ENV_FILE" ]; then
+	fqdn=$(hostname -f 2>/dev/null || hostname)
+	short=$(hostname -s 2>/dev/null || hostname)
+	ips=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v '^fe80' | paste -sd, - || true)
+	hosts=$(printf '%s\n' "$fqdn" "$short" localhost | awk '!seen[$0]++' | paste -sd, -)
+	[ -n "$ips" ] && hosts="$hosts,$ips"
+	(umask 077 && cat > "$ENV_FILE" <<EOF
+# ProxBackup Console settings, read by proxbackup-server.service.
+# After editing: systemctl restart proxbackup-server
+
+# URL the PCs (agents) use to reach this console. Its host name must be listed
+# in PROXBACKUP_HOSTNAMES (the console's certificate is issued for those).
+PROXBACKUP_PUBLIC_URL=https://$fqdn:$PORT
+PROXBACKUP_HOSTNAMES=$hosts
+
+# Web UI and agent API.
+PROXBACKUP_LISTEN=:$PORT
+
+# Running on this PBS: register its datastores and accept PBS admin logins.
+PROXBACKUP_LOCAL_PBS=1
+# PBS address the agents back up to (default: host of PROXBACKUP_PUBLIC_URL, port 8007).
+#PROXBACKUP_PBS_PUBLIC_HOST=$fqdn:8007
+EOF
+	)
+fi
+
+if [ -d /run/systemd/system ]; then
+	systemctl daemon-reload
+	systemctl enable proxbackup-server.service >/dev/null 2>&1
+	systemctl restart proxbackup-server.service
+fi
+
+url=$(sed -n 's/^PROXBACKUP_PUBLIC_URL=//p' "$ENV_FILE")
+cat <<EOF
+
+ProxBackup Console: $url
+Sign in with a PBS administrator account (e.g. root@pam). A local "admin"
+account is also created; its initial password is in: journalctl -u proxbackup-server
+
+EOF
+exit 0

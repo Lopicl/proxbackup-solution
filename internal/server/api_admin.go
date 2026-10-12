@@ -112,12 +112,18 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	case req.RootNS != "" && !nsRe.MatchString(req.RootNS):
 		httpError(w, 400, errors.New("invalid namespace"))
 		return
-	case t.ID == 0 && req.AdminSecret == "":
+	case t.ID == 0 && req.AdminSecret == "" && s.localSecretFor(req.AdminAuthID) == "":
 		httpError(w, 400, errors.New("admin token secret is required"))
 		return
 	}
 	t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser =
 		req.Name, req.Host, strings.TrimSpace(req.Fingerprint), req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser
+	if req.AdminSecret == "" && t.ID == 0 {
+		req.AdminSecret = s.localSecretFor(req.AdminAuthID)
+	}
+	if t.Fingerprint == "" {
+		t.Fingerprint = s.localFingerprintFor(ctx, req.AdminAuthID)
+	}
 	if req.AdminSecret != "" {
 		t.adminSecretEnc = s.sealer.Seal(req.AdminSecret)
 	}
@@ -164,6 +170,12 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 		if t, err := s.store.Target(ctx, req.ID); err == nil {
 			req.AdminSecret, _ = s.sealer.Open(t.adminSecretEnc)
 		}
+	}
+	if req.AdminSecret == "" {
+		req.AdminSecret = s.localSecretFor(req.AdminAuthID)
+	}
+	if strings.TrimSpace(req.Fingerprint) == "" {
+		req.Fingerprint = s.localFingerprintFor(ctx, req.AdminAuthID)
 	}
 	pc, err := pbs.NewClient(pbs.Config{Host: req.Host, Fingerprint: req.Fingerprint, AuthID: req.AdminAuthID, Secret: req.AdminSecret})
 	if err != nil {

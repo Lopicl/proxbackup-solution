@@ -4,6 +4,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -21,11 +22,12 @@ import (
 // Config configures the management server.
 type Config struct {
 	DataDir   string
-	UIAddr    string   // admin UI + API, e.g. ":8443"
-	AgentAddr string   // agent mTLS endpoint, e.g. ":8444"
-	PublicURL string   // URL agents use to reach AgentAddr, e.g. "https://backup.example.com:8444"
+	UIAddr    string   // admin UI + API, e.g. ":8077"
+	AgentAddr string   // separate agent mTLS endpoint; empty = served on UIAddr
+	PublicURL string   // URL agents use to reach the agent API, e.g. "https://backup.example.com:8077"
 	Hostnames []string // extra SANs for the server certificate
 	Version   string
+	LocalPBS  *LocalPBS // set when installed on the PBS host itself (see localpbs.go)
 }
 
 // Server is the management server.
@@ -66,29 +68,34 @@ func (s *Server) Store() *Store { return s.store }
 // Run serves until ctx is canceled.
 func (s *Server) Run(ctx context.Context) error {
 	go s.housekeeping(ctx)
+	if s.cfg.LocalPBS != nil {
+		go s.localPBSLoop(ctx)
+	}
 
-	ui := &http.Server{
-		Addr:              s.cfg.UIAddr,
-		Handler:           securityHeaders(s.uiRoutes()),
-		TLSConfig:         &tls.Config{Certificates: []tls.Certificate{s.pki.Server}, MinVersion: tls.VersionTLS12},
-		ReadHeaderTimeout: 10 * time.Second,
+	// Agents present a client certificate, browsers don't: one TLS config that
+	// asks for (but doesn't require) a certificate serves both.
+	tlsConf := &tls.Config{
+		Certificates: []tls.Certificate{s.pki.Server},
+		ClientCAs:    s.caPool(),
+		ClientAuth:   tls.VerifyClientCertIfGiven, // enrollment and the UI work without one
+		MinVersion:   tls.VersionTLS12,
 	}
-	agentPool := s.caPool()
-	agent := &http.Server{
-		Addr:    s.cfg.AgentAddr,
-		Handler: s.agentRoutes(),
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{s.pki.Server},
-			ClientCAs:    agentPool,
-			ClientAuth:   tls.VerifyClientCertIfGiven, // enrollment happens without a client cert
-			MinVersion:   tls.VersionTLS12,
-		},
-		ReadHeaderTimeout: 10 * time.Second,
+	ui, agent := securityHeaders(s.uiRoutes()), s.agentRoutes()
+	var servers []*http.Server
+	if s.cfg.AgentAddr == "" || s.cfg.AgentAddr == s.cfg.UIAddr {
+		mux := http.NewServeMux()
+		mux.Handle("/agent/", agent)
+		mux.Handle("/", ui)
+		servers = append(servers, &http.Server{Addr: s.cfg.UIAddr, Handler: mux})
+	} else {
+		servers = append(servers, &http.Server{Addr: s.cfg.UIAddr, Handler: ui}, &http.Server{Addr: s.cfg.AgentAddr, Handler: agent})
 	}
-	errc := make(chan error, 2)
-	go func() { errc <- ui.ListenAndServeTLS("", "") }()
-	go func() { errc <- agent.ListenAndServeTLS("", "") }()
-	s.log.Info("proxbackup-server listening", "ui", "https://"+displayAddr(s.cfg.UIAddr), "agents", s.cfg.AgentAddr, "public_url", s.cfg.PublicURL)
+	errc := make(chan error, len(servers))
+	for _, hs := range servers {
+		hs.TLSConfig, hs.ReadHeaderTimeout = tlsConf, 10*time.Second
+		go func() { errc <- hs.ListenAndServeTLS("", "") }()
+	}
+	s.log.Info("proxbackup-server listening", "ui", "https://"+displayAddr(s.cfg.UIAddr), "agents", cmp.Or(s.cfg.AgentAddr, s.cfg.UIAddr), "public_url", s.cfg.PublicURL)
 	select {
 	case <-ctx.Done():
 	case err := <-errc:
@@ -96,8 +103,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	ui.Shutdown(shutdown)
-	agent.Shutdown(shutdown)
+	for _, hs := range servers {
+		hs.Shutdown(shutdown)
+	}
 	return s.store.Close()
 }
 
@@ -111,6 +119,7 @@ func displayAddr(a string) string {
 func (s *Server) uiRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("GET /api/login-info", s.handleLoginInfo)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 
 	admin := http.NewServeMux()

@@ -1,0 +1,19 @@
+#!/bin/sh
+# purge removes the console's settings, database and its PBS admin token.
+# Backups, namespaces and the per-PC tokens in PBS are left untouched.
+set -e
+case "$1" in
+remove)
+	[ -d /run/systemd/system ] && systemctl daemon-reload || true
+	;;
+purge)
+	if command -v proxmox-backup-manager >/dev/null 2>&1; then
+		proxmox-backup-manager user delete-token root@pam proxbackup-console >/dev/null 2>&1 || true
+	fi
+	rm -rf /etc/proxbackup /var/lib/proxbackup
+	if getent passwd proxbackup >/dev/null; then
+		userdel proxbackup >/dev/null 2>&1 || true
+	fi
+	;;
+esac
+exit 0

@@ -25,6 +25,10 @@ function Login({ onLogin }: { onLogin: (u: string) => void }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [pbsLogin, setPbsLogin] = useState(false)
+  useEffect(() => {
+    api.loginInfo().then((r) => setPbsLogin(r.pbs_login), () => {})
+  }, [])
   return (
     <div className="login">
       <form
@@ -45,7 +49,7 @@ function Login({ onLogin }: { onLogin: (u: string) => void }) {
         <h1>
           <span className="logo">▣</span> ProxBackup Console
         </h1>
-        <Field label="Username">
+        <Field label="Username" hint={pbsLogin ? 'A console account, or a PBS administrator such as root@pam.' : undefined}>
           <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
         </Field>
         <Field label="Password">

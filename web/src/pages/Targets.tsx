@@ -6,6 +6,8 @@ type Form = Partial<Target> & { admin_secret?: string }
 
 export function Targets() {
   const { data, error, reload } = useLoad(api.targets, [])
+  const { data: me } = useLoad(api.me, [])
+  const local = me?.local_pbs
   const [edit, setEdit] = useState<Form | null>(null)
   return (
     <>
@@ -14,7 +16,10 @@ export function Targets() {
       <Card
         title="Backup targets"
         actions={
-          <button className="primary" onClick={() => setEdit({ pbs_user: 'proxbackup@pbs', root_ns: 'pcs' })}>
+          <button
+            className="primary"
+            onClick={() => setEdit({ pbs_user: 'proxbackup@pbs', root_ns: 'pcs', ...(local && { host: local.host, admin_auth_id: local.auth_id }) })}
+          >
             Add PBS server
           </button>
         }
@@ -79,6 +84,7 @@ export function Targets() {
       {edit && (
         <TargetEditor
           t={edit}
+          localAuthID={local?.auth_id}
           onClose={() => {
             setEdit(null)
             reload()
@@ -89,7 +95,8 @@ export function Targets() {
   )
 }
 
-function TargetEditor({ t: init, onClose }: { t: Form; onClose: () => void }) {
+function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?: string; onClose: () => void }) {
+  const isLocal = !!localAuthID && init.admin_auth_id === localAuthID
   const [t, setT] = useState<Form>(init)
   const [error, setError] = useState('')
   const [test, setTest] = useState('')
@@ -115,7 +122,14 @@ function TargetEditor({ t: init, onClose }: { t: Form; onClose: () => void }) {
             <input value={t.host ?? ''} onChange={(e) => set({ host: e.target.value })} required placeholder="pbs.example.lan" />
           </Field>
         </div>
-        <Field label="Certificate fingerprint (SHA-256)" hint="Shown on the PBS dashboard (“Show Fingerprint”). Leave empty only if PBS has a publicly trusted certificate.">
+        <Field
+          label="Certificate fingerprint (SHA-256)"
+          hint={
+            isLocal
+              ? 'Leave empty: read from this PBS automatically and kept up to date.'
+              : 'Shown on the PBS dashboard (“Show Fingerprint”). Leave empty only if PBS has a publicly trusted certificate.'
+          }
+        >
           <input value={t.fingerprint ?? ''} onChange={(e) => set({ fingerprint: e.target.value })} placeholder="aa:bb:cc:…" />
         </Field>
         <div className="grid2">
@@ -130,8 +144,11 @@ function TargetEditor({ t: init, onClose }: { t: Form; onClose: () => void }) {
           <Field label="Admin API token ID">
             <input value={t.admin_auth_id ?? ''} onChange={(e) => set({ admin_auth_id: e.target.value })} required placeholder="root@pam!proxbackup" />
           </Field>
-          <Field label="Admin API token secret" hint={t.id ? 'Leave empty to keep the stored secret.' : 'Stored encrypted.'}>
-            <input type="password" value={t.admin_secret ?? ''} onChange={(e) => set({ admin_secret: e.target.value })} required={!t.id} autoComplete="off" />
+          <Field
+            label="Admin API token secret"
+            hint={isLocal ? 'Not needed: this is the token created when the console was installed on this PBS.' : t.id ? 'Leave empty to keep the stored secret.' : 'Stored encrypted.'}
+          >
+            <input type="password" value={t.admin_secret ?? ''} onChange={(e) => set({ admin_secret: e.target.value })} required={!t.id && !isLocal} autoComplete="off" />
           </Field>
         </div>
         <Field label="PBS user owning the agent tokens" hint="Created automatically if missing (no password, cannot log in).">

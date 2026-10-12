@@ -136,9 +136,17 @@ restore`, and `pxar` FUSE mounts all work.
 
 * A single Go binary with the React SPA embedded (`go:embed`). SQLite via the pure-Go
   `modernc.org/sqlite`, so there is no cgo.
-* **Listeners.** `:8443` serves the admin UI and API (session cookie + CSRF). `:8444` is the
-  agent API (mTLS, client certs from the internal CA). Enrollment runs on `:8444` with server
-  auth only.
+* **Listener.** One TLS port, `:8077`, serves the admin UI and API (session cookie + CSRF) and,
+  under `/agent/`, the agent API (mTLS, client certs from the internal CA). The TLS handshake
+  asks for a client certificate without requiring one, so browsers and enrollment (server auth
+  only) work on the same port. `-agent-addr` can still split the agent API onto its own port.
+* **Installed on the PBS host** (`.deb`, `packaging/deb`). The package creates the admin token
+  `root@pam!proxbackup-console` with `proxmox-backup-manager`, and runs the console as the system
+  user `proxbackup`, which can read the token secret. With `-local-pbs` the console registers
+  every local datastore as a target on first start, re-reads the PBS certificate fingerprint over
+  loopback hourly (so ACME renewals need no reconfiguration), and lets PBS administrators
+  (`Sys.Modify` on `/`, e.g. `root@pam`) sign in with their PBS credentials. Accounts with
+  two-factor auth must use a local console account for now.
 * **PBS integration.** The server is configured once with a PBS **admin** token. On
   enrollment it:
   1. creates namespace `<root-ns>/<client-name>` on the datastore,

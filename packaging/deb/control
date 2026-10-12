@@ -1,0 +1,16 @@
+Package: proxbackup-server
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: Matteo Lo Piccolo <lopicl.00@gmail.com>
+Installed-Size: @SIZE@
+Depends: proxmox-backup-server (>= 3.0), systemd
+Section: admin
+Priority: optional
+Description: ProxBackup Console - manage Windows PC backups to this PBS
+ Management server for ProxBackup agents, installed directly on a Proxmox
+ Backup Server. It registers the local datastores, provisions per-PC
+ namespaces and API tokens, pushes backup schedules to the agents, applies
+ retention and shows run history, logs and restores.
+ .
+ Web UI and agent API on port 8077. PBS administrators (e.g. root@pam) can
+ sign in with their PBS credentials.

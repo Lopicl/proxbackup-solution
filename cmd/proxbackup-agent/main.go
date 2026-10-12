@@ -147,6 +147,16 @@ func serviceCommand(cmd, dataDir string, log *slog.Logger) error {
 		}
 		return svc.Run()
 	}
+	// Re-running the enrollment command on an enrolled PC must work: keep an
+	// installed service, and restart a running one so it loads the new config.
+	st, stErr := svc.Status()
+	switch {
+	case cmd == "install" && stErr == nil:
+		fmt.Println("service install: already installed")
+		return nil
+	case cmd == "start" && stErr == nil && st == service.StatusRunning:
+		cmd = "restart"
+	}
 	if err := service.Control(svc, cmd); err != nil {
 		return err
 	}

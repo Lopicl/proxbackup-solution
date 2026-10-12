@@ -7,8 +7,11 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -21,11 +24,18 @@ var version = "dev"
 func main() {
 	cfg := server.Config{Version: version}
 	var hosts string
+	var local server.LocalPBS
+	var localPBS bool
 	flag.StringVar(&cfg.DataDir, "data-dir", envOr("PROXBACKUP_DATA_DIR", "/var/lib/proxbackup"), "data directory (database, CA, keys)")
-	flag.StringVar(&cfg.UIAddr, "ui-addr", envOr("PROXBACKUP_UI_ADDR", ":8443"), "admin web UI listen address")
-	flag.StringVar(&cfg.AgentAddr, "agent-addr", envOr("PROXBACKUP_AGENT_ADDR", ":8444"), "agent API listen address (mTLS)")
-	flag.StringVar(&cfg.PublicURL, "public-url", os.Getenv("PROXBACKUP_PUBLIC_URL"), "agent-facing URL, e.g. https://backup.example.com:8444")
+	flag.StringVar(&cfg.UIAddr, "listen", envOr("PROXBACKUP_LISTEN", ":8077"), "listen address for the web UI and the agent API")
+	flag.StringVar(&cfg.AgentAddr, "agent-addr", os.Getenv("PROXBACKUP_AGENT_ADDR"), "optional separate listen address for the agent API (mTLS)")
+	flag.StringVar(&cfg.PublicURL, "public-url", os.Getenv("PROXBACKUP_PUBLIC_URL"), "agent-facing URL, e.g. https://backup.example.com:8077")
 	flag.StringVar(&hosts, "hostnames", os.Getenv("PROXBACKUP_HOSTNAMES"), "comma separated host names/IPs for the server certificate")
+	flag.BoolVar(&localPBS, "local-pbs", os.Getenv("PROXBACKUP_LOCAL_PBS") == "1", "running on the PBS host: register its datastores and allow PBS admin logins")
+	flag.StringVar(&local.APIAddr, "local-pbs-api", envOr("PROXBACKUP_LOCAL_PBS_API", "127.0.0.1:8007"), "local PBS API address")
+	flag.StringVar(&local.AuthID, "local-pbs-auth-id", envOr("PROXBACKUP_LOCAL_PBS_AUTH_ID", "root@pam!proxbackup-console"), "local PBS admin token id")
+	flag.StringVar(&local.SecretFile, "local-pbs-secret-file", envOr("PROXBACKUP_LOCAL_PBS_SECRET_FILE", credentialPath("pbs-token")), "file with the local PBS admin token secret")
+	flag.StringVar(&local.PublicHost, "pbs-public-host", os.Getenv("PROXBACKUP_PBS_PUBLIC_HOST"), "PBS address agents use (default: host of -public-url, port 8007)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: proxbackup-server [flags]\n       proxbackup-server passwd [username]   set an admin password\n\nFlags:\n")
 		flag.PrintDefaults()
@@ -35,6 +45,16 @@ func main() {
 		if h = strings.TrimSpace(h); h != "" {
 			cfg.Hostnames = append(cfg.Hostnames, h)
 		}
+	}
+	if localPBS {
+		if local.PublicHost == "" {
+			u, err := url.Parse(cfg.PublicURL)
+			if err != nil || u.Hostname() == "" {
+				fatal(fmt.Errorf("-local-pbs needs -public-url (or -pbs-public-host)"))
+			}
+			local.PublicHost = net.JoinHostPort(u.Hostname(), "8007")
+		}
+		cfg.LocalPBS = &local
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		fatal(err)
@@ -76,6 +96,15 @@ func main() {
 	if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
 		fatal(err)
 	}
+}
+
+// credentialPath returns a systemd credential (LoadCredential=) if one was
+// passed, else the file the .deb package writes.
+func credentialPath(name string) string {
+	if d := os.Getenv("CREDENTIALS_DIRECTORY"); d != "" {
+		return filepath.Join(d, name)
+	}
+	return "/etc/proxbackup/" + name
 }
 
 func envOr(k, def string) string {

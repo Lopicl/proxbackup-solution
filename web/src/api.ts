@@ -189,7 +189,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const api = {
   login: (username: string, password: string) => request<{ username: string }>('POST', '/login', { username, password }),
   logout: () => request('POST', '/logout'),
-  me: () => request<{ username: string; version: string }>('GET', '/me'),
+  loginInfo: () => request<{ pbs_login: boolean }>('GET', '/login-info'),
+  me: () => request<{ username: string; version: string; local_pbs?: { auth_id: string; host: string } }>('GET', '/me'),
   dashboard: () => request<Dashboard>('GET', '/dashboard'),
 
   targets: () => request<Target[]>('GET', '/targets'),

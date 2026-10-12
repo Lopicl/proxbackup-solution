@@ -17,24 +17,33 @@ See [docs/architecture.md](docs/architecture.md) for the design, security model 
 ```sh
 git config core.hooksPath .githooks   # once per clone: enables build-number bumping
 make            # builds web UI + bin/proxbackup-server (linux/amd64, darwin) + bin/proxbackup-agent.exe (windows/amd64)
+make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installing on a PBS host
 ```
 
-1. **PBS:** create an API token with admin rights for the server, e.g. `root@pam!proxbackup` with
-   *privilege separation off*. Note the certificate fingerprint (Dashboard → *Show Fingerprint*).
-2. **Server:**
+1. **Server, on the PBS host (recommended):** copy the `.deb` to the Proxmox Backup Server and run
    ```sh
-   proxbackup-server -data-dir /var/lib/proxbackup -public-url https://backup.example.lan:8444 -hostnames backup.example.lan
+   apt install ./proxbackup-server_<version>_amd64.deb
    ```
-   The initial `admin` password is printed once in the log. You can set it beforehand with
-   `PROXBACKUP_ADMIN_PASSWORD`, or change it later with `proxbackup-server passwd`.
-   Open `https://backup.example.lan:8443`, then go to *PBS servers → Add* and use *Test connection*.
+   The package creates an admin API token `root@pam!proxbackup-console`, registers every
+   datastore of this PBS as a target, and starts the console on **port 8077**. Open
+   `https://<pbs-host>:8077` and sign in with a PBS administrator such as `root@pam`. Settings
+   (public URL, host names) are in `/etc/proxbackup/proxbackup.env`. `apt purge` removes the
+   console and its token; backups stay in PBS.
+
+   *Standalone instead:* create a PBS API token with the Admin role on `/`, then run
+   `proxbackup-server -public-url https://backup.example.lan:8077 -hostnames backup.example.lan`,
+   open port 8077, sign in as `admin` (initial password in the log, or set
+   `PROXBACKUP_ADMIN_PASSWORD`; change it with `proxbackup-server passwd`) and add the PBS under
+   *PBS servers → Add*.
+2. **Target:** on the PBS host this is done for you. Check *PBS servers* and adjust the root
+   namespace (default `pcs`) if you like.
 3. **Client:** go to *Clients → Add client*. Copy the command it shows to the PC and run it in an
    elevated prompt:
    ```bat
    proxbackup-agent.exe enroll <token> && proxbackup-agent.exe install && proxbackup-agent.exe start
    ```
    The server creates the PBS namespace `pcs/<client>` and a token that has **DatastoreBackup on
-   that namespace only**.
+   that namespace only**. Running the command again on an enrolled PC re-enrolls it.
 4. **Jobs:** on the client page, create a *Files* job (default `C:\Users`, daily, with retention) or
    a *Volume image* job. The schedule is pushed to the PC, and the **agent** starts the backup on
    the PC's own clock. If the PC is off, asleep or busy during the start window, the job either
@@ -56,7 +65,7 @@ Requires Go ≥ 1.26 and Node ≥ 20.
 ```sh
 make test          # unit tests (blob/chunker/index/pxar)
 make e2e           # starts a PBS 4.x container and runs the protocol E2E test against it
-cd web && PROXBACKUP_DEV_API=https://127.0.0.1:8443 npm run dev   # UI dev server with API proxy
+cd web && PROXBACKUP_DEV_API=https://127.0.0.1:8077 npm run dev   # UI dev server with API proxy
 ```
 
 ## Versioning

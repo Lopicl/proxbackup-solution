@@ -101,11 +101,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	id, hash, err := s.store.AdminByName(r.Context(), req.Username)
-	if err != nil || !checkPassword(hash, req.Password) {
-		time.Sleep(500 * time.Millisecond)
-		httpError(w, http.StatusUnauthorized, errors.New("invalid username or password"))
-		return
+	var id int64
+	if s.cfg.LocalPBS != nil && strings.Contains(req.Username, "@") {
+		// PBS account (user@realm): PBS checks the password and admin rights.
+		err := s.pbsLogin(r.Context(), req.Username, req.Password)
+		if err == nil {
+			id, err = s.store.EnsureExternalAdmin(r.Context(), req.Username)
+		}
+		if err != nil {
+			time.Sleep(500 * time.Millisecond)
+			code := http.StatusUnauthorized
+			if !errors.Is(err, errInvalidLogin) && !errors.Is(err, errPBSLoginDenied) {
+				code = http.StatusBadGateway
+			}
+			s.log.Warn("PBS login failed", "user", req.Username, "err", err)
+			httpError(w, code, err)
+			return
+		}
+	} else {
+		var hash string
+		var err error
+		id, hash, err = s.store.AdminByName(r.Context(), req.Username)
+		if err != nil || !checkPassword(hash, req.Password) {
+			time.Sleep(500 * time.Millisecond)
+			httpError(w, http.StatusUnauthorized, errInvalidLogin)
+			return
+		}
 	}
 	tok := randToken(32)
 	if err := s.store.CreateSession(r.Context(), hashToken(tok), id, sessionTTL); err != nil {
@@ -126,5 +147,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"username": r.Context().Value(adminKey), "version": s.cfg.Version})
+	me := map[string]any{"username": r.Context().Value(adminKey), "version": s.cfg.Version}
+	if l := s.cfg.LocalPBS; l != nil {
+		me["local_pbs"] = map[string]string{"auth_id": l.AuthID, "host": l.PublicHost}
+	}
+	writeJSON(w, me)
+}
+
+// handleLoginInfo tells the login page whether PBS accounts can sign in.
+func (s *Server) handleLoginInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]bool{"pbs_login": s.cfg.LocalPBS != nil})
 }

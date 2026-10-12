@@ -1,0 +1,32 @@
+[Unit]
+Description=ProxBackup Console (management server for ProxBackup agents)
+After=network-online.target proxmox-backup-proxy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/proxbackup/proxbackup.env
+Environment=PROXBACKUP_DATA_DIR=/var/lib/proxbackup
+ExecStart=/usr/bin/proxbackup-server
+# Plain system user rather than DynamicUser/LoadCredential, which don't work in
+# every container (PBS often runs in an LXC). It can read /etc/proxbackup/pbs-token.
+User=proxbackup
+Group=proxbackup
+StateDirectory=proxbackup
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target
