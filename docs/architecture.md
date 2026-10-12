@@ -118,8 +118,8 @@ restore`, and `pxar` FUSE mounts all work.
   one archive, e.g. `c-users.pxar.didx`.
 * **Image backup.** The agent snapshots a volume with VSS and reads the shadow device
   sequentially into `drive-c.img.fidx` (4 MiB fixed chunks; zero chunks dedupe for free).
-  Phase 3 adds a partition table and EFI/MSR blob for bare-metal restore, plus WinPE restore
-  media.
+  Whole-disk restore of a dead machine goes through the Linux-based recovery image (see
+  [Bare-metal recovery](#bare-metal-recovery), roadmap phase 4).
 * **Restore.** The agent opens a reader session, downloads the index, fetches chunks on
   demand, decodes pxar, and writes files to the original or an alternate path. Overwrite
   policy is set per job.
@@ -279,7 +279,8 @@ docs/                   this document
 | **1 — MVP** (implemented; verified against PBS 4.2 except Windows-only paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI |
 | 2 | **`catalog.pcat1.didx` first** (the PBS GUI file browser refuses non-split pxar archives without it), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness |
 | 3 — macOS & Linux agents | First-class `pbspc-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, CI runs the E2E suite on Linux and macOS |
-| 4 | Bare-metal restore (WinPE media, GPT + EFI handling), changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
+| 4 — Bare-metal recovery | Linux-based **pbspc Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
+| 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
 
 ## Platform support
 
@@ -290,10 +291,75 @@ docs/                   this document
 | Consistent snapshot | VSS | ❌ live reads *(phase 3: APFS snapshots)* | ❌ live reads *(phase 3: LVM / btrfs / ZFS)* |
 | File metadata | attributes, timestamps (ACLs/ADS in phase 2) | ❌ mtime + read-only only *(phase 3)* | ❌ mtime + read-only only *(phase 3)* |
 | Service install | Windows service | launchd *(not yet verified)* | systemd *(not yet verified)* |
+| Bare-metal restore | *phase 4: pbspc Rescue* | ❌ not planned (see below) | *phase 4: pbspc Rescue* |
 
 Today the non-Windows agent is a development build. It backs up and restores file contents,
 names, symlinks and timestamps correctly, but records every file as owned by root with default
 permissions. Don't use it to protect Mac or Linux machines until phase 3.
+
+## Bare-metal recovery
+
+*Roadmap phase 4.* **pbspc Rescue** is one small Linux live image that restores a whole
+Windows or Linux machine onto an empty or replacement disk, with no working OS needed. It
+replaces the earlier WinPE idea: a single image covers both OSes, ships without Microsoft
+licensing questions, and reuses the same Go agent code.
+
+**What gets captured at backup time** (image jobs gain a "whole disk" mode):
+
+- `disk-layout.json.blob`: partition table (GPT/MBR), partition GUIDs/types/sizes/flags, disk
+  and filesystem UUIDs, boot entries, and the OS and hardware summary (disk model, NIC
+  drivers, BitLocker/LUKS status).
+- One fixed-chunk image per partition. Windows: EFI system partition, MSR and recovery partition
+  read raw (small, rarely change), the OS volume via its VSS snapshot. Linux: per-filesystem
+  images from LVM/btrfs/ZFS snapshots (phase 3), or file-level pxar plus layout for btrfs/ZFS.
+
+**The rescue image:**
+
+- Debian-based live system booting via the signed shim, so **Secure Boot can stay on**. Ships
+  as an ISO/USB image (UEFI + legacy BIOS) and as an iPXE/HTTP-boot entry for network recovery.
+  Kernel with broad storage/NIC drivers plus ntfs-3g, e2fsprogs, xfsprogs, btrfs-progs, LVM,
+  mdadm, cryptsetup and efibootmgr.
+- `pbspc-agent` in recovery mode with a text UI on the console and a small local web UI, so a
+  technician can drive it from a phone or laptop.
+- **Authentication:** an admin generates a one-time *recovery code* in the server UI (short
+  lifetime, bound to one client). It grants read-only restore access to that client's
+  snapshots: a temporary PBS token with `DatastoreReader` on the client's namespace, revoked
+  after use. Direct PBS credentials are possible as an offline fallback.
+
+**Restore flow:**
+
+1. Boot, get network (DHCP or manual), enter the server URL and recovery code (or scan a QR
+   code shown in the UI).
+2. Choose client → snapshot → target disk. The image shows a size check and a
+   "this disk will be erased" confirmation.
+3. Recreate the partition layout, scaled proportionally if the new disk is larger. Smaller
+   disks work if the used data fits: filesystems are shrunk where supported.
+4. Stream the partition images from PBS straight to the partitions. Chunks are fetched in
+   parallel, and zero chunks become sparse writes.
+5. Fix up and boot:
+   - **Windows:** ESP and BCD come back with the image. If the disk or partition GUIDs changed,
+     update the BCD device entries and recreate the UEFI boot entry with `efibootmgr`.
+     Dissimilar hardware (different storage controller) is best-effort: inject storage drivers
+     offline, otherwise restore to similar hardware.
+   - **Linux:** keep filesystem UUIDs, so `fstab`, `crypttab` and GRUB keep working. Reinstall
+     GRUB/systemd-boot from a chroot when the bootloader isn't on an imaged partition.
+6. Reboot and report the result to the server, which shows a "bare-metal restore" run in
+   the client history.
+
+**Encrypted disks:** VSS snapshots of BitLocker volumes are read decrypted, so restored
+volumes are unencrypted. The rescue UI says so, and BitLocker must be re-enabled afterwards.
+LUKS on Linux is restored as LUKS: the image is of the opened mapper device, and the LUKS
+container is recreated with the user's passphrase.
+
+The rescue image also does **file-level restore**: browse snapshots and copy files to a USB disk,
+or into the existing installation of a machine that won't boot.
+
+**Why not macOS:** Apple-silicon Macs only boot operating systems signed by Apple, or with
+reduced security after a manual Recovery-mode change, so a generic rescue image can't be
+booted. The system volume is a sealed, signed APFS snapshot that can't be recreated from a
+backup. Apple's supported path is: reinstall macOS from macOS Recovery, then restore user
+data. For Macs, pbspc will offer **data restore onto a freshly installed macOS** (user folders,
+apps and settings from the file-level archives) instead of bare-metal recovery.
 
 ## Risks and mitigations
 

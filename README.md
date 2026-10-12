@@ -108,6 +108,8 @@ Known gaps (see the roadmap):
 - no client-side encryption
 - no NTFS ACLs or alternate data streams
 - no tray app
-- image restore writes a `.img` file (no bare-metal restore yet)
+- image restore writes a `.img` file. Bare-metal recovery of Windows and Linux machines via a
+  Linux-based rescue boot image is planned (roadmap phase 4). Macs will get data restore onto a
+  fresh macOS install instead.
 - macOS/Linux agents are development builds only: no snapshots, no Unix owners/permissions/
   xattrs/ACLs (planned in roadmap phase 3, see *Platform support* in the architecture doc)
