@@ -1,4 +1,4 @@
-// Command pbspc-server is the management server for pbspc agents.
+// Command pbspc-server is ProxBackup Console, the management server for ProxBackup agents.
 package main
 
 import (

@@ -126,8 +126,8 @@ func serviceCommand(cmd, dataDir string, log *slog.Logger) error {
 	p := &program{dataDir: dataDir, log: log}
 	svc, err := service.New(p, &service.Config{
 		Name:        "pbspc-agent",
-		DisplayName: "PBS PC Backup Agent",
-		Description: "Backs up this PC to Proxmox Backup Server (managed by pbspc-server).",
+		DisplayName: "ProxBackup Agent",
+		Description: "Backs up this PC to Proxmox Backup Server (managed by ProxBackup Console).",
 		Arguments:   []string{"run", "-data-dir", dataDir},
 		Option:      service.KeyValue{"StartType": "automatic", "OnFailure": "restart", "OnFailureDelayDuration": "30s"},
 	})

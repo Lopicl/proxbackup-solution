@@ -43,7 +43,7 @@ function Login({ onLogin }: { onLogin: (u: string) => void }) {
         }}
       >
         <h1>
-          <span className="logo">▣</span> PBS PC Backup
+          <span className="logo">▣</span> ProxBackup Console
         </h1>
         <Field label="Username">
           <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
@@ -107,7 +107,7 @@ function App() {
     <div className="shell">
       <aside>
         <div className="brand">
-          <span className="logo">▣</span> PBS PC Backup
+          <span className="logo">▣</span> ProxBackup Console
         </div>
         <nav>
           {nav.map((n) => (

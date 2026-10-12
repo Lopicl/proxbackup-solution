@@ -1,4 +1,4 @@
-# PBS PC Client
+# ProxBackup Solution
 
 Centrally managed backups of Windows PCs to **Proxmox Backup Server**, natively. The agent speaks the
 PBS backup protocol itself (no Linux proxy, no `proxmox-backup-client` needed), so PC backups are
@@ -6,8 +6,8 @@ ordinary PBS snapshots: deduplicated, verifiable, syncable, prunable.
 
 | Component | What it is |
 |-----------|------------|
-| `pbspc-agent` | Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
-| `pbspc-server` | Management server with an embedded web UI: enrollment, jobs and schedules, run history and live logs, snapshot browser, restore, retention, notifications. |
+| `pbspc-agent` | **ProxBackup Agent**, a Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
+| `pbspc-server` | **ProxBackup Console**, the on-premises management server with an embedded web UI: enrollment, jobs and schedules, run history and live logs, snapshot browser, restore, retention, notifications. |
 | `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar v1 archive format. |
 
 See [docs/architecture.md](docs/architecture.md) for the design, security model and roadmap.
@@ -94,7 +94,7 @@ The MVP has been verified end to end against **PBS 4.2** (Docker), with the agen
 - server-side verify, prune and retention
 - enrollment and mTLS, least-privilege PBS provisioning
 - agent-side scheduling: on-time runs, catch-up after the agent was down, `missed` records with
-  catch-up off, and backups while the management server was offline (reported afterwards)
+  catch-up off, and backups while the ProxBackup Console was offline (reported afterwards)
 - run events, file and image restores (byte-identical)
 
 **Not yet verified on real Windows:** the Windows-only code paths (VSS via `go-vss`, raw volume

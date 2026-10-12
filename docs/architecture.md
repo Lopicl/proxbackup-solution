@@ -1,4 +1,4 @@
-# PBS PC Client — Architecture
+# ProxBackup Solution — Architecture
 
 A centrally managed backup system for Windows PCs that stores backups **natively** on a
 Proxmox Backup Server (PBS). There is no Linux proxy and no official `proxmox-backup-client`
@@ -11,8 +11,8 @@ same chunk-level deduplication, verification, sync and prune behaviour as any ot
 |------|-----|
 | File-level backups of Windows PCs | VSS snapshot → pxar v1 archive → dynamic chunk index (`*.pxar.didx`) |
 | Volume image backups | VSS snapshot of the volume device → fixed 4 MiB chunk index (`*.img.fidx`) |
-| Central management | Management server with web UI: clients, jobs, schedules, history, restore |
-| No inbound ports on PCs | Agents dial out to the management server (long-poll over mTLS) |
+| Central management | ProxBackup Console (on-premises management server) with web UI: clients, jobs, schedules, history, restore |
+| No inbound ports on PCs | Agents dial out to the ProxBackup Console (long-poll over mTLS) |
 | The PC decides when to back up | The server only pushes configuration. Each agent runs its own scheduler on the PC's clock, catches up missed runs if the job allows it, and keeps backing up while the server is down |
 | Ransomware resilience | Agents get a PBS token with **DatastoreBackup** only — they can add backups, never delete or prune them |
 | Interoperability | Snapshots are standard PBS snapshots: visible in the PBS GUI, verifiable, syncable, restorable with `proxmox-backup-client` on Linux |
@@ -28,7 +28,7 @@ flowchart LR
     AGENT --- VSS
   end
 
-  subgraph MGMT["Management server (Linux or Windows)"]
+  subgraph MGMT["ProxBackup Console (Linux or Windows)"]
     API["pbspc-server<br/>REST API + config push"]
     UI["Web UI (React, embedded)"]
     DB[(SQLite)]
@@ -45,7 +45,7 @@ flowchart LR
 ```
 
 **Control plane and data plane are separate.** Backup data never flows through the
-management server: the agent uploads chunks straight to PBS. The management server only
+ProxBackup Console: the agent uploads chunks straight to PBS. The console only
 orchestrates the work.
 
 ## Components
@@ -91,7 +91,7 @@ restore`, and `pxar` FUSE mounts all work.
 | Alternate data streams | xattr `user.pbspc.ads.<name>` for small streams *(phase 2)* |
 | UTF-16 names | UTF-8 |
 
-### 3. `pbspc-agent`: Windows service
+### 3. `pbspc-agent`: ProxBackup Agent (Windows service)
 
 * Runs as `LocalSystem` (needed for VSS and for reading every file), installed with
   `pbspc-agent install`.
@@ -126,7 +126,7 @@ restore`, and `pxar` FUSE mounts all work.
 * **Local IPC.** A named pipe `\\.\pipe\pbspc-agent` serves the tray app (status, "Back up
   now", recent runs). The pipe ACL allows only interactive users plus SYSTEM.
 
-### 4. `pbspc-server`: management server
+### 4. `pbspc-server`: ProxBackup Console
 
 * A single Go binary with the React SPA embedded (`go:embed`). SQLite via the pure-Go
   `modernc.org/sqlite`, so there is no cgo.
@@ -188,7 +188,7 @@ stateDiagram-v2
   Missed --> Waiting: report "missed"
 ```
 
-## Data model (management server)
+## Data model (ProxBackup Console)
 
 ```mermaid
 erDiagram
@@ -260,8 +260,8 @@ sequenceDiagram
 ## Repository layout
 
 ```
-cmd/pbspc-server/       management server entrypoint
-cmd/pbspc-agent/        Windows agent entrypoint (service + CLI: enroll, backup, restore)
+cmd/pbspc-server/       ProxBackup Console (management server) entrypoint
+cmd/pbspc-agent/        ProxBackup Agent entrypoint (service + CLI: enroll, backup, restore)
 pkg/pbs/                PBS protocol: blob, chunker, backup & reader sessions, admin API
 pkg/pxar/               pxar v1 encoder/decoder
 internal/agent/         job runner, VSS, file walker, image reader, server client
@@ -279,9 +279,9 @@ docs/                   this document
 | **1 — MVP** (implemented; verified against PBS 4.2 except Windows-only paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI |
 | 2 | **`catalog.pcat1.didx` first** (the PBS GUI file browser refuses non-split pxar archives without it), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness |
 | 3 — macOS & Linux agents | First-class `pbspc-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, CI runs the E2E suite on Linux and macOS |
-| 4 — Bare-metal recovery | Linux-based **pbspc Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
+| 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
-| 6 — MSP cloud console | Cloud-hosted, multi-tenant **pbspc Cloud** console for managed service providers: one pane of glass over all customers' sites, cross-customer alerting, policy templates, technician RBAC scoped per customer, reporting and usage metering for billing, PSA/RMM integrations, optional hosted management servers. See [MSP cloud console](#msp-cloud-console) |
+| 6 — MSP cloud console | Cloud-hosted, multi-tenant **ProxBackup Cloud** console for managed service providers: one pane of glass over all customers' sites, cross-customer alerting, policy templates, technician RBAC scoped per customer, reporting and usage metering for billing, PSA/RMM integrations, optional hosted management servers. See [MSP cloud console](#msp-cloud-console) |
 
 ## Platform support
 
@@ -292,7 +292,7 @@ docs/                   this document
 | Consistent snapshot | VSS | ❌ live reads *(phase 3: APFS snapshots)* | ❌ live reads *(phase 3: LVM / btrfs / ZFS)* |
 | File metadata | attributes, timestamps (ACLs/ADS in phase 2) | ❌ mtime + read-only only *(phase 3)* | ❌ mtime + read-only only *(phase 3)* |
 | Service install | Windows service | launchd *(not yet verified)* | systemd *(not yet verified)* |
-| Bare-metal restore | *phase 4: pbspc Rescue* | ❌ not planned (see below) | *phase 4: pbspc Rescue* |
+| Bare-metal restore | *phase 4: ProxBackup Rescue* | ❌ not planned (see below) | *phase 4: ProxBackup Rescue* |
 
 Today the non-Windows agent is a development build. It backs up and restores file contents,
 names, symlinks and timestamps correctly, but records every file as owned by root with default
@@ -300,7 +300,7 @@ permissions. Don't use it to protect Mac or Linux machines until phase 3.
 
 ## Bare-metal recovery
 
-*Roadmap phase 4.* **pbspc Rescue** is one small Linux live image that restores a whole
+*Roadmap phase 4.* **ProxBackup Rescue** is one small Linux live image that restores a whole
 Windows or Linux machine onto an empty or replacement disk, with no working OS needed. It
 replaces the earlier WinPE idea: a single image covers both OSes, ships without Microsoft
 licensing questions, and reuses the same Go agent code.
@@ -364,28 +364,28 @@ apps and settings from the file-level archives) instead of bare-metal recovery.
 
 ## MSP cloud console
 
-*Roadmap phase 6.* **pbspc Cloud** is a hosted, multi-tenant console for managed service
+*Roadmap phase 6.* **ProxBackup Cloud** is a hosted, multi-tenant console for managed service
 providers (MSPs) who run pbspc for many customers. Today each customer has its own
-`pbspc-server` with its own UI, so an MSP has to log in to every one of them. The console
+ProxBackup Console with its own UI, so an MSP has to log in to every one of them. The console
 gives technicians one place to see and manage all customers, without changing where backups
 are stored or who holds the keys.
 
 ```mermaid
 flowchart LR
-  subgraph CLOUD["pbspc Cloud (hosted, multi-tenant)"]
+  subgraph CLOUD["ProxBackup Cloud (hosted, multi-tenant)"]
     CON["Console API + UI"]
     CDB[(Postgres)]
     CON --- CDB
   end
 
   subgraph CA["Customer A site"]
-    SA["pbspc-server"] --- PA[("PBS")]
+    SA["ProxBackup Console"] --- PA[("PBS")]
     AGA["agents"] --> SA
     AGA ==> PA
   end
 
   subgraph CB["Customer B (hosted server)"]
-    SB["pbspc-server<br/>hosted tenant instance"]
+    SB["ProxBackup Console<br/>hosted tenant instance"]
     AGB["agents"] --> SB
     AGB ==> PB[("PBS: customer's<br/>or MSP's")]
   end
@@ -396,17 +396,17 @@ flowchart LR
   CUST(["Customer portal users"]) -.-> CON
 ```
 
-**Hierarchy:** MSP → customer → site (one `pbspc-server`) → clients → jobs. Every object in
+**Hierarchy:** MSP → customer → site (one ProxBackup Console) → clients → jobs. Every object in
 the console belongs to exactly one customer, and every query is scoped by tenant.
 
 **How sites connect:**
 
-- **Connected on-prem servers.** An existing `pbspc-server` is linked with a one-time
+- **Connected on-prem consoles.** An existing ProxBackup Console is linked with a one-time
   *site code* from the console. It then dials out to the console (mTLS, long-poll, the same
   pattern agents use), so customer firewalls need no inbound rules. The site sends client
   state, run results and alerts up, and receives policy changes and actions.
-- **Hosted servers.** For customers without a server of their own, the console runs a
-  `pbspc-server` instance per customer. Agents enroll against it over the internet; backup data
+- **Hosted consoles.** For customers without a server of their own, the console runs a
+  ProxBackup Console instance per customer. Agents enroll against it over the internet; backup data
   still goes straight to PBS (the customer's, or an MSP-operated datastore with one namespace
   tree per customer).
 - **Sites stay autonomous.** If the console is unreachable, sites and agents keep backing up
@@ -439,7 +439,7 @@ the console belongs to exactly one customer, and every query is scoped by tenant
   read-only) scoped to all customers or a subset, and an immutable audit log of every action,
   per customer and exportable.
 - **The console never holds PBS admin tokens or encryption keys.** These stay on each
-  `pbspc-server`. The console sends signed *requests*, and the site server authorizes and
+  ProxBackup Console. The console sends signed *requests*, and the site server authorizes and
   carries them out with its own credentials. For hosted servers, secrets live in per-tenant
   instances, encrypted with per-tenant keys.
 - **A compromised console must not be able to destroy backups.** Sites refuse destructive or
