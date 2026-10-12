@@ -82,7 +82,10 @@ func (s *snapshotSet) Close() {
 	s.byVol = map[string]*vss.ShadowCopy{}
 }
 
-const ioctlDiskGetLengthInfo = 0x7405C
+const (
+	ioctlDiskGetLengthInfo   = 0x7405C
+	fsctlAllowExtendedDasdIO = 0x90083
+)
 
 // openVolume opens a raw volume/snapshot device and returns its size.
 func openVolume(dev string) (*windows.Handle, uint64, error) {
@@ -102,6 +105,10 @@ func openVolume(dev string) (*windows.Handle, uint64, error) {
 		windows.CloseHandle(h)
 		return nil, 0, errors.New("volume reports zero size")
 	}
+	// The length above is the partition's, but NTFS only lets reads reach the end
+	// of the file system, which stops one sector short (the backup boot sector).
+	// Extended DASD I/O lifts that limit so the whole partition can be imaged.
+	windows.DeviceIoControl(h, fsctlAllowExtendedDasdIO, nil, 0, nil, 0, &ret, nil)
 	return &h, uint64(size), nil
 }
 
