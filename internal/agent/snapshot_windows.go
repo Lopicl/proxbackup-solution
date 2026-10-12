@@ -70,6 +70,13 @@ func (s *snapshotSet) VolumeDevice(vol string) (string, error) {
 	return strings.TrimRight(root, `\`), nil
 }
 
+// imageFSRoot returns the root directory of vol inside the snapshot that
+// VolumeDevice images, for listing its files into the catalog.
+func (s *snapshotSet) imageFSRoot(vol string) (string, bool) {
+	root, err := s.Resolve(strings.TrimRight(vol, `\`) + `\`)
+	return root, err == nil
+}
+
 // Close deletes all shadow copies created by this set.
 func (s *snapshotSet) Close() {
 	s.mu.Lock()

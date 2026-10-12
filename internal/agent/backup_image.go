@@ -74,5 +74,25 @@ func (j *job) runImage(ctx context.Context) (api.Result, error) {
 		j.uploaded.Add(st.UploadedBytes)
 		j.logf("info", "%s: %d chunks (%d new, %d reused), %d bytes uploaded", v.archive, st.Chunks, st.NewChunks, st.ReusedChunks, st.UploadedBytes)
 	}
+
+	// List each volume's files from the same snapshot, so the image can be
+	// browsed like a file backup.
+	j.setPhase("catalog")
+	cat := j.newCatalog()
+	defer cat.Close()
+	for _, v := range vols {
+		root, ok := snaps.imageFSRoot(v.name)
+		if !ok {
+			continue
+		}
+		cat.StartDirectory(v.archive)
+		if err := cat.addTree(ctx, root); err != nil {
+			return res, err
+		}
+		cat.EndDirectory()
+	}
+	if err := cat.upload(ctx, sess, &res); err != nil {
+		return res, err
+	}
 	return res, j.finishSession(ctx, sess, &res)
 }

@@ -55,6 +55,8 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 	j.logf("info", "backup session started: %s", sess.Ref())
 
 	excl := NewExcluder(append(append([]string{}, DefaultExcludes...), j.spec.Excludes...))
+	cat := j.newCatalog()
+	defer cat.Close()
 	j.setPhase("upload")
 	for _, src := range sources {
 		if err := ctx.Err(); err != nil {
@@ -66,7 +68,7 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 		} else if ok {
 			j.logf("info", "%s: incremental against previous snapshot", src.archive)
 		}
-		st, err := j.backupSource(ctx, sess, excl, src)
+		st, err := j.backupSource(ctx, sess, excl, cat, src)
 		if err != nil {
 			return res, fmt.Errorf("%s: %w", src.orig, err)
 		}
@@ -75,13 +77,16 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 		j.logf("info", "%s: %d bytes, %d chunks (%d new, %d reused), %d uploaded",
 			src.archive, st.Size, st.Chunks, st.NewChunks, st.ReusedChunks, st.UploadedBytes)
 	}
+	if err := cat.upload(ctx, sess, &res); err != nil {
+		return res, err
+	}
 	if err := j.finishSession(ctx, sess, &res); err != nil {
 		return res, err
 	}
 	return res, nil
 }
 
-func (j *job) backupSource(ctx context.Context, sess *pbs.BackupSession, excl *Excluder, src fileSource) (pbs.Stats, error) {
+func (j *job) backupSource(ctx context.Context, sess *pbs.BackupSession, excl *Excluder, cat *catalog, src fileSource) (pbs.Stats, error) {
 	fi, err := os.Stat(src.read)
 	if err != nil {
 		return pbs.Stats{}, err
@@ -90,7 +95,8 @@ func (j *job) backupSource(ctx context.Context, sess *pbs.BackupSession, excl *E
 	if err != nil {
 		return pbs.Stats{}, err
 	}
-	w := &walker{j: j, ctx: ctx, excl: excl}
+	w := &walker{j: j, ctx: ctx, excl: excl, cat: cat}
+	cat.StartDirectory(src.archive)
 	if fi.IsDir() {
 		w.enc, err = pxar.NewEncoder(aw, toPxarMeta(fi, statMeta(fi)))
 		if err == nil {
@@ -110,6 +116,9 @@ func (j *job) backupSource(ctx context.Context, sess *pbs.BackupSession, excl *E
 	if err == nil {
 		err = w.enc.Close()
 	}
+	if err == nil {
+		cat.EndDirectory()
+	}
 	st, cerr := aw.Close()
 	if err == nil {
 		err = cerr
@@ -122,6 +131,7 @@ type walker struct {
 	ctx  context.Context
 	enc  *pxar.Encoder
 	excl *Excluder
+	cat  *catalog // mirrors every entry written to enc
 }
 
 func (w *walker) skip(rel string, format string, args ...any) {
@@ -179,9 +189,11 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 			return err
 		}
 		w.j.dirs.Add(1)
+		w.cat.StartDirectory(name)
 		if err := w.walkEntries(full, crel, entries); err != nil {
 			return err
 		}
+		w.cat.EndDirectory()
 		return w.enc.FinishDir()
 	case mode&fs.ModeSymlink != 0:
 		target, err := os.Readlink(full)
@@ -189,7 +201,11 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 			w.skip(crel, "unreadable symlink: %v", err)
 			return nil
 		}
-		return w.enc.AddSymlink([]byte(name), toPxarMeta(fi, meta), []byte(target))
+		if err := w.enc.AddSymlink([]byte(name), toPxarMeta(fi, meta), []byte(target)); err != nil {
+			return err
+		}
+		w.cat.AddSymlink(name)
+		return nil
 	case mode.IsRegular():
 		if meta.cloudPlaceholder {
 			w.skip(crel, "cloud placeholder (not available offline)")
@@ -202,6 +218,10 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 		}
 		defer f.Close()
 		res, err := w.enc.AddFile([]byte(name), toPxarMeta(fi, meta), uint64(fi.Size()), countingReader{f, &w.j.bytesRead})
+		if err == nil || res.Short {
+			// Short reads still leave a (zero padded) entry in the archive.
+			w.cat.AddFile(name, uint64(fi.Size()), fi.ModTime().Unix())
+		}
 		if err != nil {
 			if w.ctx.Err() != nil {
 				return w.ctx.Err()

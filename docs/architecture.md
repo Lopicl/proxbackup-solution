@@ -118,6 +118,12 @@ restore`, and `pxar` FUSE mounts all work.
   one archive, e.g. `c-users.pxar.didx`.
 * **Image backup.** The agent snapshots a volume with VSS and reads the shadow device
   sequentially into `drive-c.img.fidx` (4 MiB fixed chunks; zero chunks dedupe for free).
+  Afterwards it lists the volume's files from the same shadow copy into the catalog, so the
+  image can be browsed in the PBS GUI like a file backup (downloads need a pxar archive, so
+  per-file restore from images is not possible there).
+* **Catalog.** Every snapshot carries `catalog.pcat1.didx`, the file list the PBS GUI file
+  browser reads. Its root holds one folder per archive. File backups fill it while encoding the
+  pxar; a catalog failure only costs browsability, never the backup.
   Whole-disk restore of a dead machine goes through the Linux-based recovery image (see
   [Bare-metal recovery](#bare-metal-recovery), roadmap phase 4).
 * **Restore.** The agent opens a reader session, downloads the index, fetches chunks on
@@ -277,7 +283,7 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2 except Windows-only paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI |
-| 2 | **`catalog.pcat1.didx` first** (the PBS GUI file browser refuses non-split pxar archives without it), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness |
+| 2 | ~~`catalog.pcat1.didx`~~ (done, for file and image backups), file restore from images (NTFS reader over the fixed index), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |

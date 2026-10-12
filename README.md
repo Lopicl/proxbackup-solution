@@ -97,14 +97,16 @@ The MVP has been verified end to end against **PBS 4.2** (Docker), with the agen
   catch-up off, and backups while the ProxBackup Console was offline (reported afterwards)
 - run events, file and image restores (byte-identical)
 
-**Not yet verified on real Windows:** the Windows-only code paths (VSS via `go-vss`, raw volume
-reads, attribute and timestamp restore, the service wrapper). They compile and vet cleanly for
-`windows/amd64`. Test them on a Windows 10/11 VM before rolling out.
+**Verified on Windows 11 (ARM64 VM) against PBS 4.2:** VSS snapshots, file backup and restore
+(contents, attributes, timestamps, symlinks; junctions skipped), incremental reuse, volume
+images, and browsing both in the PBS GUI. **Not yet verified:** the service wrapper and
+server-driven scheduling.
 
 Known gaps (see the roadmap):
 
-- no `catalog.pcat1.didx` yet, so the PBS GUI file browser can't list our archives (single-file
-  download via the PBS API works, and so does restore through ProxBackup)
+- volume images are browsable in the PBS GUI file browser (via `catalog.pcat1.didx`), but single
+  files can't be downloaded from them there: PBS only extracts files from pxar archives. File
+  backups are browsable and downloadable.
 - no client-side encryption
 - no NTFS ACLs or alternate data streams
 - no tray app
