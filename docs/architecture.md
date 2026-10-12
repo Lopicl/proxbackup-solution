@@ -276,9 +276,24 @@ docs/                   this document
 
 | Phase | Scope |
 |-------|-------|
-| **1 — MVP** (implemented; verified against PBS 4.2 except Windows-only paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, enrollment + mTLS, job scheduling, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI |
+| **1 — MVP** (implemented; verified against PBS 4.2 except Windows-only paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI |
 | 2 | **`catalog.pcat1.didx` first** (the PBS GUI file browser refuses non-split pxar archives without it), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness |
-| 3 | Bare-metal restore (WinPE media, GPT + EFI handling), changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
+| 3 — macOS & Linux agents | First-class `pbspc-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, CI runs the E2E suite on Linux and macOS |
+| 4 | Bare-metal restore (WinPE media, GPT + EFI handling), changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
+
+## Platform support
+
+| | Windows | macOS | Linux |
+|---|---|---|---|
+| Builds and runs | ✅ (Windows-only paths not yet tested on real Windows) | ✅ tested | ✅ builds; not yet run |
+| Scheduling, catch-up, offline operation, restore | ✅ | ✅ | ✅ |
+| Consistent snapshot | VSS | ❌ live reads *(phase 3: APFS snapshots)* | ❌ live reads *(phase 3: LVM / btrfs / ZFS)* |
+| File metadata | attributes, timestamps (ACLs/ADS in phase 2) | ❌ mtime + read-only only *(phase 3)* | ❌ mtime + read-only only *(phase 3)* |
+| Service install | Windows service | launchd *(not yet verified)* | systemd *(not yet verified)* |
+
+Today the non-Windows agent is a development build. It backs up and restores file contents,
+names, symlinks and timestamps correctly, but records every file as owned by root with default
+permissions. Don't use it to protect Mac or Linux machines until phase 3.
 
 ## Risks and mitigations
 

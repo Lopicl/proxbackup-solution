@@ -109,3 +109,5 @@ Known gaps (see the roadmap):
 - no NTFS ACLs or alternate data streams
 - no tray app
 - image restore writes a `.img` file (no bare-metal restore yet)
+- macOS/Linux agents are development builds only: no snapshots, no Unix owners/permissions/
+  xattrs/ACLs (planned in roadmap phase 3, see *Platform support* in the architecture doc)
