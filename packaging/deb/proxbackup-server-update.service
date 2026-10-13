@@ -1,0 +1,16 @@
+[Unit]
+Description=Install a ProxBackup Console update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root because it installs a package. It downloads the requested
+# version from GitHub itself and checks it against the release's SHA256SUMS;
+# the console only names the version.
+EnvironmentFile=-/etc/proxbackup/proxbackup.env
+Environment=PROXBACKUP_DATA_DIR=/var/lib/proxbackup
+ExecStart=/usr/bin/proxbackup-server apply-update
+CacheDirectory=proxbackup
+CacheDirectoryMode=0700
+TimeoutStartSec=30min

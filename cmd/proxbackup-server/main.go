@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -16,12 +17,24 @@ import (
 	"syscall"
 
 	"proxbackup/internal/server"
+	"proxbackup/internal/update"
 )
 
 // version is set at build time from ./VERSION (see Makefile).
 var version = "dev"
 
 func main() {
+	// Subcommands that must not open the data directory.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version":
+			fmt.Println(version)
+			return
+		case "apply-update":
+			applyUpdate(os.Args[2:])
+			return
+		}
+	}
 	cfg := server.Config{Version: version}
 	var hosts string
 	var local server.LocalPBS
@@ -36,8 +49,10 @@ func main() {
 	flag.StringVar(&local.AuthID, "local-pbs-auth-id", envOr("PROXBACKUP_LOCAL_PBS_AUTH_ID", "root@pam!proxbackup-console"), "local PBS admin token id")
 	flag.StringVar(&local.SecretFile, "local-pbs-secret-file", envOr("PROXBACKUP_LOCAL_PBS_SECRET_FILE", credentialPath("pbs-token")), "file with the local PBS admin token secret")
 	flag.StringVar(&local.PublicHost, "pbs-public-host", os.Getenv("PROXBACKUP_PBS_PUBLIC_HOST"), "PBS address agents use (default: host of -public-url, port 8007)")
+	flag.StringVar(&cfg.UpdateRepo, "update-repo", os.Getenv("PROXBACKUP_UPDATE_REPO"), "GitHub repository (owner/name) to take updates from (default "+update.DefaultRepo+")")
+	cfg.UpdateMode = os.Getenv("PROXBACKUP_UPDATE_MODE") // "deb", set by the package's unit file
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: proxbackup-server [flags]\n       proxbackup-server passwd [username]   set an admin password\n\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "Usage: proxbackup-server [flags]\n       proxbackup-server passwd [username]   set an admin password\n       proxbackup-server version\n       proxbackup-server apply-update        install a requested update (run as root by proxbackup-server-update.service)\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -93,7 +108,25 @@ func main() {
 	if cfg.PublicURL == "" {
 		log.Warn("-public-url is not set; enrollment tokens cannot be created until it is")
 	}
-	if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
+	if err := srv.Run(ctx); errors.Is(err, server.ErrRestart) {
+		log.Info("re-executing the updated binary")
+		fatal(reexec())
+	} else if err != nil && ctx.Err() == nil {
+		fatal(err)
+	}
+}
+
+// applyUpdate is run as root by proxbackup-server-update.service.
+func applyUpdate(args []string) {
+	fs := flag.NewFlagSet("apply-update", flag.ExitOnError)
+	dataDir := fs.String("data-dir", envOr("PROXBACKUP_DATA_DIR", "/var/lib/proxbackup"), "console data directory")
+	cacheDir := fs.String("cache-dir", envOr("CACHE_DIRECTORY", "/var/cache/proxbackup"), "root-owned download directory")
+	repo := fs.String("update-repo", os.Getenv("PROXBACKUP_UPDATE_REPO"), "GitHub repository (owner/name)")
+	fs.Parse(args)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := server.ApplyUpdate(ctx, version, *dataDir, *cacheDir, *repo, log); err != nil {
 		fatal(err)
 	}
 }

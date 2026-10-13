@@ -94,6 +94,41 @@ report theirs to the server.
 
 Development happens on the `alpha` branch, which is the default.
 
+## Releases and automatic updates
+
+```sh
+make release                      # tag HEAD as v<VERSION> and push the tag
+scripts/release.sh --local        # or: build with `make dist` and publish from this machine via gh
+scripts/release.sh --local --prerelease
+```
+
+Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it
+checks that the tag matches `VERSION`, runs the tests, builds `make dist` and publishes a GitHub
+release with these assets:
+
+| Asset | Used by |
+| --- | --- |
+| `proxbackup-server_<version>_{amd64,arm64}.deb` | consoles installed from the package |
+| `proxbackup-server-linux-{amd64,arm64}` | standalone consoles |
+| `proxbackup-agent-windows-{amd64,arm64}.exe` | agents (served to them by the console) |
+| `SHA256SUMS` | every download is checked against it |
+
+The console checks the releases every 6 hours. Under *Settings → Updates* you pick the weekdays,
+time and window length for automatic installs, or install right away with *Install now*:
+
+* **.deb installs:** the console runs unprivileged, so it only writes a request. The root unit
+  `proxbackup-server-update.service`, started by `proxbackup-server-update.path`, downloads the
+  package from GitHub itself, verifies it, refuses to downgrade and runs `dpkg -i`. Its log is in
+  `journalctl -u proxbackup-server-update`.
+* **Standalone:** the console downloads the new binary, swaps it in and re-executes itself.
+* **Agents** follow the console. A Windows agent older than the console is offered the console's
+  version over its mTLS connection. When no backup is running it verifies the binary, replaces
+  itself and restarts.
+
+Consoles from before this feature (≤ 0.1.13) have to be upgraded by hand once.
+`PROXBACKUP_UPDATE_REPO` (in `/etc/proxbackup/proxbackup.env`) points updates at another
+repository.
+
 ## Status
 
 The MVP has been verified end to end against **PBS 4.2** (Docker), with the agent running on macOS:

@@ -30,6 +30,7 @@ func (s *Server) agentRoutes() http.Handler {
 	mux.Handle("POST /agent/v1/poll", s.requireAgent(s.handlePoll))
 	mux.Handle("POST /agent/v1/runs", s.requireAgent(s.handleRegisterRun))
 	mux.Handle("POST /agent/v1/runs/{id}/events", s.requireAgent(s.handleEvents))
+	mux.Handle("GET /agent/v1/update/{platform}", s.requireAgent(s.handleAgentBinary))
 	return mux
 }
 
@@ -132,13 +133,14 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 	s.store.TouchClient(ctx, c.ID, req)
 	s.store.MarkMissingLost(ctx, c.ID, req.RunningRuns)
 	agentRev := req.ConfigRev
+	offer := s.updater.agentOffer(ctx, req.OS, req.AgentVersion)
 
 	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
 	wait = min(max(wait, 0), 55)
 	deadline := time.After(time.Duration(wait) * time.Second)
 	for {
 		wake := s.wakeChan(c.ID)
-		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID)}
+		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID), Update: offer}
 		cfg, err := s.agentConfig(ctx, c)
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err)

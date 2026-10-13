@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type NotifySettings } from '../api'
 import { Card, ErrorBox, Field } from '../ui'
+import { UpdatesCard } from './Updates'
 
 export function Settings() {
   const [s, setS] = useState<NotifySettings | null>(null)
@@ -94,6 +95,7 @@ export function Settings() {
           </div>
         </form>
       </Card>
+      <UpdatesCard />
       <Card title="Server certificate authority">
         <p className="muted-text">
           Agents trust this server through its internal CA (pinned at enrollment). Import the CA into your browser or OS trust store to remove the certificate warning for this

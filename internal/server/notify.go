@@ -123,6 +123,23 @@ func (n *Notifier) CheckStale(ctx context.Context) {
 	}
 }
 
+// Update reports an installed (or failed) console update.
+func (n *Notifier) Update(ctx context.Context, from, to string, err error) {
+	ns := n.settings(ctx)
+	m := Message{Event: "update.installed", Severity: "info",
+		Subject: fmt.Sprintf("[ProxBackup] console updated to %s", to),
+		Text:    fmt.Sprintf("ProxBackup Console was updated from %s to %s. Agents follow automatically if enabled.\n", from, to)}
+	if err != nil {
+		if !ns.OnFailure {
+			return
+		}
+		m.Event, m.Severity = "update.failed", "error"
+		m.Subject = fmt.Sprintf("[ProxBackup] update to %s failed", to)
+		m.Text = fmt.Sprintf("Updating ProxBackup Console from %s to %s failed:\n\n%s\n", from, to, err)
+	}
+	n.send(ctx, ns, m)
+}
+
 func (n *Notifier) send(ctx context.Context, ns NotifySettings, m Message) []error {
 	var errs []error
 	if ns.WebhookURL != "" {

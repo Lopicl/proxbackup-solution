@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for ProxBackup Console update requests
+
+[Path]
+# Written by the console (unprivileged) when an update should be installed.
+PathExists=/var/lib/proxbackup/updates/request
+
+[Install]
+WantedBy=multi-user.target

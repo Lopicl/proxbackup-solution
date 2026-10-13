@@ -1,0 +1,48 @@
+# Builds and publishes a GitHub release when a v* tag is pushed (make release).
+# The release assets are what consoles download for automatic updates.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches VERSION
+        run: |
+          v="v$(cat VERSION)"
+          if [ "$v" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match VERSION ($v)"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Test
+        run: make test
+
+      - name: Build release assets
+        run: make dist
+
+      - name: Publish
+        run: scripts/release.sh --publish
+        env:
+          GH_TOKEN: ${{ github.token }}

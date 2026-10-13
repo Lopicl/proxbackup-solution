@@ -137,6 +137,16 @@ type PollResponse struct {
 	Config *AgentConfig `json:"config,omitempty"` // only sent when ConfigRev differs
 	Jobs   []JobSpec    `json:"jobs"`             // manual runs and restores requested in the UI
 	Cancel []int64      `json:"cancel"`
+	// Update offers a newer agent; the agent installs it when idle.
+	Update *AgentUpdate `json:"update,omitempty"`
+}
+
+// AgentUpdate describes an agent binary the server offers.
+type AgentUpdate struct {
+	Version string `json:"version"`
+	URL     string `json:"url"` // path on the server, e.g. /agent/v1/update/windows-amd64 (mTLS)
+	SHA256  string `json:"sha256"`
+	Size    int64  `json:"size"`
 }
 
 // RunRegister announces a run the agent started on its own (scheduled or

@@ -43,7 +43,9 @@ func main() {
 
 	data := []file{
 		{"usr/bin/proxbackup-server", 0o755, read(*binary)},
-		{"usr/lib/systemd/system/proxbackup-server.service", 0o644, read(filepath.Join(*src, "proxbackup-server.service"))},
+	}
+	for _, u := range []string{"proxbackup-server.service", "proxbackup-server-update.service", "proxbackup-server-update.path"} {
+		data = append(data, file{"usr/lib/systemd/system/" + u, 0o644, read(filepath.Join(*src, u))})
 	}
 	var size int
 	for _, f := range data {

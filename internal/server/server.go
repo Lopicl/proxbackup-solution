@@ -28,6 +28,10 @@ type Config struct {
 	Hostnames []string // extra SANs for the server certificate
 	Version   string
 	LocalPBS  *LocalPBS // set when installed on the PBS host itself (see localpbs.go)
+	// UpdateRepo is the GitHub repository (owner/name) releases come from; empty = update.DefaultRepo.
+	UpdateRepo string
+	// UpdateMode is "deb" when installed from the package (see updater.go).
+	UpdateMode string
 }
 
 // Server is the management server.
@@ -37,7 +41,8 @@ type Server struct {
 	pki    *PKI
 	sealer *Sealer
 	log    *slog.Logger
-	notify *Notifier
+	notify  *Notifier
+	updater *updater
 
 	wakeMu sync.Mutex
 	wake   map[int64]chan struct{} // per-client long-poll wakeups
@@ -59,15 +64,21 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{}}
 	s.notify = &Notifier{s: s}
+	s.updater = newUpdater(s)
 	return s, nil
 }
 
 // Store exposes the database (used by CLI commands).
 func (s *Server) Store() *Store { return s.store }
 
-// Run serves until ctx is canceled.
+// Run serves until ctx is canceled. It returns ErrRestart after the server
+// replaced its own binary.
 func (s *Server) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	s.updater.restart = func() { cancel(ErrRestart) }
 	go s.housekeeping(ctx)
+	go s.updater.loop(ctx)
 	if s.cfg.LocalPBS != nil {
 		go s.localPBSLoop(ctx)
 	}
@@ -101,12 +112,18 @@ func (s *Server) Run(ctx context.Context) error {
 	case err := <-errc:
 		return err
 	}
-	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	shutdown, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
 	for _, hs := range servers {
 		hs.Shutdown(shutdown)
 	}
-	return s.store.Close()
+	if err := s.store.Close(); err != nil {
+		return err
+	}
+	if errors.Is(context.Cause(ctx), ErrRestart) {
+		return ErrRestart
+	}
+	return nil
 }
 
 func displayAddr(a string) string {
@@ -152,6 +169,10 @@ func (s *Server) uiRoutes() http.Handler {
 	admin.HandleFunc("GET /api/settings/notifications", s.handleGetNotify)
 	admin.HandleFunc("PUT /api/settings/notifications", s.handleSaveNotify)
 	admin.HandleFunc("POST /api/settings/notifications/test", s.handleTestNotify)
+	admin.HandleFunc("GET /api/settings/updates", s.handleGetUpdates)
+	admin.HandleFunc("PUT /api/settings/updates", s.handleSaveUpdates)
+	admin.HandleFunc("POST /api/updates/check", s.handleCheckUpdates)
+	admin.HandleFunc("POST /api/updates/install", s.handleInstallUpdate)
 	admin.HandleFunc("GET /api/ca.pem", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		w.Write(s.pki.CAPEM)

@@ -30,6 +30,10 @@ type Runner struct {
 	running  map[int64]context.CancelFunc // by server run id
 	inflight map[int64]bool               // job ids queued or running
 	queue    chan task
+
+	updating       bool // self-update in progress (selfupdate.go)
+	updateFailed   string
+	updateFailedAt time.Time
 }
 
 // task is one unit of work for the worker.
@@ -67,6 +71,7 @@ func NewRunner(cfg *Config, version string, log *slog.Logger) (*Runner, error) {
 
 // Run blocks until ctx is canceled.
 func (r *Runner) Run(ctx context.Context) error {
+	cleanupUpdate()
 	go r.worker(ctx)
 	// Fetch the latest configuration before evaluating schedules, so changes made
 	// while the PC was off apply to the first check. Fall back to the cached config.
@@ -177,6 +182,9 @@ func (r *Runner) pollOnce(ctx context.Context, wait int) error {
 		}
 		r.mu.Unlock()
 		r.queue <- task{spec: j, trigger: api.TriggerManual}
+	}
+	if resp.Update != nil {
+		r.maybeUpdate(ctx, resp.Update)
 	}
 	return nil
 }

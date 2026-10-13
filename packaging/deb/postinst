@@ -4,6 +4,7 @@
 #   - an admin API token root@pam!proxbackup-console (secret in /etc/proxbackup/pbs-token)
 #   - /etc/proxbackup/proxbackup.env with this host's names (kept on upgrades)
 #   - the proxbackup-server service on port 8077
+#   - proxbackup-server-update.path, which installs updates the console requests
 set -e
 
 CONF=/etc/proxbackup
@@ -65,6 +66,9 @@ PROXBACKUP_LISTEN=:$PORT
 PROXBACKUP_LOCAL_PBS=1
 # PBS address the agents back up to (default: host of PROXBACKUP_PUBLIC_URL, port 8007).
 #PROXBACKUP_PBS_PUBLIC_HOST=$fqdn:8007
+
+# GitHub repository automatic updates come from (schedule: Settings -> Updates).
+#PROXBACKUP_UPDATE_REPO=Lopicl/proxbackup-solution
 EOF
 	)
 fi
@@ -72,6 +76,7 @@ fi
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload
 	systemctl enable proxbackup-server.service >/dev/null 2>&1
+	systemctl enable --now proxbackup-server-update.path >/dev/null 2>&1
 	systemctl restart proxbackup-server.service
 fi
 

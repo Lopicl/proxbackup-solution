@@ -154,6 +154,46 @@ export interface NotifySettings {
   stale_days: number
 }
 
+export interface UpdateSettings {
+  auto_install: boolean
+  window: { days: number[]; time: string; minutes: number }
+  prerelease: boolean
+  agents: boolean
+}
+
+export interface UpdateResult {
+  state: 'installing' | 'success' | 'failed'
+  from: string
+  to: string
+  time: number
+  error?: string
+}
+
+export interface UpdateStatus {
+  current: string
+  mode: '' | 'deb' | 'binary'
+  mode_note?: string
+  repo: string
+  last_check: number
+  check_error?: string
+  latest?: string
+  latest_url?: string
+  latest_notes?: string
+  published_at?: number
+  available: boolean
+  next_install?: number
+  installing: boolean
+  last_result?: UpdateResult
+  agent_version?: string
+  agent_archs?: string[]
+  agent_cache_error?: string
+}
+
+export interface Updates {
+  settings: UpdateSettings
+  status: UpdateStatus
+}
+
 export class ApiError extends Error {
   status: number
   constructor(status: number, msg: string) {
@@ -250,6 +290,11 @@ export const api = {
   notifySettings: () => request<NotifySettings>('GET', '/settings/notifications'),
   saveNotifySettings: (s: NotifySettings) => request<NotifySettings>('PUT', '/settings/notifications', strip(s, ['smtp_password_set'])),
   testNotify: () => request('POST', '/settings/notifications/test'),
+
+  updates: () => request<Updates>('GET', '/settings/updates'),
+  saveUpdateSettings: (s: UpdateSettings) => request<Updates>('PUT', '/settings/updates', s),
+  checkUpdates: () => request<Updates>('POST', '/updates/check'),
+  installUpdate: () => request<Updates>('POST', '/updates/install'),
 }
 
 function strip<T extends object>(o: T, keys: string[]): Partial<T> {
