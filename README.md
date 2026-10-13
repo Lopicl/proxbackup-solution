@@ -5,7 +5,7 @@ PBS backup protocol itself (no Linux proxy, no `proxmox-backup-client` needed), 
 ordinary PBS snapshots: deduplicated, verifiable, syncable, prunable.
 
 | Component | What it is |
-|-----------|------------|
+| --- | --- |
 | `proxbackup-agent` | **ProxBackup Agent**, a Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
 | `proxbackup-server` | **ProxBackup Console**, the on-premises management server with an embedded web UI: enrollment, jobs and schedules, run history and live logs, snapshot browser, restore, retention, notifications. |
 | `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar v1 archive format. |
@@ -21,9 +21,9 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
 ```
 
 1. **Server, on the PBS host (recommended):** copy the `.deb` to the Proxmox Backup Server and run
-   ```sh
+```sh
    apt install ./proxbackup-server_<version>_amd64.deb
-   ```
+```
    The package creates an admin API token `root@pam!proxbackup-console`, registers every
    datastore of this PBS as a target, and starts the console on **port 8077**. Open
    `https://<pbs-host>:8077` and sign in with a PBS administrator such as `root@pam`. Settings
@@ -39,9 +39,9 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
    namespace (default `pcs`) if you like.
 3. **Client:** go to *Clients → Add client*. Copy the command it shows to the PC and run it in an
    elevated prompt:
-   ```bat
+```bat
    proxbackup-agent.exe enroll <token> && proxbackup-agent.exe install && proxbackup-agent.exe start
-   ```
+```
    The server creates the PBS namespace `pcs/<client>` and a token that has **DatastoreBackup on
    that namespace only**. Running the command again on an enrolled PC re-enrolls it.
 4. **Jobs:** on the client page, create a *Files* job (default `C:\Users`, daily, with retention) or
@@ -73,7 +73,7 @@ cd web && PROXBACKUP_DEV_API=https://127.0.0.1:8077 npm run dev   # UI dev serve
 The version lives in [`VERSION`](VERSION) as `MAJOR.MINOR.BUILD.TOTAL`:
 
 | Part | Meaning | Resets |
-|------|---------|--------|
+| --- | --- | --- |
 | `MAJOR` | breaking / milestone release | never |
 | `MINOR` | feature release | when MAJOR is bumped |
 | `BUILD` | build number within the current MAJOR.MINOR | to 0 on minor or major bumps |
