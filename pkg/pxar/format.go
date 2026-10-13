@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package pxar implements the Proxmox file archive format (version 1), as
 // produced by proxmox-backup-client for *.pxar.didx archives.
 //

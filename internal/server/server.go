@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package server implements proxbackup-server: the management API, web UI and the
 // control-plane endpoint agents connect to. Agents own their schedules: the
 // server pushes job configuration and records what the agents report.

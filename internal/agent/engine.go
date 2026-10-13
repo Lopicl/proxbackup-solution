@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package agent implements the Windows backup agent: job execution (file and
 // image backups, restores) and the control-plane connection to proxbackup-server.
 package agent

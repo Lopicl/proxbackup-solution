@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command proxbackup-server is ProxBackup Console, the management server for ProxBackup agents.
 package main
 

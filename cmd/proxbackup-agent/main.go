@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command proxbackup-agent is the Windows backup agent. It runs as a Windows
 // service, receives jobs from proxbackup-server and backs up directly to a
 // Proxmox Backup Server. It also has standalone commands for ad-hoc use.

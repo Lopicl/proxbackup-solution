@@ -159,3 +159,15 @@ Known gaps (see the roadmap):
   fresh macOS install instead.
 - macOS/Linux agents are development builds only: no snapshots, no Unix owners/permissions/
   xattrs/ACLs (planned in roadmap phase 3, see *Platform support* in the architecture doc)
+
+## License
+
+Copyright © 2026 Matteo Lo Piccolo.
+
+ProxBackup Solution is free software, licensed under the
+[GNU Affero General Public License v3.0 or later](LICENSE) (`AGPL-3.0-or-later`), the same
+license as Proxmox Backup Server. The PBS chunker in `pkg/pbs` is a port of the one in
+proxmox-backup (© Proxmox Server Solutions GmbH, AGPL-3.0).
+
+If you run a modified version of the ProxBackup Console as a network service, the AGPL requires
+you to offer its users the corresponding source code.

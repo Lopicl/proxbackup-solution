@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Code generated from proxmox-backup pbs-datastore/src/chunker.rs. DO NOT EDIT.
 
 package pbs

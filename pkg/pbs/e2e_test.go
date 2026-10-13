@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package pbs_test
 
 // End-to-end test against a real Proxmox Backup Server. Skipped unless

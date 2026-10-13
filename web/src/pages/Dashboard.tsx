@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { api } from '../api'
 import { RunsTable } from './RunsTable'
 import { Card, ErrorBox, Stat, useLoad } from '../ui'

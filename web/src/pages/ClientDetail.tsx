@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { useState } from 'react'
 import { api, type Job, type Keep, type Snapshot } from '../api'
 import { RunsTable } from './RunsTable'

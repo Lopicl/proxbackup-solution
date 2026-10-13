@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import { useState } from 'react'
 import { api, type Target } from '../api'
 import { Card, Empty, ErrorBox, Field, Modal, useLoad } from '../ui'

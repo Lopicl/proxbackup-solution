@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package update finds ProxBackup releases on GitHub and downloads their
 // assets, verified against the release's SHA256SUMS file.
 //

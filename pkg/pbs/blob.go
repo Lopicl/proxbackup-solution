@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package pbs implements the client side of the Proxmox Backup Server protocol.
 //
 // The wire formats here mirror the upstream Rust implementation in

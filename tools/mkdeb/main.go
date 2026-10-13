@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command mkdeb builds the proxbackup-server .deb from packaging/deb without
 // needing dpkg, so it works on macOS and in CI alike.
 //
@@ -43,6 +45,7 @@ func main() {
 
 	data := []file{
 		{"usr/bin/proxbackup-server", 0o755, read(*binary)},
+		{"usr/share/doc/proxbackup-server/copyright", 0o644, read(filepath.Join(*src, "copyright"))},
 	}
 	for _, u := range []string{"proxbackup-server.service", "proxbackup-server-update.service", "proxbackup-server-update.path"} {
 		data = append(data, file{"usr/lib/systemd/system/" + u, 0o644, read(filepath.Join(*src, u))})

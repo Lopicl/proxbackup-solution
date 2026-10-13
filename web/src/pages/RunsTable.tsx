@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { Run } from '../api'
 import { ago, bytes, duration, Empty, Link, ProgressBar, StateBadge } from '../ui'
 

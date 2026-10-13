@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package schedule parses job schedules and decides when a scheduled backup is
 // due. It is used by the agent (which runs jobs on its own clock, in the PC's
 // local time zone) and by the server (to validate schedules).

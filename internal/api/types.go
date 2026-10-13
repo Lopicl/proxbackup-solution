@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package api defines the JSON contract between proxbackup-agent and proxbackup-server.
 package api
 
