@@ -162,6 +162,24 @@ export class ApiError extends Error {
   }
 }
 
+export interface Me {
+  username: string
+  version: string
+  must_change_password: boolean
+  local_account: boolean
+  local_pbs?: { auth_id: string; host: string }
+}
+
+export interface Enrollment {
+  id: number
+  client_name: string
+  target_id: number
+  expires: number
+  used_at: number
+  client_id: number
+  created_at: number
+}
+
 let onUnauthorized: () => void = () => {}
 export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn
@@ -190,12 +208,13 @@ export const api = {
   login: (username: string, password: string) => request<{ username: string }>('POST', '/login', { username, password }),
   logout: () => request('POST', '/logout'),
   loginInfo: () => request<{ pbs_login: boolean }>('GET', '/login-info'),
-  me: () => request<{ username: string; version: string; local_pbs?: { auth_id: string; host: string } }>('GET', '/me'),
+  me: () => request<Me>('GET', '/me'),
+  changePassword: (current_password: string, new_password: string) => request('POST', '/password', { current_password, new_password }),
   dashboard: () => request<Dashboard>('GET', '/dashboard'),
 
   targets: () => request<Target[]>('GET', '/targets'),
   saveTarget: (t: Partial<Target> & { admin_secret?: string }) =>
-    t.id ? request<Target>('PUT', `/targets/${t.id}`, strip(t, ['id'])) : request<Target>('POST', '/targets', t),
+    t.id ? request<Target>('PUT', `/targets/${t.id}`, strip(t, ['id', 'created_at'])) : request<Target>('POST', '/targets', t),
   deleteTarget: (id: number) => request('DELETE', `/targets/${id}`),
   testTarget: (t: Partial<Target> & { admin_secret?: string }) =>
     request<{ version: string; release: string; datastores: string[]; datastore_found: boolean }>('POST', '/targets/test', t),
@@ -206,6 +225,9 @@ export const api = {
   snapshots: (id: number) => request<Snapshot[]>('GET', `/clients/${id}/snapshots`),
   restore: (id: number, spec: RestoreSpec) => request<{ run_id: number }>('POST', `/clients/${id}/restore`, spec),
 
+  enrollments: () => request<Enrollment[]>('GET', '/enrollments'),
+  enrollmentCommand: (id: number) => request<{ command: string }>('GET', `/enrollments/${id}/command`),
+  deleteEnrollment: (id: number) => request('DELETE', `/enrollments/${id}`),
   createEnrollment: (client_name: string, target_id: number, ttl_hours: number) =>
     request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours }),
 

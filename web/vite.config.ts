@@ -7,6 +7,6 @@ export default defineConfig({
   build: { outDir: '../internal/server/webdist/app', emptyOutDir: true },
   server: {
     // `npm run dev` proxies API calls to a locally running proxbackup-server.
-    proxy: { '/api': { target: process.env.PROXBACKUP_DEV_API ?? 'https://localhost:8443', changeOrigin: true, secure: false } },
+    proxy: { '/api': { target: process.env.PROXBACKUP_DEV_API ?? 'https://localhost:8077', changeOrigin: true, secure: false } },
   },
 })

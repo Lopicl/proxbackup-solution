@@ -62,15 +62,20 @@ func (s *Server) EnsureAdmin(ctx context.Context, password string) (string, erro
 	if err != nil || n > 0 {
 		return "", err
 	}
-	if password == "" {
+	generated := password == ""
+	if generated {
 		password = randToken(12)
 	}
-	return password, s.store.UpsertAdmin(ctx, "admin", HashPassword(password))
+	// A generated password only ever appears in the log: make the admin replace it.
+	return password, s.store.UpsertAdmin(ctx, "admin", HashPassword(password), generated)
 }
 
 type ctxKey int
 
-const adminKey ctxKey = 1
+const (
+	adminKey       ctxKey = 1 // admin username (string)
+	sessionUserKey ctxKey = 2 // *SessionUser
+)
 
 func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +84,7 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			httpError(w, http.StatusUnauthorized, errors.New("login required"))
 			return
 		}
-		_, name, err := s.store.SessionAdmin(r.Context(), hashToken(c.Value))
+		u, err := s.store.SessionAdmin(r.Context(), hashToken(c.Value))
 		if err != nil {
 			httpError(w, http.StatusUnauthorized, errors.New("session expired"))
 			return
@@ -88,7 +93,13 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			httpError(w, http.StatusForbidden, fmt.Errorf("missing %s header", csrfHeader))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), adminKey, name)))
+		if u.MustChange && r.URL.Path != "/api/me" && r.URL.Path != "/api/password" {
+			httpError(w, http.StatusForbidden, errors.New("change your password first"))
+			return
+		}
+		ctx := context.WithValue(r.Context(), adminKey, u.Name)
+		ctx = context.WithValue(ctx, sessionUserKey, u)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -147,11 +158,53 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	me := map[string]any{"username": r.Context().Value(adminKey), "version": s.cfg.Version}
+	u := r.Context().Value(sessionUserKey).(*SessionUser)
+	me := map[string]any{"username": u.Name, "version": s.cfg.Version,
+		"must_change_password": u.MustChange, "local_account": !u.External}
 	if l := s.cfg.LocalPBS; l != nil {
 		me["local_pbs"] = map[string]string{"auth_id": l.AuthID, "host": l.PublicHost}
 	}
 	writeJSON(w, me)
+}
+
+// handleChangePassword sets a new password for the signed-in local account.
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Current string `json:"current_password"`
+		New     string `json:"new_password"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	u := r.Context().Value(sessionUserKey).(*SessionUser)
+	if u.External {
+		httpError(w, http.StatusBadRequest, errors.New("PBS accounts change their password in PBS"))
+		return
+	}
+	hash, err := s.store.AdminPasswordHash(r.Context(), u.ID)
+	if err != nil || !checkPassword(hash, req.Current) {
+		time.Sleep(500 * time.Millisecond)
+		httpError(w, http.StatusBadRequest, errors.New("current password is wrong"))
+		return
+	}
+	switch {
+	case len(req.New) < 10:
+		err = errors.New("new password must be at least 10 characters")
+	case req.New == req.Current:
+		err = errors.New("new password must differ from the current one")
+	}
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	c, _ := r.Cookie(sessionCookie)
+	if err := s.store.SetAdminPassword(r.Context(), u.ID, HashPassword(req.New), hashToken(c.Value)); err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	s.log.Info("admin password changed", "user", u.Name)
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 // handleLoginInfo tells the login page whether PBS accounts can sign in.

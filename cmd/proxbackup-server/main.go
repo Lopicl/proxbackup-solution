@@ -78,7 +78,7 @@ func main() {
 		if len(pw) < 8 {
 			fatal(fmt.Errorf("password must be at least 8 characters"))
 		}
-		if err := srv.Store().UpsertAdmin(ctx, user, server.HashPassword(pw)); err != nil {
+		if err := srv.Store().UpsertAdmin(ctx, user, server.HashPassword(pw), false); err != nil {
 			fatal(err)
 		}
 		fmt.Println("password updated")

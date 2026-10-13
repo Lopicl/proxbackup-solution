@@ -377,7 +377,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if s.store.ClientNameTaken(ctx, name) {
-		httpError(w, 400, fmt.Errorf("client %q already exists", name))
+		httpError(w, 400, fmt.Errorf("client %q already exists or is waiting to enroll", name))
 		return
 	}
 	if _, err := s.store.Target(ctx, req.TargetID); err != nil {
@@ -392,14 +392,48 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	code := randToken(24)
-	if err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, time.Duration(req.TTLHours)*time.Hour); err != nil {
+	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint()})
+	enc := base64.RawURLEncoding.EncodeToString(tok)
+	command := `proxbackup-agent.exe enroll ` + enc + ` && proxbackup-agent.exe install && proxbackup-agent.exe start`
+	if err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, time.Duration(req.TTLHours)*time.Hour, s.sealer.Seal(command)); err != nil {
 		httpError(w, 500, err)
 		return
 	}
-	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint()})
-	enc := base64.RawURLEncoding.EncodeToString(tok)
-	writeJSON(w, map[string]string{"client_name": name, "token": enc,
-		"command": `proxbackup-agent.exe enroll ` + enc + ` && proxbackup-agent.exe install && proxbackup-agent.exe start`})
+	writeJSON(w, map[string]string{"client_name": name, "token": enc, "command": command})
+}
+
+// handleEnrollmentCommand shows the command of a pending enrollment again.
+func (s *Server) handleEnrollmentCommand(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	enc, err := s.store.PendingEnrollmentCommand(r.Context(), id)
+	if err != nil {
+		httpError(w, statusFor(err), errors.New("enrollment not pending (used, expired or created before this was stored)"))
+		return
+	}
+	command, err := s.sealer.Open(enc)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]string{"command": command})
+}
+
+// handleDeleteEnrollment cancels an enrollment no PC has completed yet.
+func (s *Server) handleDeleteEnrollment(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	if err := s.store.DeleteEnrollment(r.Context(), id); err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 // ---- jobs ----

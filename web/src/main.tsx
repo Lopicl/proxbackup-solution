@@ -1,7 +1,7 @@
 import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { api, setUnauthorizedHandler } from './api'
-import { ErrorBox, Field } from './ui'
+import { api, setUnauthorizedHandler, type Me } from './api'
+import { ErrorBox, Field, Modal } from './ui'
 import { Dashboard } from './pages/Dashboard'
 import { Clients } from './pages/Clients'
 import { ClientDetail } from './pages/ClientDetail'
@@ -20,7 +20,7 @@ function useHashRoute(): string {
   return route
 }
 
-function Login({ onLogin }: { onLogin: (u: string) => void }) {
+function Login({ onLogin }: { onLogin: () => void }) {
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -37,8 +37,8 @@ function Login({ onLogin }: { onLogin: (u: string) => void }) {
           e.preventDefault()
           setBusy(true)
           try {
-            const r = await api.login(username, password)
-            onLogin(r.username)
+            await api.login(username, password)
+            onLogin()
           } catch (err) {
             setError((err as Error).message)
           } finally {
@@ -64,6 +64,54 @@ function Login({ onLogin }: { onLogin: (u: string) => void }) {
   )
 }
 
+function PasswordForm({ forced, onDone, onCancel }: { forced?: boolean; onDone: () => void; onCancel?: () => void }) {
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [repeat, setRepeat] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault()
+        if (next !== repeat) return setError('The new passwords do not match.')
+        setBusy(true)
+        setError('')
+        try {
+          await api.changePassword(current, next)
+          onDone()
+        } catch (err) {
+          setError((err as Error).message)
+        } finally {
+          setBusy(false)
+        }
+      }}
+    >
+      {forced && <p className="muted-text">This account still has its generated initial password. Choose your own to continue.</p>}
+      <Field label={forced ? 'Initial password' : 'Current password'}>
+        <input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" autoFocus required />
+      </Field>
+      <Field label="New password" hint="At least 10 characters.">
+        <input type="password" value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" minLength={10} required />
+      </Field>
+      <Field label="Repeat new password">
+        <input type="password" value={repeat} onChange={(e) => setRepeat(e.target.value)} autoComplete="new-password" minLength={10} required />
+      </Field>
+      <ErrorBox error={error} />
+      <div className="buttons">
+        {onCancel && (
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+        )}
+        <button className="primary" disabled={busy}>
+          Change password
+        </button>
+      </div>
+    </form>
+  )
+}
+
 const nav = [
   { to: '/', label: 'Dashboard' },
   { to: '/clients', label: 'Clients' },
@@ -72,30 +120,30 @@ const nav = [
 ]
 
 function App() {
-  const [user, setUser] = useState<string | null | undefined>(undefined)
-  const [version, setVersion] = useState('')
+  const [me, setMe] = useState<Me | null | undefined>(undefined)
+  const [changingPw, setChangingPw] = useState(false)
   const route = useHashRoute()
+  const loadMe = () => api.me().then(setMe, () => setMe(null))
   useEffect(() => {
-    setUnauthorizedHandler(() => setUser(null))
-    api.me().then(
-      (m) => {
-        setUser(m.username)
-        setVersion(m.version)
-      },
-      () => setUser(null),
-    )
+    setUnauthorizedHandler(() => setMe(null))
+    loadMe()
   }, [])
 
-  if (user === undefined) return null
-  if (user === null)
+  if (me === undefined) return null
+  if (me === null) return <Login onLogin={loadMe} />
+  if (me.must_change_password)
     return (
-      <Login
-        onLogin={(u) => {
-          setUser(u)
-          api.me().then((m) => setVersion(m.version), () => {})
-        }}
-      />
+      <div className="login">
+        <div className="card">
+          <h1>
+            <span className="logo">▣</span> Set your password
+          </h1>
+          <PasswordForm forced onDone={loadMe} />
+        </div>
+      </div>
     )
+  const user = me.username
+  const version = me.version
 
   const parts = route.split('/').filter(Boolean)
   let page
@@ -122,12 +170,17 @@ function App() {
         </nav>
         {version && <div className="version">v{version}</div>}
         <div className="user">
-          {user}
+          <span title={user}>{user}</span>
+          {me.local_account && (
+            <button className="ghost small" onClick={() => setChangingPw(true)}>
+              Password
+            </button>
+          )}
           <button
             className="ghost small"
             onClick={async () => {
               await api.logout()
-              setUser(null)
+              setMe(null)
             }}
           >
             Sign out
@@ -135,6 +188,11 @@ function App() {
         </div>
       </aside>
       <main>{page}</main>
+      {changingPw && (
+        <Modal title="Change password" onClose={() => setChangingPw(false)}>
+          <PasswordForm onDone={() => setChangingPw(false)} onCancel={() => setChangingPw(false)} />
+        </Modal>
+      )}
     </div>
   )
 }

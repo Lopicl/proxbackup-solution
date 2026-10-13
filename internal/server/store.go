@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -82,6 +83,8 @@ func (s *Store) migrate() error {
 		{"clients", "config_rev", "TEXT NOT NULL DEFAULT ''"},
 		{"clients", "schedule_state", "TEXT NOT NULL DEFAULT '[]'"},
 		{"clients", "time_zone", "TEXT NOT NULL DEFAULT ''"},
+		{"admins", "must_change_pw", "INTEGER NOT NULL DEFAULT 0"},
+		{"enrollments", "command_enc", "BLOB"},
 	}
 	for _, c := range cols {
 		var n int
@@ -91,6 +94,12 @@ func (s *Store) migrate() error {
 		if n == 0 {
 			if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.name, c.def)); err != nil {
 				return err
+			}
+			if c.name == "must_change_pw" {
+				// Existing installs: the initial "admin" may still have its generated password.
+				if _, err := s.db.Exec(`UPDATE admins SET must_change_pw=1 WHERE username='admin' AND pw_hash LIKE 'argon2id$%'`); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -204,10 +213,20 @@ func (s *Store) AdminCount(ctx context.Context) (int, error) {
 	return n, err
 }
 
-func (s *Store) UpsertAdmin(ctx context.Context, user, hash string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO admins(username, pw_hash, created_at) VALUES(?,?,?)
-		ON CONFLICT(username) DO UPDATE SET pw_hash=excluded.pw_hash`, user, hash, now())
+// UpsertAdmin sets a local account's password. mustChange makes the user pick
+// a new one at the next sign-in (for generated passwords).
+func (s *Store) UpsertAdmin(ctx context.Context, user, hash string, mustChange bool) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO admins(username, pw_hash, created_at, must_change_pw) VALUES(?,?,?,?)
+		ON CONFLICT(username) DO UPDATE SET pw_hash=excluded.pw_hash, must_change_pw=excluded.must_change_pw`, user, hash, now(), mustChange)
 	return err
+}
+
+// SessionUser is the account behind an admin session.
+type SessionUser struct {
+	ID         int64
+	Name       string
+	External   bool // signed in through PBS; no local password
+	MustChange bool
 }
 
 // EnsureExternalAdmin returns the admin row for an account authenticated
@@ -236,15 +255,32 @@ func (s *Store) CreateSession(ctx context.Context, tokenHash string, adminID int
 	return err
 }
 
-func (s *Store) SessionAdmin(ctx context.Context, tokenHash string) (int64, string, error) {
-	var id int64
-	var name string
-	err := s.db.QueryRowContext(ctx, `SELECT a.id, a.username FROM sessions s JOIN admins a ON a.id=s.admin_id
-		WHERE s.token_hash=? AND s.expires>?`, tokenHash, now()).Scan(&id, &name)
+func (s *Store) SessionAdmin(ctx context.Context, tokenHash string) (*SessionUser, error) {
+	u := &SessionUser{}
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT a.id, a.username, a.pw_hash, a.must_change_pw FROM sessions s JOIN admins a ON a.id=s.admin_id
+		WHERE s.token_hash=? AND s.expires>?`, tokenHash, now()).Scan(&u.ID, &u.Name, &hash, &u.MustChange)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
-	return id, name, err
+	u.External = strings.HasPrefix(hash, "external:")
+	return u, err
+}
+
+// SetAdminPassword changes a local account's password, clears the
+// must-change flag and ends the account's other sessions.
+func (s *Store) SetAdminPassword(ctx context.Context, id int64, hash, keepSession string) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE admins SET pw_hash=?, must_change_pw=0 WHERE id=?`, hash, id); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE admin_id=? AND token_hash<>?`, id, keepSession)
+	return err
+}
+
+func (s *Store) AdminPasswordHash(ctx context.Context, id int64) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx, `SELECT pw_hash FROM admins WHERE id=?`, id).Scan(&hash)
+	return hash, err
 }
 
 func (s *Store) DeleteSession(ctx context.Context, tokenHash string) {
@@ -356,7 +392,9 @@ func (s *Store) ClientBySerial(ctx context.Context, serial string) (*Client, err
 
 func (s *Store) ClientNameTaken(ctx context.Context, name string) bool {
 	var n int
-	s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM clients WHERE name=?`, name).Scan(&n)
+	// Includes names reserved by enrollments that haven't been used yet.
+	s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM clients WHERE name=?)
+		+ (SELECT COUNT(*) FROM enrollments WHERE client_name=? AND used_at=0 AND expires>?)`, name, name, now()).Scan(&n)
 	return n > 0
 }
 
@@ -403,10 +441,35 @@ type Enrollment struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
-func (s *Store) CreateEnrollment(ctx context.Context, codeHash, name string, targetID int64, ttl time.Duration) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollments(code_hash, client_name, target_id, expires, created_at) VALUES(?,?,?,?,?)`,
-		codeHash, name, targetID, time.Now().Add(ttl).Unix(), now())
+// CreateEnrollment stores a new code. commandEnc is the sealed enrollment
+// command, kept so it can be shown again until the PC enrolls.
+func (s *Store) CreateEnrollment(ctx context.Context, codeHash, name string, targetID int64, ttl time.Duration, commandEnc []byte) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollments(code_hash, client_name, target_id, expires, created_at, command_enc) VALUES(?,?,?,?,?,?)`,
+		codeHash, name, targetID, time.Now().Add(ttl).Unix(), now(), commandEnc)
 	return err
+}
+
+// PendingEnrollmentCommand returns the sealed command of an enrollment that
+// hasn't been used yet.
+func (s *Store) PendingEnrollmentCommand(ctx context.Context, id int64) ([]byte, error) {
+	var enc []byte
+	err := s.db.QueryRowContext(ctx, `SELECT command_enc FROM enrollments WHERE id=? AND used_at=0 AND expires>?`, id, now()).Scan(&enc)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && len(enc) == 0 {
+		return nil, errNotFound
+	}
+	return enc, err
+}
+
+// DeleteEnrollment cancels an enrollment that no PC has completed.
+func (s *Store) DeleteEnrollment(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM enrollments WHERE id=? AND client_id=0`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	return nil
 }
 
 func (s *Store) Enrollments(ctx context.Context) ([]Enrollment, error) {

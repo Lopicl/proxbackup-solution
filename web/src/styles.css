@@ -43,6 +43,9 @@ aside nav a:hover { background: #ffffff10; text-decoration: none; }
 aside nav a.active { border-left-color: var(--accent); background: #ffffff14; color: #fff; }
 aside .version { padding: 0 20px 4px; font-size: 11px; color: #6b7385; font-family: ui-monospace, Menlo, monospace; }
 aside .user { padding: 12px 20px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; color: #9aa3b5; }
+aside .user { gap: 6px; }
+aside .user > :first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+aside .user button { white-space: nowrap; padding-left: 6px; padding-right: 6px; }
 main { padding: 24px 32px; max-width: 1400px; width: 100%; }
 
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 18px; }
@@ -79,6 +82,7 @@ td.archives { display: flex; flex-wrap: wrap; gap: 6px; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 .dot.on { background: var(--ok); box-shadow: 0 0 0 3px #1f8a4c33; }
 .dot.off { background: #8a93a3; }
+.dot.pending { background: transparent; box-shadow: inset 0 0 0 2px var(--info); }
 .ok-text { color: var(--ok); } .warn-text { color: var(--warn); } .bad-text { color: var(--bad); } .muted-text { color: var(--muted); }
 .small { font-size: 12px; }
 
