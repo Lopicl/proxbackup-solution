@@ -40,7 +40,7 @@ jobs:
         run: make test
 
       - name: Build release assets
-        run: make dist
+        run: make dist BUMP=0  # release.sh already bumped VERSION for this release
 
       - name: Publish
         run: scripts/release.sh --publish

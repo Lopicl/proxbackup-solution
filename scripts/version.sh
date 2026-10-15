@@ -5,7 +5,8 @@
 #   BUILD  build number within the current MAJOR.MINOR; resets to 0 on minor/major bumps
 #   TOTAL  build counter over the whole project lifetime; never resets
 #
-# Every commit is a build (the pre-commit hook runs `version.sh build`).
+# Only package builds count: `make deb` and `make dist` run `version.sh build`, and
+# scripts/release.sh does it once per release. Commits don't change VERSION.
 #
 #   scripts/version.sh            print the current version
 #   scripts/version.sh build      a.b.c.x -> a.b.(c+1).(x+1)

@@ -79,10 +79,12 @@ The version lives in [`VERSION`](VERSION) as `MAJOR.MINOR.BUILD.TOTAL`:
 | `BUILD` | build number within the current MAJOR.MINOR | to 0 on minor or major bumps |
 | `TOTAL` | build counter for the whole project | never |
 
-Every commit is a build. The pre-commit hook (`.githooks/`, enabled with
-`git config core.hooksPath .githooks`) runs `scripts/version.sh build`, so `0.1.4.17` becomes
-`0.1.5.18`. Feature and milestone releases are bumped explicitly, and the hook then leaves the
-staged VERSION alone:
+Only package builds bump the version: `make deb`, `make dist`, and `scripts/release.sh`
+(once per release) run `scripts/version.sh build`, so `0.1.4.17` becomes `0.1.5.18`. Commits
+and plain `make server`/`make agent` builds leave it alone; commit the bumped `VERSION` after a
+package build. `make dist BUMP=0` packages the current version without bumping (the Release
+workflow uses it for the version `release.sh` tagged). Feature and milestone releases are
+bumped explicitly:
 
 ```sh
 scripts/version.sh minor   # 0.1.5.18 -> 0.2.0.19
