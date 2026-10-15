@@ -72,6 +72,11 @@ func toPxarMeta(fi fs.FileInfo, m winMeta) pxar.Metadata {
 	if m.attrs&attrArchive != 0 {
 		md.Flags |= pxar.FlagArchive
 	}
+	if md.Mode&pxar.ModeIFMT == pxar.ModeIFLNK {
+		// Linux refuses user.* xattrs on symlinks, so proxmox-backup-client
+		// would abort a restore on them. HIDDEN/SYSTEM survive in the flags.
+		return md
+	}
 	if m.attrs != 0 {
 		var b [4]byte
 		binary.LittleEndian.PutUint32(b[:], m.attrs)

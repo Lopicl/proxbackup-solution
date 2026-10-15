@@ -95,7 +95,7 @@ restore`, and `pxar` FUSE mounts all work.
 | Directory / file | `S_IFDIR 0755` / `S_IFREG 0644` (`0444` if READONLY) |
 | HIDDEN / SYSTEM / ARCHIVE | `flags`: `WITH_FLAG_HIDDEN 0x2000`, `WITH_FLAG_SYSTEM 0x4000`, `WITH_FLAG_ARCHIVE 0x8000` |
 | LastWriteTime | `mtime` (100 ns resolution → ns) |
-| Symlink reparse point | `SYMLINK` |
+| Symlink reparse point | `SYMLINK` (no xattrs: Linux refuses `user.*` xattrs on symlinks; HIDDEN/SYSTEM stay in `flags`) |
 | Junctions / mount points | skipped (prevents loops and double-backup) |
 | Security descriptor (NTFS ACL) | xattr `user.proxbackup.ntsd` (self-relative binary SD) *(phase 2)* |
 | Alternate data streams | xattr `user.proxbackup.ads.<name>` for small streams *(phase 2)* |
@@ -114,7 +114,10 @@ read on every run.
   metadata bytes only.
 * The payload stream is framed by `PAYLOAD_START_MARKER` and `PAYLOAD_TAIL_MARKER`, and each
   file's data sits in its own `PAYLOAD` item. Bytes between payloads are padding that readers
-  skip; references only ever move forward, so the stream can be read sequentially.
+  skip; references only ever move forward, so the stream can be read sequentially. The start
+  marker is written with the first payload: when the first thing in the stream is the previous
+  archive's first chunk, its marker is reused, so an unchanged tree gives an identical
+  `.mpxar` and a payload that doesn't grow.
 * **Metadata change detection** (per-job `change_detection`, default `metadata`): the agent
   opens a reader on the group's previous snapshot and walks its `.mpxar` in lockstep with the
   live tree (both are depth first with byte-sorted names). A file whose size, mode, flags,
@@ -144,8 +147,12 @@ read on every run.
 * **Validation.** Unit tests round-trip v2 archives and run the reuse path over 10
   generations of edits. The E2E suite builds a v2 snapshot from injected chunks on PBS 4.2,
   restores it, extracts a reused and a new file through PBS's own `pxar-file-download`, and
-  runs a verify task. Restoring our v2 archives with `proxmox-backup-client` is still to do
-  (the E2E container is arm64, and Proxmox ships no arm64 client).
+  runs a verify task. On a real PBS 4.2.1 with the Windows 11 ARM64 VM (VSS, 2,006 files),
+  an unchanged re-run read nothing, took 3 s instead of 18 s and uploaded 0 bytes. A
+  same-size edit with the old `LastWriteTime` put back was caught by `chtime`. Restores by
+  the agent and by `proxmox-backup-client` matched the source, and PBS verify passed. The
+  Docker E2E container is arm64, where Proxmox ships no client, so the official-client
+  restore needs an x86 PBS.
 
 ### 3. `proxbackup-agent`: ProxBackup Agent (Windows service)
 
@@ -818,7 +825,7 @@ name.
 |------|-----------|
 | Metadata change detection misses an edited file | Size, mtime, attributes, xattrs and NTFS `ChangeTime` must all match before a file is skipped; `data` mode and periodic full reads re-read everything |
 | PBS protocol changes | The protocol is versioned (`-v1`) and stable since PBS 1.0. `make e2e` runs the protocol tests against a PBS 4.2 container (not yet part of CI; the release workflow runs `make test`) |
-| pxar encoding bugs make backups unrestorable | Round-trip tests with our decoder; snapshots are browsable and downloadable in the PBS GUI. For pxar v2, the E2E suite has PBS's own pxar reader extract files from a split snapshot built from reused chunks. A full restore with `proxmox-backup-client` is still to do and is a release gate, since a wrong payload offset or reused chunk silently corrupts files |
+| pxar encoding bugs make backups unrestorable | Round-trip tests with our decoder; snapshots are browsable and downloadable in the PBS GUI. For pxar v2, the E2E suite has PBS's own pxar reader extract files from a split snapshot built from reused chunks, and a full `proxmox-backup-client` restore of an agent backup matched the source on a real PBS (manual so far; a release gate, since a wrong payload offset or reused chunk silently corrupts files). Symlinks carry no `user.*` xattrs, which Linux refuses on links and which made `proxmox-backup-client restore` abort |
 | VSS failures (writers in bad state, no space) | The backup fails with the VSS error rather than silently reading live files. Jobs can turn VSS off (`use_vss`) to back up crash-inconsistent live data instead |
 | Long paths / odd names | `\\?\` prefixed paths throughout; files that can't be read or encoded are skipped with a warning in the run log |
 | A bad release breaks every console and agent | Updates install only in the admin's window, refuse downgrades, and verify `SHA256SUMS`; agents update only when idle and back off for an hour after a failure. Prereleases are opt-in |

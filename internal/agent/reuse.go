@@ -224,6 +224,13 @@ func (r *payloadReuse) flush() error {
 		padding := span - used
 		if reuse = float64(padding) <= reusePaddingThreshold*float64(span); reuse {
 			if !r.chain {
+				// The previous archive's first chunk brings its payload start
+				// marker; anything else needs ours in front.
+				if ents[0].Start != 0 {
+					if err := r.enc.StartPayload(); err != nil {
+						return err
+					}
+				}
 				// InjectChunks ends the current chunk; the stream position doesn't move.
 				r.base = r.enc.PayloadPosition()
 			}

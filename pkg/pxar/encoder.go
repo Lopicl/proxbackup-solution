@@ -65,12 +65,9 @@ func newEncoder(w, payload io.Writer, root Metadata) (*Encoder, error) {
 		if err := e.writeItem(TypeFormatVersion, v[:], false); err != nil {
 			return nil, err
 		}
-		var h [headerSize]byte
-		putHeader(h[:], TypePayloadStart, headerSize)
-		if err := e.writePayload(h[:]); err != nil {
-			return nil, err
-		}
-		e.lastRefEnd = e.ppos
+		// The payload start marker is written with the first payload (see
+		// StartPayload), so that reused chunks can bring their own.
+		e.lastRefEnd = headerSize
 	}
 	// The root's goodbye tail points at offset 0 even in v2 archives, i.e. at
 	// FORMAT_VERSION rather than the root ENTRY (as pxar's encoder does).
@@ -223,6 +220,9 @@ func (e *Encoder) AddFile(name []byte, m Metadata, size uint64, r io.Reader) (Fi
 	out := e.write
 	if e.payload != nil {
 		out = e.writePayload
+		if err := e.StartPayload(); err != nil {
+			return res, err
+		}
 		if err := e.writePayloadRef(e.ppos, size); err != nil {
 			return res, err
 		}
@@ -267,8 +267,22 @@ func (e *Encoder) writePayloadRef(offset, size uint64) error {
 	return e.writeItem(TypePayloadRef, ref[:], false)
 }
 
+// StartPayload writes the payload start marker unless the payload stream
+// already has it. Writing file contents does this implicitly.
+func (e *Encoder) StartPayload() error {
+	if e.payload == nil || e.ppos > 0 {
+		return nil
+	}
+	var h [headerSize]byte
+	putHeader(h[:], TypePayloadStart, headerSize)
+	return e.writePayload(h[:])
+}
+
 // SkipPayload records that n bytes were appended to the payload stream
 // outside the encoder, e.g. chunks of a previous payload archive reused as is.
+// On an empty payload stream (PayloadPosition 0) the bytes must begin with a
+// payload start marker, as the first chunk of a previous payload archive does;
+// otherwise call StartPayload first.
 func (e *Encoder) SkipPayload(n uint64) error {
 	if e.payload == nil {
 		return errors.New("pxar: SkipPayload on a v1 archive")
@@ -370,6 +384,9 @@ func (e *Encoder) Close() error {
 		return err
 	}
 	if e.payload != nil {
+		if err := e.StartPayload(); err != nil {
+			return err
+		}
 		var h [headerSize]byte
 		putHeader(h[:], TypePayloadTail, headerSize)
 		return e.writePayload(h[:])
