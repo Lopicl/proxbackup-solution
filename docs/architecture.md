@@ -16,13 +16,14 @@ same chunk-level deduplication, verification, sync and prune behaviour as any ot
 | The PC decides when to back up | The server only pushes configuration. Each agent runs its own scheduler on the PC's clock, catches up missed runs if the job allows it, and keeps backing up while the server is down |
 | Ransomware resilience | Agents get a PBS token with **DatastoreBackup** only — they can add backups, never delete or prune them |
 | Interoperability | Snapshots are standard PBS snapshots: visible in the PBS GUI, verifiable, syncable, restorable with `proxmox-backup-client` on Linux |
+| Hands-off updates | The console installs new GitHub releases in an admin-chosen maintenance window; Windows agents follow the console's version |
 
 ## System overview
 
 ```mermaid
 flowchart LR
   subgraph PC["Windows PC (many)"]
-    TRAY["proxbackup-tray<br/>(user session)"] -- named pipe --> AGENT
+    TRAY["proxbackup-tray<br/>(user session, phase 2)"] -. named pipe .-> AGENT
     AGENT["proxbackup-agent<br/>Windows service (LocalSystem)"]
     VSS[(VSS snapshot)]
     AGENT --- VSS
@@ -37,10 +38,12 @@ flowchart LR
   end
 
   PBS[("Proxmox Backup Server")]
+  GH[("GitHub releases")]
 
   AGENT -- "control plane: HTTPS + mTLS<br/>long-poll: config, on-demand jobs; report runs" --> API
   AGENT == "data plane: PBS backup/reader protocol<br/>(HTTP/2 upgrade, per-agent API token)" ==> PBS
   API -- "PBS admin API: namespaces, tokens,<br/>ACLs, snapshots, prune" --> PBS
+  API -- "update check (6 h), downloads" --> GH
   ADMIN(["Administrator browser"]) --> UI
 ```
 
@@ -94,7 +97,8 @@ restore`, and `pxar` FUSE mounts all work.
 ### 3. `proxbackup-agent`: ProxBackup Agent (Windows service)
 
 * Runs as `LocalSystem` (needed for VSS and for reading every file), installed with
-  `proxbackup-agent install`.
+  `proxbackup-agent install`. Re-running the enrollment command on an enrolled PC keeps the
+  existing service and restarts it.
 * **Enrollment.** An admin creates a one-time enrollment code in the UI. The code bundles the
   server URL, a secret, and the server CA fingerprint. The agent generates an ECDSA key and
   CSR, and the server returns a client certificate signed by its internal CA. Every later
@@ -127,10 +131,16 @@ restore`, and `pxar` FUSE mounts all work.
   Whole-disk restore of a dead machine goes through the Linux-based recovery image (see
   [Bare-metal recovery](#bare-metal-recovery), roadmap phase 4).
 * **Restore.** The agent opens a reader session, downloads the index, fetches chunks on
-  demand, decodes pxar, and writes files to the original or an alternate path. Overwrite
-  policy is set per job.
-* **Local IPC.** A named pipe `\\.\pipe\proxbackup-agent` serves the tray app (status, "Back up
-  now", recent runs). The pipe ACL allows only interactive users plus SYSTEM.
+  demand, decodes pxar, and writes files to the original or an alternate path. The overwrite
+  policy (`skip`, `overwrite` or `if-newer`) is chosen per restore.
+* **Self-update (Windows).** When the console runs a newer version, the poll reply offers it
+  (version, SHA-256, size). Once no job is running, the agent downloads the binary from the
+  console over mTLS, checks size, hash and the version the binary reports, swaps it in next to
+  the running executable and exits; the service manager restarts it. A failed update is
+  retried after an hour.
+* **Local IPC** *(phase 2, with the tray app).* A named pipe `\\.\pipe\proxbackup-agent` will
+  serve the tray app (status, "Back up now", recent runs), with a pipe ACL that allows only
+  interactive users plus SYSTEM.
 
 ### 4. `proxbackup-server`: ProxBackup Console
 
@@ -147,11 +157,20 @@ restore`, and `pxar` FUSE mounts all work.
   loopback hourly (so ACME renewals need no reconfiguration), and lets PBS administrators
   (`Sys.Modify` on `/`, e.g. `root@pam`) sign in with their PBS credentials. Accounts with
   two-factor auth must use a local console account for now.
-* **PBS integration.** The server is configured once with a PBS **admin** token. On
+* **Admin accounts.** Local accounts use argon2id hashes. The generated initial `admin`
+  password must be changed at first sign-in; until then the API only answers `/api/me` and
+  `/api/password`. Changing a password signs out the account's other sessions.
+* **Enrollment codes.** Unused codes are listed under Clients as "Waiting for agent". The
+  enrollment command is stored sealed with the master key so it can be shown again, and the
+  client name is reserved until the code is used, cancelled or expires.
+* **PBS integration.** The server is configured once per target with a PBS **admin** token. On
   enrollment it:
   1. creates namespace `<root-ns>/<client-name>` on the datastore,
-  2. creates API token `proxbackup@pbs!<client-name>`,
-  3. grants `DatastoreBackup` on `/datastore/<store>/<ns>` to that token.
+  2. ensures the agent user (`proxbackup@pbs` by default, configurable per target) exists
+     with `DatastoreBackup` on the root namespace (token privileges are intersected with the
+     user's),
+  3. creates API token `proxbackup@pbs!<client-name>`,
+  4. grants `DatastoreBackup` on `/datastore/<store>/<ns>` to that token.
 
   The agent only ever receives the scoped token.
 * **No scheduler.** The server does not start backups. It validates schedules, pushes them,
@@ -160,8 +179,24 @@ restore`, and `pxar` FUSE mounts all work.
 * **Retention.** After each successful run, the server calls PBS `prune` for the backup group
   with the job's keep-last/hourly/daily/weekly/monthly/yearly policy, using the admin token.
   Garbage collection is left to PBS's own schedule.
-* **Notifications.** SMTP and generic webhooks (JSON). Triggers: run failed, run succeeded
-  (optional), client offline > N days, last successful backup older than N days.
+* **Notifications.** SMTP and generic webhooks (JSON). Triggers: run failed or missed, run
+  succeeded (optional), last successful backup older than N days (checked daily), console
+  update installed or failed.
+* **Automatic updates.** The console checks GitHub releases every 6 hours and installs the
+  newest one in a weekday/time window set under Settings → Updates (default Sunday 03:00,
+  60 min), or immediately with "Install now". Prereleases are opt-in. How it installs depends
+  on how the console was installed:
+  * *.deb:* the unprivileged service only writes `/var/lib/proxbackup/updates/request`. A
+    `.path` unit starts the root helper `proxbackup-server-update.service`
+    (`proxbackup-server apply-update`), which downloads the package from GitHub itself,
+    verifies it against the release's `SHA256SUMS`, refuses downgrades and runs `dpkg`.
+  * *Standalone binary:* the console downloads and verifies the new binary, swaps it in and
+    re-executes itself.
+
+  The console also caches the matching Windows agent binaries and offers them to older agents
+  (see *Self-update* above; can be turned off). Releases are built by `make dist`, tagged with
+  `make release` (`v<VERSION>`), and published by the GitHub Actions workflow
+  `.github/workflows/release.yml`.
 
 ### 5. `proxbackup-tray`: user tray app *(phase 2)*
 
@@ -206,23 +241,32 @@ stateDiagram-v2
 
 ```mermaid
 erDiagram
-  PBS_TARGET ||--o{ JOB : "stores to"
+  TARGET ||--o{ CLIENT : "stores"
+  TARGET ||--o{ ENROLLMENT : "for"
   CLIENT ||--o{ JOB : has
   JOB ||--o{ RUN : produces
   RUN ||--o{ RUN_LOG : has
   CLIENT ||--o{ RUN : executes
-  ENROLLMENT_CODE |o--o| CLIENT : "used by"
+  ENROLLMENT |o--o| CLIENT : "used by"
+  ADMIN ||--o{ SESSION : has
 
-  PBS_TARGET { int id string name string url string fingerprint string datastore string root_ns string admin_token_id string admin_token_secret }
-  CLIENT { int id string name string hostname string os string agent_version string cert_serial string pbs_token_id string pbs_token_secret string ns datetime last_seen string config_rev string schedule_state_json string time_zone }
-  JOB { int id int client_id int target_id string kind string sources_json string excludes_json string schedule int window_minutes bool catch_up string retention_json bool enabled }
-  RUN { int id string uuid int job_id int client_id string trigger string status datetime scheduled_for datetime started datetime finished int bytes_total int bytes_uploaded int chunks_new int chunks_reused string snapshot string error }
+  TARGET { int id string name string host string fingerprint string datastore string root_ns string admin_auth_id blob admin_secret_enc string pbs_user }
+  CLIENT { int id string name string hostname string os string agent_version string cert_serial int target_id string namespace string token_id blob token_secret_enc datetime last_seen bool revoked string config_rev string schedule_state string time_zone }
+  JOB { int id int client_id string name string kind string backup_id string sources string excludes string volumes bool use_vss string schedule int window_minutes bool catch_up string retention bool enabled }
+  RUN { int id string uuid int job_id int client_id string kind string state string trigger string restore_spec datetime scheduled_for datetime queued_at datetime started_at datetime finished_at string progress string result string error string snapshot bool cancel_requested }
   RUN_LOG { int id int run_id datetime ts string level string msg }
-  ENROLLMENT_CODE { int id string secret_hash datetime expires string client_name bool used }
+  ENROLLMENT { int id string code_hash string client_name int target_id datetime expires datetime used_at int client_id blob command_enc }
+  ADMIN { int id string username string pw_hash bool must_change_pw }
+  SESSION { string token_hash int admin_id datetime expires }
 ```
 
-Secrets (`admin_token_secret`, `pbs_token_secret`, encryption keys) are encrypted at rest
-with a server master key (`PROXBACKUP_MASTER_KEY`, or a key file with 0600 permissions).
+`kind` is `files`/`image` for jobs and also `restore` for runs. JSON columns (`sources`,
+`retention`, `progress`, …) are stored as text. A `settings` key/value table holds
+notification and update settings. Run history older than 180 days is pruned daily.
+
+Secrets (`admin_secret_enc`, `token_secret_enc`, `command_enc`, and client encryption keys
+in phase 2) are encrypted at rest with a server master key: `PROXBACKUP_MASTER_KEY` (32 bytes,
+base64), or `master.key` in the data directory, generated with 0600 permissions on first start.
 
 ## Backup flow
 
@@ -261,8 +305,8 @@ sequenceDiagram
 ## Security model
 
 * **Agent ↔ server:** mTLS using the internal CA. Enrollment codes are single-use and expire
-  (24 h by default). Certificates can be revoked per client from the UI, which deletes the
-  client and its PBS token.
+  (24 h by default, up to 30 days). Revoking a client in the UI marks it revoked, so its
+  certificate is no longer accepted, and deletes its PBS token. Existing snapshots stay.
 * **Agent ↔ PBS:** the PBS certificate fingerprint is pinned. The scoped token has
   `DatastoreBackup` only, so a compromised PC cannot read other PCs' backups or delete its
   own history.
@@ -284,20 +328,34 @@ sequenceDiagram
     with *remove vanished* off; the primary holds no credentials for it. The console guides
     this setup and checks it (sync freshness surfaces with phase 5 sync-job awareness). Tape
     via PBS tape backup is the offline alternative.
-* **Admin UI:** local admin accounts (argon2id), with optional OIDC in phase 5 (SSO with MFA for the MSP console in phase 6).
+* **Admin UI:** session cookie plus a custom request header (`X-PROXBACKUP-Request`) against
+  CSRF. Local admin accounts (argon2id, forced change of the generated initial password), PBS
+  administrators via their PBS credentials on the PBS host, optional OIDC in phase 5 (SSO with
+  MFA for the MSP console in phase 6).
+* **Updates:** the console and its root helper only install release assets whose SHA-256
+  matches the release's `SHA256SUMS`, and never downgrade. Agents verify the binary's size,
+  hash and reported version and only fetch it from the console over mTLS. Releases are not
+  signed yet, so the GitHub repository is part of the trust base.
 
 ## Repository layout
 
 ```
-cmd/proxbackup-server/       ProxBackup Console (management server) entrypoint
-cmd/proxbackup-agent/        ProxBackup Agent entrypoint (service + CLI: enroll, backup, restore)
-pkg/pbs/                PBS protocol: blob, chunker, backup & reader sessions, admin API
+cmd/proxbackup-server/  ProxBackup Console entrypoint (also `apply-update` for the root helper)
+cmd/proxbackup-agent/   ProxBackup Agent entrypoint (service + CLI: enroll, backup, image, restore)
+pkg/pbs/                PBS protocol: blob, chunker, catalog, backup & reader sessions, admin API
 pkg/pxar/               pxar v1 encoder/decoder
-internal/agent/         job runner, VSS, file walker, image reader, server client
-internal/server/        HTTP API, store (SQLite), config push, PBS provisioning, notify
+internal/agent/         scheduler, job runner, VSS, file walker, image reader, catalog,
+                        run reporter/spool, self-update
+internal/server/        HTTP API, auth, store (SQLite), PKI, config push, PBS provisioning,
+                        local-PBS integration, notify, updater
 internal/schedule/      cron parsing and "is a slot due?" logic shared by agent and server
+internal/update/        GitHub release lookup, asset download/verification, update window
 internal/api/           shared JSON types between agent and server
 web/                    React + Vite admin UI (built into internal/server/webdist)
+packaging/deb/          Debian package files and systemd units for the console
+tools/mkdeb/            builds the console .deb
+scripts/                version bump, release, PBS E2E test, Windows VM test
+.github/workflows/      release workflow (builds and publishes tagged releases)
 docs/                   this document
 ```
 
@@ -305,9 +363,9 @@ docs/                   this document
 
 | Phase | Scope |
 |-------|-------|
-| **1 — MVP** (implemented; verified against PBS 4.2 except Windows-only paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI |
-| 2 | ~~`catalog.pcat1.didx`~~ (done, for file and image backups), file restore from images (NTFS reader over the fixed index), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, immutable backups (lock window via the PBS `protected` flag, tamper-resistant retention, guided pull-sync to a second PBS; see [Security model](#security-model)) |
-| 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, CI runs the E2E suite on Linux and macOS |
+| **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
+| 2 | File restore from images (NTFS reader over the fixed index), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, immutable backups (lock window via the PBS `protected` flag, tamper-resistant retention, guided pull-sync to a second PBS; see [Security model](#security-model)) |
+| 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
 | 6 — MSP cloud console | Cloud-hosted, multi-tenant **ProxBackup Cloud** console for managed service providers: one pane of glass over all customers' sites, cross-customer alerting, policy templates, technician RBAC scoped per customer, reporting and usage metering for billing, PSA/RMM integrations, optional hosted management servers. See [MSP cloud console](#msp-cloud-console) |
@@ -316,11 +374,12 @@ docs/                   this document
 
 | | Windows | macOS | Linux |
 |---|---|---|---|
-| Builds and runs | ✅ (Windows-only paths not yet tested on real Windows) | ✅ tested | ✅ builds; not yet run |
+| Builds and runs | ✅ tested (Windows 11 ARM64 VM, `scripts/windows-vm-test.ps1`) | ✅ tested | ✅ builds; not yet run |
 | Scheduling, catch-up, offline operation, restore | ✅ | ✅ | ✅ |
 | Consistent snapshot | VSS | ❌ live reads *(phase 3: APFS snapshots)* | ❌ live reads *(phase 3: LVM / btrfs / ZFS)* |
 | File metadata | attributes, timestamps (ACLs/ADS in phase 2) | ❌ mtime + read-only only *(phase 3)* | ❌ mtime + read-only only *(phase 3)* |
 | Service install | Windows service | launchd *(not yet verified)* | systemd *(not yet verified)* |
+| Agent self-update | ✅ | ❌ *(phase 3)* | ❌ *(phase 3)* |
 | Bare-metal restore | *phase 4: ProxBackup Rescue* | ❌ not planned (see below) | *phase 4: ProxBackup Rescue* |
 
 Today the non-Windows agent is a development build. It backs up and restores file contents,
@@ -484,10 +543,11 @@ the console belongs to exactly one customer, and every query is scoped by tenant
 
 | Risk | Mitigation |
 |------|-----------|
-| PBS protocol changes | The protocol is versioned (`-v1`) and stable since PBS 1.0. Integration tests run against a real PBS in CI |
-| pxar encoding bugs make backups unrestorable | Round-trip tests with our decoder, plus validation with the official `pxar` crate / `proxmox-backup-client` in the E2E suite |
-| VSS failures (writers in bad state, no space) | Fall back to a crash-consistent backup *only if the job allows it*, and log writer status |
-| Long paths / odd names | `\\?\` prefixed paths throughout; names that are invalid in pxar (`/`) are escaped and logged |
+| PBS protocol changes | The protocol is versioned (`-v1`) and stable since PBS 1.0. `make e2e` runs the protocol tests against a PBS 4.2 container (not yet part of CI; the release workflow runs `make test`) |
+| pxar encoding bugs make backups unrestorable | Round-trip tests with our decoder; snapshots are browsable and downloadable in the PBS GUI. Validation with the official `pxar` crate / `proxmox-backup-client` in the E2E suite is still to do |
+| VSS failures (writers in bad state, no space) | The backup fails with the VSS error rather than silently reading live files. Jobs can turn VSS off (`use_vss`) to back up crash-inconsistent live data instead |
+| Long paths / odd names | `\\?\` prefixed paths throughout; files that can't be read or encoded are skipped with a warning in the run log |
+| A bad release breaks every console and agent | Updates install only in the admin's window, refuse downgrades, and verify `SHA256SUMS`; agents update only when idle and back off for an hour after a failure. Prereleases are opt-in |
 | Locked files without VSS | VSS is the default; without it, files are skipped and warned about, never silently dropped |
 | Compromised console or PBS host deletes all backups (it holds an Admin token) | Phase 2: lock window via `protected`, plus a pull-synced second PBS or tape that the primary can't reach |
 | Compromised PC floods its group so retention prunes the good snapshots | Phase 2: scheduled retention, per-day run cap, oldest good snapshot in the lock window always kept |
