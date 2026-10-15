@@ -55,6 +55,13 @@ func buildArchive(t *testing.T) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	addTestTree(t, enc)
+	return buf.Bytes()
+}
+
+// addTestTree writes the test tree into enc and closes it.
+func addTestTree(t *testing.T, enc *Encoder) {
+	t.Helper()
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -84,12 +91,25 @@ func buildArchive(t *testing.T) []byte {
 	must(enc.CreateDir([]byte("z-empty-dir"), dirMeta()))
 	must(enc.FinishDir())
 	must(enc.Close())
-	return buf.Bytes()
+}
+
+var testTreeListing = []string{
+	`dir ""`, `file "a.txt" 5`, `dir "docs"`, `file "docs/empty" 0`, `file "docs/readme.md" 5`,
+	`dir "docs/sub"`, `file "docs/sub/deep.bin" 15000`, `file "hidden.txt" 6`, `symlink "link" -> a.txt`,
+	`dir "z-empty-dir"`,
 }
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	data := buildArchive(t)
-	dec := NewDecoder(bytes.NewReader(data))
+	got := decodeListing(t, NewDecoder(bytes.NewReader(data)))
+	if fmt.Sprint(got) != fmt.Sprint(testTreeListing) {
+		t.Fatalf("got:\n%v\nwant:\n%v", got, testTreeListing)
+	}
+}
+
+// decodeListing decodes every entry, reading all contents, into one line each.
+func decodeListing(t *testing.T, dec *Decoder) []string {
+	t.Helper()
 	var got []string
 	for {
 		e, err := dec.Next()
@@ -120,14 +140,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		}
 		got = append(got, line)
 	}
-	want := []string{
-		`dir ""`, `file "a.txt" 5`, `dir "docs"`, `file "docs/empty" 0`, `file "docs/readme.md" 5`,
-		`dir "docs/sub"`, `file "docs/sub/deep.bin" 15000`, `file "hidden.txt" 6`, `symlink "link" -> a.txt`,
-		`dir "z-empty-dir"`,
-	}
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Fatalf("got:\n%v\nwant:\n%v", got, want)
-	}
+	return got
 }
 
 // lookup implements pxar's random-access goodbye-table search to validate

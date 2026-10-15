@@ -36,6 +36,10 @@ type Entry struct {
 	Meta   Metadata
 	Size   uint64 // file size
 	Target string // symlink / hardlink target
+	// PayloadRef is set for regular files of a split (v2) archive; their
+	// contents are at PayloadOffset in the payload stream.
+	PayloadRef    bool
+	PayloadOffset uint64
 }
 
 // Decoder reads a pxar archive sequentially.
@@ -47,12 +51,35 @@ type Decoder struct {
 	payload int64    // unread payload bytes of the current file
 	started bool
 	done    bool
+	version uint64 // 1, or 2 after a FORMAT_VERSION item
+
+	// Split archives: the payload stream (nil when only the metadata is read),
+	// how much of it was consumed, and whether the current file's contents
+	// come from it.
+	pr        *bufio.Reader
+	pconsumed uint64
+	pstarted  bool
+	fromPR    bool
 }
 
-// NewDecoder creates a decoder over r.
+// NewDecoder creates a decoder over a v1 archive, or over the metadata stream
+// of a split archive alone (files then report their PayloadOffset, and
+// Contents is empty).
 func NewDecoder(r io.Reader) *Decoder {
-	return &Decoder{r: bufio.NewReaderSize(r, 256<<10)}
+	return &Decoder{r: bufio.NewReaderSize(r, 256<<10), version: 1}
 }
+
+// NewSplitDecoder creates a decoder over a split archive's metadata and
+// payload streams. It also reads v1 archives, ignoring payload.
+func NewSplitDecoder(meta, payload io.Reader) *Decoder {
+	d := NewDecoder(meta)
+	d.pr = bufio.NewReaderSize(payload, 256<<10)
+	return d
+}
+
+// Version is the archive format version: 1, or 2 for split archives. It is
+// known once Next returned the root entry.
+func (d *Decoder) Version() int { return int(d.version) }
 
 func (d *Decoder) readFull(b []byte) error {
 	n, err := io.ReadFull(d.r, b)
@@ -106,8 +133,15 @@ func (p *payloadReader) Read(b []byte) (int, error) {
 	if int64(len(b)) > p.d.payload {
 		b = b[:p.d.payload]
 	}
-	n, err := p.d.r.Read(b)
-	p.d.pos += uint64(n)
+	var n int
+	var err error
+	if p.d.fromPR {
+		n, err = p.d.pr.Read(b)
+		p.d.pconsumed += uint64(n)
+	} else {
+		n, err = p.d.r.Read(b)
+		p.d.pos += uint64(n)
+	}
 	p.d.payload -= int64(n)
 	if err == io.EOF && p.d.payload > 0 {
 		err = io.ErrUnexpectedEOF
@@ -120,12 +154,13 @@ func (d *Decoder) Next() (*Entry, error) {
 	if d.done {
 		return nil, io.EOF
 	}
-	if d.payload > 0 {
+	if d.payload > 0 && !d.fromPR {
 		if err := d.skip(d.payload); err != nil {
 			return nil, err
 		}
-		d.payload = 0
 	}
+	// Unread contents in the payload stream are skipped with the next reference.
+	d.payload, d.fromPR = 0, false
 	for {
 		t, n, err := d.header()
 		if err != nil {
@@ -140,10 +175,20 @@ func (d *Decoder) Next() (*Entry, error) {
 			if err != nil {
 				return nil, err
 			}
-			if len(b) != 8 || binary.LittleEndian.Uint64(b) != 2 {
+			if len(b) != 8 || binary.LittleEndian.Uint64(b) != formatVersion2 {
 				return nil, errors.New("pxar: unsupported format version")
 			}
-			return nil, errors.New("pxar: split (v2) archives are not supported yet")
+			if d.started || d.version != 1 || d.pos != headerSize+8 {
+				return nil, errors.New("pxar: format version must start the archive")
+			}
+			d.version = formatVersion2
+		case TypePrelude:
+			if d.started || d.version != formatVersion2 {
+				return nil, errors.New("pxar: unexpected prelude")
+			}
+			if err := d.skip(int64(n)); err != nil {
+				return nil, err
+			}
 		case TypeFilename:
 			b, err := d.content(n, maxFilenameLen+1)
 			if err != nil {
@@ -190,6 +235,43 @@ func (d *Decoder) Next() (*Entry, error) {
 			return nil, fmt.Errorf("pxar: unexpected item %#x at offset %d", t, d.pos-headerSize)
 		}
 	}
+}
+
+// seekPayload positions the payload stream at e's contents: it skips to the
+// referenced PAYLOAD item (over padding and unread contents) and checks it.
+func (d *Decoder) seekPayload(e *Entry) error {
+	le := binary.LittleEndian
+	if !d.pstarted {
+		var h [headerSize]byte
+		if _, err := io.ReadFull(d.pr, h[:]); err != nil {
+			return fmt.Errorf("pxar: payload stream: %w", err)
+		}
+		if le.Uint64(h[0:]) != TypePayloadStart || le.Uint64(h[8:]) != headerSize {
+			return errors.New("pxar: payload stream lacks its start marker")
+		}
+		d.pconsumed, d.pstarted = headerSize, true
+	}
+	if e.PayloadOffset < d.pconsumed {
+		return fmt.Errorf("pxar: %q: payload offset %d before already read %d", e.Path, e.PayloadOffset, d.pconsumed)
+	}
+	k, err := io.CopyN(io.Discard, d.pr, int64(e.PayloadOffset-d.pconsumed))
+	d.pconsumed += uint64(k)
+	if err == nil {
+		var h [headerSize]byte
+		_, err = io.ReadFull(d.pr, h[:])
+		d.pconsumed += headerSize
+		if err == nil && (le.Uint64(h[0:]) != TypePayload || le.Uint64(h[8:]) != headerSize+e.Size) {
+			return fmt.Errorf("pxar: %q: payload reference does not match the payload stream", e.Path)
+		}
+	}
+	if err != nil {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
+		}
+		return fmt.Errorf("pxar: %q: payload stream: %w", e.Path, err)
+	}
+	d.payload, d.fromPR = int64(e.Size), true
+	return nil
 }
 
 func (d *Decoder) childPath() string {
@@ -249,6 +331,23 @@ func (d *Decoder) entry() (*Entry, error) {
 			_, n, _ := d.header()
 			e.Kind, e.Size = KindFile, n
 			d.payload = int64(n)
+			return e, nil
+		case TypePayloadRef:
+			_, n, _ := d.header()
+			if d.version != formatVersion2 || n != payloadRefSize {
+				return nil, fmt.Errorf("pxar: unexpected payload reference in %q", e.Path)
+			}
+			var ref [payloadRefSize]byte
+			if err := d.readFull(ref[:]); err != nil {
+				return nil, err
+			}
+			e.Kind, e.PayloadRef = KindFile, true
+			e.PayloadOffset, e.Size = le.Uint64(ref[0:]), le.Uint64(ref[8:])
+			if d.pr != nil {
+				if err := d.seekPayload(e); err != nil {
+					return nil, err
+				}
+			}
 			return e, nil
 		case TypeSymlink:
 			_, n, _ := d.header()

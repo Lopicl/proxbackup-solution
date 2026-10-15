@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package pxar implements the Proxmox file archive format (version 1), as
-// produced by proxmox-backup-client for *.pxar.didx archives.
+// Package pxar implements the Proxmox file archive format, as produced by
+// proxmox-backup-client: version 1 (*.pxar.didx) and the version 2 split
+// archives (*.mpxar.didx + *.ppxar.didx).
 //
 // Format reference: pxar.git src/format/mod.rs. All integers are little-endian.
-// An archive is a single directory tree:
+// A v1 archive is a single directory tree:
 //
 //	ENTRY(root) [XATTR...]
 //	  FILENAME ENTRY [XATTR...] (PAYLOAD | SYMLINK | <dir contents> GOODBYE)
 //	  ...
 //	GOODBYE
+//
+// A v2 split archive is two streams. The metadata stream starts with
+// FORMAT_VERSION(2) and has the same tree, but regular files carry
+// PAYLOAD_REF{offset, size} instead of PAYLOAD. The payload stream is
+//
+//	PAYLOAD_START_MARKER PAYLOAD... PAYLOAD_TAIL_MARKER
+//
+// where offset points at a file's PAYLOAD header and size is its content size.
+// Bytes between payloads (padding from reused chunks) are skipped by readers.
 package pxar
 
 import (
@@ -41,12 +51,16 @@ const (
 	TypePayload         uint64 = 0x28147a1b0b7c1a25
 	TypePayloadRef      uint64 = 0x419d3d6bc4ba977e
 	TypeGoodbye         uint64 = 0x2fec4fa642d5731d
+	TypePayloadStart    uint64 = 0x834c68c2194a4ed2
+	TypePayloadTail     uint64 = 0x6c72b78b984c81b5
 	GoodbyeTailMarker   uint64 = 0xef5eed5b753e1555
 	hashKey1            uint64 = 0x83ac3f1cfbb450db
 	hashKey2            uint64 = 0xaa4f1b6879369fbd
 	headerSize                 = 16
 	entrySize                  = 40 // mode, flags, uid, gid, mtime{secs, nanos, pad}
 	goodbyeItemSize            = 24
+	payloadRefSize             = 16 // offset, size
+	formatVersion2             = 2
 	maxFilenameLen             = 4 * 1024
 	maxXattrLen                = 64*1024 + 255 + 1
 	maxSymlinkLen              = 4 * 1024
@@ -87,6 +101,10 @@ type Metadata struct {
 	MtimeNanos uint32
 	Xattrs     []Xattr
 }
+
+// HeaderSize is the size of an item header (type + full size). Every file in
+// a payload stream occupies HeaderSize + its size bytes.
+const HeaderSize = headerSize
 
 // IsDir reports whether Mode denotes a directory.
 func (m Metadata) IsDir() bool { return m.Mode&ModeIFMT == ModeIFDIR }

@@ -11,7 +11,9 @@ import (
 	"slices"
 )
 
-// Encoder writes a pxar v1 archive to a sequential stream.
+// Encoder writes a pxar archive to a sequential stream: a v1 archive
+// (NewEncoder), or the metadata and payload streams of a v2 split archive
+// (NewSplitEncoder).
 //
 // Usage: NewEncoder(root) → CreateDir/AddFile/AddSymlink/FinishDir … → Close.
 // Children of a directory must be added in strictly ascending byte order of name.
@@ -21,6 +23,13 @@ type Encoder struct {
 	stack []*dirState
 	buf   []byte
 	err   error
+
+	// Split archives only: the payload stream, its position, and the end of
+	// the last payload referenced (references must not go backwards, so
+	// sequential readers can follow them).
+	payload    io.Writer
+	ppos       uint64
+	lastRefEnd uint64
 }
 
 type dirState struct {
@@ -31,12 +40,40 @@ type dirState struct {
 	lastName    []byte
 }
 
-// NewEncoder starts an archive whose root directory has metadata root.
+// NewEncoder starts a v1 archive whose root directory has metadata root.
 func NewEncoder(w io.Writer, root Metadata) (*Encoder, error) {
+	return newEncoder(w, nil, root)
+}
+
+// NewSplitEncoder starts a v2 split archive: the entry tree goes to meta, file
+// contents to payload.
+func NewSplitEncoder(meta, payload io.Writer, root Metadata) (*Encoder, error) {
+	if payload == nil {
+		return nil, errors.New("pxar: split archive needs a payload stream")
+	}
+	return newEncoder(meta, payload, root)
+}
+
+func newEncoder(w, payload io.Writer, root Metadata) (*Encoder, error) {
 	if !root.IsDir() {
 		return nil, errors.New("pxar: root metadata must be a directory")
 	}
-	e := &Encoder{w: w, buf: make([]byte, 0, 256)}
+	e := &Encoder{w: w, payload: payload, buf: make([]byte, 0, 256)}
+	if payload != nil {
+		var v [8]byte
+		binary.LittleEndian.PutUint64(v[:], formatVersion2)
+		if err := e.writeItem(TypeFormatVersion, v[:], false); err != nil {
+			return nil, err
+		}
+		var h [headerSize]byte
+		putHeader(h[:], TypePayloadStart, headerSize)
+		if err := e.writePayload(h[:]); err != nil {
+			return nil, err
+		}
+		e.lastRefEnd = e.ppos
+	}
+	// The root's goodbye tail points at offset 0 even in v2 archives, i.e. at
+	// FORMAT_VERSION rather than the root ENTRY (as pxar's encoder does).
 	e.stack = append(e.stack, &dirState{entryOffset: 0})
 	if err := e.writeMetadata(root); err != nil {
 		return nil, err
@@ -44,15 +81,23 @@ func NewEncoder(w io.Writer, root Metadata) (*Encoder, error) {
 	return e, nil
 }
 
-// Position returns the number of bytes written so far.
+// Position returns the number of bytes written so far (to the metadata stream
+// of a split archive).
 func (e *Encoder) Position() uint64 { return e.pos }
 
-func (e *Encoder) write(p []byte) error {
+// PayloadPosition returns the size of the payload stream so far (split archives).
+func (e *Encoder) PayloadPosition() uint64 { return e.ppos }
+
+func (e *Encoder) write(p []byte) error { return e.writeTo(e.w, &e.pos, p) }
+
+func (e *Encoder) writePayload(p []byte) error { return e.writeTo(e.payload, &e.ppos, p) }
+
+func (e *Encoder) writeTo(w io.Writer, pos *uint64, p []byte) error {
 	if e.err != nil {
 		return e.err
 	}
-	n, err := e.w.Write(p)
-	e.pos += uint64(n)
+	n, err := w.Write(p)
+	*pos += uint64(n)
 	if err == nil && n != len(p) {
 		err = io.ErrShortWrite
 	}
@@ -164,7 +209,8 @@ type FileResult struct {
 	Grew bool
 }
 
-// AddFile adds a regular file of exactly size bytes read from r.
+// AddFile adds a regular file of exactly size bytes read from r. In a split
+// archive the contents go to the payload stream.
 func (e *Encoder) AddFile(name []byte, m Metadata, size uint64, r io.Reader) (FileResult, error) {
 	var res FileResult
 	m.Mode = m.Mode&^ModeIFMT | ModeIFREG
@@ -174,16 +220,26 @@ func (e *Encoder) AddFile(name []byte, m Metadata, size uint64, r io.Reader) (Fi
 	}
 	var h [headerSize]byte
 	putHeader(h[:], TypePayload, headerSize+size)
-	if err := e.write(h[:]); err != nil {
+	out := e.write
+	if e.payload != nil {
+		out = e.writePayload
+		if err := e.writePayloadRef(e.ppos, size); err != nil {
+			return res, err
+		}
+		e.lastRefEnd = e.ppos + headerSize + size
+	}
+	if err := out(h[:]); err != nil {
 		return res, err
 	}
-	n, err := io.Copy(&encWriter{e}, io.LimitReader(r, int64(size)))
+	// The goodbye item covers the metadata stream only; e.pos doesn't move
+	// while a split archive's contents are written.
+	n, err := io.Copy(encWriter(out), io.LimitReader(r, int64(size)))
 	if err != nil {
 		if e.err != nil {
 			return res, e.err
 		}
 		// Read error: keep the archive consistent by zero padding, report the error.
-		if perr := e.pad(size - uint64(n)); perr != nil {
+		if perr := e.pad(out, size-uint64(n)); perr != nil {
 			return res, perr
 		}
 		d.items = append(d.items, goodbyeItem{HashFilename(name), off, e.pos - off})
@@ -191,7 +247,7 @@ func (e *Encoder) AddFile(name []byte, m Metadata, size uint64, r io.Reader) (Fi
 	}
 	if uint64(n) < size {
 		res.Short = true
-		if err := e.pad(size - uint64(n)); err != nil {
+		if err := e.pad(out, size-uint64(n)); err != nil {
 			return res, err
 		}
 	} else {
@@ -204,11 +260,51 @@ func (e *Encoder) AddFile(name []byte, m Metadata, size uint64, r io.Reader) (Fi
 	return res, nil
 }
 
-func (e *Encoder) pad(n uint64) error {
+func (e *Encoder) writePayloadRef(offset, size uint64) error {
+	var ref [payloadRefSize]byte
+	binary.LittleEndian.PutUint64(ref[0:], offset)
+	binary.LittleEndian.PutUint64(ref[8:], size)
+	return e.writeItem(TypePayloadRef, ref[:], false)
+}
+
+// SkipPayload records that n bytes were appended to the payload stream
+// outside the encoder, e.g. chunks of a previous payload archive reused as is.
+func (e *Encoder) SkipPayload(n uint64) error {
+	if e.payload == nil {
+		return errors.New("pxar: SkipPayload on a v1 archive")
+	}
+	e.ppos += n
+	return nil
+}
+
+// AddPayloadRef adds a regular file whose PAYLOAD item (header and size bytes
+// of contents) is already in the payload stream at offset, typically inside
+// chunks reused with SkipPayload. References must be in stream order.
+func (e *Encoder) AddPayloadRef(name []byte, m Metadata, size, offset uint64) error {
+	if e.payload == nil {
+		return errors.New("pxar: payload references need a split archive")
+	}
+	if offset < e.lastRefEnd || offset+headerSize+size > e.ppos {
+		return fmt.Errorf("pxar: payload reference %d+%d outside [%d, %d)", offset, size, e.lastRefEnd, e.ppos)
+	}
+	m.Mode = m.Mode&^ModeIFMT | ModeIFREG
+	d, off, err := e.startEntry(name, m)
+	if err != nil {
+		return err
+	}
+	if err := e.writePayloadRef(offset, size); err != nil {
+		return err
+	}
+	e.lastRefEnd = offset + headerSize + size
+	d.items = append(d.items, goodbyeItem{HashFilename(name), off, e.pos - off})
+	return nil
+}
+
+func (e *Encoder) pad(out func([]byte) error, n uint64) error {
 	zero := make([]byte, min(n, 1<<20))
 	for n > 0 {
 		k := min(n, uint64(len(zero)))
-		if err := e.write(zero[:k]); err != nil {
+		if err := out(zero[:k]); err != nil {
 			return err
 		}
 		n -= k
@@ -216,10 +312,10 @@ func (e *Encoder) pad(n uint64) error {
 	return nil
 }
 
-type encWriter struct{ e *Encoder }
+type encWriter func([]byte) error
 
-func (w *encWriter) Write(p []byte) (int, error) {
-	if err := w.e.write(p); err != nil {
+func (w encWriter) Write(p []byte) (int, error) {
+	if err := w(p); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -270,7 +366,15 @@ func (e *Encoder) Close() error {
 	if len(e.stack) != 1 {
 		return fmt.Errorf("pxar: %d directories not finished", len(e.stack)-1)
 	}
-	return e.finishCurrent()
+	if err := e.finishCurrent(); err != nil {
+		return err
+	}
+	if e.payload != nil {
+		var h [headerSize]byte
+		putHeader(h[:], TypePayloadTail, headerSize)
+		return e.writePayload(h[:])
+	}
+	return nil
 }
 
 func (e *Encoder) finishCurrent() error {
