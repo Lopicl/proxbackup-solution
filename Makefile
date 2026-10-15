@@ -1,6 +1,9 @@
 VERSION ?= $(shell ./scripts/version.sh)
 # Recursive (=), so recipes that run after `bump` stamp the bumped version.
-LDFLAGS = -s -w -X main.version=$(VERSION)
+# Builds from the alpha branch include pre-releases in their updates by default
+# (see scripts/prerelease.sh).
+PRERELEASE ?= $(shell ./scripts/prerelease.sh)
+LDFLAGS = -s -w -X main.version=$(VERSION) -X main.prerelease=$(PRERELEASE)
 # Package builds (deb, dist) bump BUILD and TOTAL in VERSION first; plain builds
 # and commits don't. BUMP=0 packages the current VERSION as is (the Release
 # workflow, which builds the version scripts/release.sh already bumped and tagged).

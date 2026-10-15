@@ -34,6 +34,9 @@ type Config struct {
 	UpdateRepo string
 	// UpdateMode is "deb" when installed from the package (see updater.go).
 	UpdateMode string
+	// PrereleaseDefault turns pre-release updates on until the admin saves the
+	// update settings (builds from the alpha branch).
+	PrereleaseDefault bool
 }
 
 // Server is the management server.

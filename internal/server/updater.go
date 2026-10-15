@@ -48,8 +48,8 @@ type UpdateSettings struct {
 	Agents      bool          `json:"agents"` // offer the console's version to older agents
 }
 
-func defaultUpdateSettings() UpdateSettings {
-	return UpdateSettings{AutoInstall: true, Agents: true,
+func defaultUpdateSettings(prerelease bool) UpdateSettings {
+	return UpdateSettings{AutoInstall: true, Agents: true, Prerelease: prerelease,
 		Window: update.Window{Days: []time.Weekday{time.Sunday}, Time: "03:00", Minutes: 60}}
 }
 
@@ -131,7 +131,7 @@ func newUpdater(s *Server) *updater {
 func isVersion(v string) bool { _, ok := update.ParseVersion(v); return ok }
 
 func (u *updater) settings(ctx context.Context) UpdateSettings {
-	us := defaultUpdateSettings()
+	us := defaultUpdateSettings(u.s.cfg.PrereleaseDefault)
 	u.s.store.Setting(ctx, "updates", &us)
 	return us
 }

@@ -25,6 +25,10 @@ import (
 // version is set at build time from ./VERSION (see Makefile).
 var version = "dev"
 
+// prerelease is "1" in builds from the alpha branch (see Makefile): they include
+// pre-releases in their updates unless the admin turns that off.
+var prerelease = ""
+
 func main() {
 	// Subcommands that must not open the data directory.
 	if len(os.Args) > 1 {
@@ -37,7 +41,7 @@ func main() {
 			return
 		}
 	}
-	cfg := server.Config{Version: version}
+	cfg := server.Config{Version: version, PrereleaseDefault: prerelease == "1"}
 	var hosts string
 	var local server.LocalPBS
 	var localPBS bool

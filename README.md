@@ -105,7 +105,10 @@ scripts/release.sh --local --prerelease   # pre-release from a branch other than
 ```
 
 Every release of a commit on `alpha` is published as a GitHub pre-release, so only consoles that
-opt in to pre-releases install it.
+opt in to pre-releases install it. Packages built from `alpha` (`make deb`, `make dist`, releases)
+are opted in already: their console has "Include pre-releases" on until the admin turns it off
+under Settings → Updates. `scripts/prerelease.sh` decides what counts as `alpha`; override it
+with `make dist PRERELEASE=0`.
 
 Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it
 checks that the tag matches `VERSION`, runs the tests, builds `make dist` and publishes a GitHub

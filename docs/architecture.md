@@ -246,7 +246,8 @@ read on every run.
   update installed or failed.
 * **Automatic updates.** The console checks GitHub releases every 6 hours and installs the
   newest one in a weekday/time window set under Settings → Updates (default Sunday 03:00,
-  60 min), or immediately with "Install now". Prereleases are opt-in. How it installs depends
+  60 min), or immediately with "Install now". Prereleases are opt-in, except in
+  builds from the `alpha` branch, which include them by default. How it installs depends
   on how the console was installed:
   * *.deb:* the unprivileged service only writes `/var/lib/proxbackup/updates/request`. A
     `.path` unit starts the root helper `proxbackup-server-update.service`

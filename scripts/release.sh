@@ -57,14 +57,9 @@ check_tree() {
   [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch" 2>/dev/null)" ] || die "HEAD is not pushed to origin/$branch; push first"
 }
 
-# on_alpha reports whether HEAD is on origin/alpha; everything released from there
-# is a pre-release.
-on_alpha() {
-  git fetch -q origin alpha 2>/dev/null && git merge-base --is-ancestor HEAD FETCH_HEAD
-}
-
 publish() {
-  if on_alpha; then
+  git fetch -q origin alpha 2>/dev/null || true
+  if [ "$("$root/scripts/prerelease.sh")" = 1 ]; then
     echo "HEAD is on alpha; publishing $tag as a pre-release"
     flags+=(--prerelease)
   fi
