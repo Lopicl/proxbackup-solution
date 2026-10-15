@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS clients (
 CREATE TABLE IF NOT EXISTS enrollments (
   id INTEGER PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, client_name TEXT NOT NULL, target_id INTEGER NOT NULL,
   expires INTEGER NOT NULL, used_at INTEGER NOT NULL DEFAULT 0, client_id INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS setup_tokens (
+  id INTEGER PRIMARY KEY, code_hash TEXT NOT NULL UNIQUE, target_id INTEGER NOT NULL, expires INTEGER NOT NULL,
+  uses INTEGER NOT NULL DEFAULT 0, token_enc BLOB NOT NULL, created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY, client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE, name TEXT NOT NULL,
   kind TEXT NOT NULL, backup_id TEXT NOT NULL, sources TEXT NOT NULL DEFAULT '[]', excludes TEXT NOT NULL DEFAULT '[]',
@@ -517,6 +520,85 @@ func (s *Store) CompleteEnrollment(ctx context.Context, id, clientID int64) {
 
 func (s *Store) ReleaseEnrollment(ctx context.Context, id int64) {
 	s.db.ExecContext(ctx, `UPDATE enrollments SET used_at=0 WHERE id=? AND client_id=0`, id)
+}
+
+// ---- setup tokens ----
+
+// SetupToken enrolls any number of PCs until it expires; each PC picks its
+// own client name.
+type SetupToken struct {
+	ID        int64 `json:"id"`
+	TargetID  int64 `json:"target_id"`
+	Expires   int64 `json:"expires"`
+	Uses      int   `json:"uses"`
+	CreatedAt int64 `json:"created_at"`
+}
+
+// CreateSetupToken stores a new token. tokenEnc is the sealed token string,
+// kept so the setup can be downloaded again until it expires.
+func (s *Store) CreateSetupToken(ctx context.Context, codeHash string, targetID, expires int64, tokenEnc []byte) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO setup_tokens(code_hash, target_id, expires, token_enc, created_at) VALUES(?,?,?,?,?)`,
+		codeHash, targetID, expires, tokenEnc, now())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// SetupTokens lists the tokens that haven't expired.
+func (s *Store) SetupTokens(ctx context.Context) ([]SetupToken, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, expires, uses, created_at FROM setup_tokens WHERE expires>? ORDER BY id DESC`, now())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SetupToken
+	for rows.Next() {
+		var t SetupToken
+		if err := rows.Scan(&t.ID, &t.TargetID, &t.Expires, &t.Uses, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SetupTokenSealed returns the sealed token string of a valid setup token.
+func (s *Store) SetupTokenSealed(ctx context.Context, id int64) ([]byte, error) {
+	var enc []byte
+	err := s.db.QueryRowContext(ctx, `SELECT token_enc FROM setup_tokens WHERE id=? AND expires>?`, id, now()).Scan(&enc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errNotFound
+	}
+	return enc, err
+}
+
+// SetupTokenByCode returns a valid setup token.
+func (s *Store) SetupTokenByCode(ctx context.Context, codeHash string) (*SetupToken, error) {
+	t := &SetupToken{}
+	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, expires, uses, created_at FROM setup_tokens WHERE code_hash=? AND expires>?`,
+		codeHash, now()).Scan(&t.ID, &t.TargetID, &t.Expires, &t.Uses, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errNotFound
+	}
+	return t, err
+}
+
+func (s *Store) CountSetupTokenUse(ctx context.Context, id int64) {
+	s.db.ExecContext(ctx, `UPDATE setup_tokens SET uses=uses+1 WHERE id=?`, id)
+}
+
+// DeleteSetupToken revokes a token (and drops expired ones).
+func (s *Store) DeleteSetupToken(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM setup_tokens WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	s.db.ExecContext(ctx, `DELETE FROM setup_tokens WHERE expires<?`, now())
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	return nil
 }
 
 // ---- jobs ----

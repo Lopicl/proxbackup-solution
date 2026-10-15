@@ -382,6 +382,27 @@ func (u *updater) PushAgent(ctx context.Context, c *Client) error {
 	return nil
 }
 
+// agentBinary returns the cached Windows agent for arch, downloading the
+// console's release first if needed.
+func (u *updater) agentBinary(ctx context.Context, arch string) (agentBinary, error) {
+	if !isVersion(u.s.cfg.Version) {
+		return agentBinary{}, errors.New("this console is a development build; it has no agent release to download (use the setup command instead)")
+	}
+	u.busy.Lock()
+	u.cacheAgents(ctx)
+	u.busy.Unlock()
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if b, ok := u.agents[arch]; ok {
+		return b, nil
+	}
+	msg := u.status.AgentCacheErr
+	if msg == "" {
+		msg = "no " + arch + " agent in the release"
+	}
+	return agentBinary{}, fmt.Errorf("agent %s for %s is not available: %s", u.s.cfg.Version, arch, msg)
+}
+
 func (s *Server) handleAgentBinary(w http.ResponseWriter, r *http.Request, c *Client) {
 	goos, arch, _ := strings.Cut(r.PathValue("platform"), "-")
 	s.updater.mu.Lock()

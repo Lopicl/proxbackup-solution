@@ -3,6 +3,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/x509"
@@ -69,6 +70,11 @@ func sanitizeClientName(n string) string {
 	return n
 }
 
+var (
+	errClientNameTaken   = errors.New("client name already exists")
+	errClientNameInvalid = errors.New("invalid client name")
+)
+
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	var req api.EnrollRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -76,6 +82,10 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	if st, err := s.store.SetupTokenByCode(ctx, hashToken(req.Code)); err == nil {
+		s.enrollWithSetupToken(w, r, st, req)
+		return
+	}
 	e, err := s.store.ClaimEnrollment(ctx, hashToken(req.Code))
 	if err != nil {
 		s.log.Warn("enrollment rejected", "remote", r.RemoteAddr, "err", err)
@@ -94,16 +104,43 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, api.EnrollResponse{ClientID: c.ID, ClientName: c.Name, CertPEM: string(certPEM), CAPEM: string(s.pki.CAPEM)})
 }
 
+// enrollWithSetupToken enrolls a PC under the name it chose (its hostname if
+// none). A taken name is a 409 so the setup can ask for another one.
+func (s *Server) enrollWithSetupToken(w http.ResponseWriter, r *http.Request, st *SetupToken, req api.EnrollRequest) {
+	ctx := r.Context()
+	e := &Enrollment{ClientName: cmp.Or(strings.TrimSpace(req.ClientName), req.Hostname), TargetID: st.TargetID}
+	c, certPEM, err := s.enrollClient(ctx, e, req)
+	if err != nil {
+		s.log.Warn("setup enrollment failed", "client", e.ClientName, "setup_token", st.ID, "remote", r.RemoteAddr, "err", err)
+		code := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, errClientNameTaken):
+			code = http.StatusConflict
+		case errors.Is(err, errClientNameInvalid):
+			code = http.StatusBadRequest
+		}
+		httpError(w, code, err)
+		return
+	}
+	s.store.CountSetupTokenUse(ctx, st.ID)
+	s.log.Info("client enrolled", "client", c.Name, "id", c.ID, "hostname", req.Hostname, "setup_token", st.ID, "remote", r.RemoteAddr)
+	writeJSON(w, api.EnrollResponse{ClientID: c.ID, ClientName: c.Name, CertPEM: string(certPEM), CAPEM: string(s.pki.CAPEM)})
+}
+
 func (s *Server) enrollClient(ctx context.Context, e *Enrollment, req api.EnrollRequest) (*Client, []byte, error) {
 	name := sanitizeClientName(e.ClientName)
 	if name == "" {
 		name = sanitizeClientName(req.Hostname)
 	}
 	if !clientNameRe.MatchString(name) {
-		return nil, nil, fmt.Errorf("invalid client name %q", name)
+		return nil, nil, fmt.Errorf("%w %q", errClientNameInvalid, name)
 	}
+	// Setup tokens let several PCs enroll at once: hold the name from the check
+	// until the client row exists (provisioning replaces a same-named PBS token).
+	s.enrollMu.Lock()
+	defer s.enrollMu.Unlock()
 	if s.store.ClientNameTaken(ctx, name) {
-		return nil, nil, fmt.Errorf("client name %q already exists", name)
+		return nil, nil, fmt.Errorf("%w: %q", errClientNameTaken, name)
 	}
 	t, err := s.store.Target(ctx, e.TargetID)
 	if err != nil {

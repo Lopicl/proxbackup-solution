@@ -44,6 +44,13 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
 ```
    The server creates the PBS namespace `pcs/<client>` and a token that has **DatastoreBackup on
    that namespace only**. Running the command again on an enrolled PC re-enrolls it.
+
+   To roll out many PCs, use *Clients → Create agent setup* instead. It creates a temporary token
+   (valid 4 h by default) that enrolls any number of PCs, and offers a setup `.exe` to download.
+   Double-click it on each PC: it asks for administrator rights, then for the client name (the
+   PC's hostname by default) and the ProxBackup host/IP (this console's address by default), then
+   enrolls the PC, copies the agent to `C:\Program Files\ProxBackup` and starts the service. The
+   same works with `proxbackup-agent.exe setup <token>`. Revoke the setup when you are done.
 4. **Jobs:** on the client page, create a *Files* job (default `C:\Users`, daily, with retention) or
    a *Volume image* job. The schedule is pushed to the PC, and the **agent** starts the backup on
    the PC's own clock. If the PC is off, asleep or busy during the start window, the job either

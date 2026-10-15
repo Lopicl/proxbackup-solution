@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,13 +25,19 @@ func Enroll(ctx context.Context, dir, token string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return EnrollWith(ctx, dir, t, "")
+}
+
+// EnrollWith enrolls with a parsed token. clientName is the name asked for
+// with a setup token (ignored by one-time codes; empty = the hostname).
+func EnrollWith(ctx context.Context, dir string, t *api.EnrollmentToken, clientName string) (*Config, error) {
 	hostname, _ := os.Hostname()
 	keyPEM, csrPEM, err := newKeyAndCSR(hostname)
 	if err != nil {
 		return nil, err
 	}
 	hc := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{TLSClientConfig: pinnedCAConfig(t.CAFingerprint)}}
-	req := api.EnrollRequest{Code: t.Code, CSR: string(csrPEM), Hostname: hostname, OS: osDescription()}
+	req := api.EnrollRequest{Code: t.Code, CSR: string(csrPEM), Hostname: hostname, OS: osDescription(), ClientName: clientName}
 	var resp api.EnrollResponse
 	if err := postJSON(ctx, hc, strings.TrimRight(t.URL, "/")+"/agent/v1/enroll", req, &resp); err != nil {
 		return nil, fmt.Errorf("enrollment failed: %w", err)
@@ -65,7 +72,12 @@ func postJSON(ctx context.Context, hc *http.Client, url string, in, out any) err
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if resp.StatusCode/100 != 2 {
-		return &statusError{Code: resp.StatusCode, Msg: fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(body)))}
+		msg := strings.TrimSpace(string(body))
+		var e struct{ Error string }
+		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+			msg = e.Error
+		}
+		return &statusError{Code: resp.StatusCode, Msg: fmt.Sprintf("%s: %s", resp.Status, msg)}
 	}
 	if out != nil {
 		return json.Unmarshal(body, out)
@@ -80,6 +92,16 @@ type statusError struct {
 }
 
 func (e *statusError) Error() string { return e.Msg }
+
+// HTTPStatus returns the server's status code for a rejected request, or 0
+// when the server wasn't reached.
+func HTTPStatus(err error) int {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.Code
+	}
+	return 0
+}
 
 // permanent reports whether retrying the request cannot succeed (4xx other than 408/429).
 func permanent(err error) bool {

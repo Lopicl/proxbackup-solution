@@ -225,6 +225,14 @@ export interface Enrollment {
   created_at: number
 }
 
+export interface SetupToken {
+  id: number
+  target_id: number
+  expires: number
+  uses: number
+  created_at: number
+}
+
 let onUnauthorized: () => void = () => {}
 export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn
@@ -276,6 +284,27 @@ export const api = {
   deleteEnrollment: (id: number) => request('DELETE', `/enrollments/${id}`),
   createEnrollment: (client_name: string, target_id: number, ttl_hours: number) =>
     request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours }),
+
+  setupTokens: () => request<SetupToken[]>('GET', '/setup-tokens'),
+  setupToken: (id: number) => request<{ token: string; command: string }>('GET', `/setup-tokens/${id}`),
+  createSetupToken: (target_id: number, ttl_hours: number) =>
+    request<{ id: number; expires: number; token: string; command: string }>('POST', '/setup-tokens', { target_id, ttl_hours }),
+  deleteSetupToken: (id: number) => request('DELETE', `/setup-tokens/${id}`),
+  // Saves the setup .exe for arch through the browser (errors come back as JSON).
+  downloadSetup: async (id: number, arch: 'amd64' | 'arm64') => {
+    const res = await fetch(`/api/setup-tokens/${id}/download/${arch}`, { credentials: 'same-origin' })
+    if (!res.ok) {
+      const data = await res.json().catch(() => null)
+      if (res.status === 401) onUnauthorized()
+      throw new ApiError(res.status, data?.error ?? res.statusText)
+    }
+    const url = URL.createObjectURL(await res.blob())
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `proxbackup-agent-setup-${arch}.exe`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 60000)
+  },
 
   saveJob: (j: Partial<Job>) =>
     j.id ? request<Job>('PUT', `/jobs/${j.id}`, strip(j, ['id', 'next_run', 'catch_up_pending', 'client_id', 'created_at'])) : request<Job>('POST', '/jobs', strip(j, ['next_run', 'catch_up_pending'])),

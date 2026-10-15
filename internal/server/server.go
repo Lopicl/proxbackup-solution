@@ -49,6 +49,8 @@ type Server struct {
 	notify  *Notifier
 	updater *updater
 
+	enrollMu sync.Mutex // serializes client creation (see enrollClient)
+
 	wakeMu sync.Mutex
 	wake   map[int64]chan struct{} // per-client long-poll wakeups
 
@@ -165,6 +167,11 @@ func (s *Server) uiRoutes() http.Handler {
 	admin.HandleFunc("POST /api/enrollments", s.handleCreateEnrollment)
 	admin.HandleFunc("GET /api/enrollments/{id}/command", s.handleEnrollmentCommand)
 	admin.HandleFunc("DELETE /api/enrollments/{id}", s.handleDeleteEnrollment)
+	admin.HandleFunc("GET /api/setup-tokens", s.handleSetupTokens)
+	admin.HandleFunc("POST /api/setup-tokens", s.handleCreateSetupToken)
+	admin.HandleFunc("GET /api/setup-tokens/{id}", s.handleSetupToken)
+	admin.HandleFunc("GET /api/setup-tokens/{id}/download/{arch}", s.handleSetupDownload)
+	admin.HandleFunc("DELETE /api/setup-tokens/{id}", s.handleDeleteSetupToken)
 	admin.HandleFunc("GET /api/jobs", s.handleJobs)
 	admin.HandleFunc("POST /api/jobs", s.handleSaveJob)
 	admin.HandleFunc("PUT /api/jobs/{id}", s.handleSaveJob)

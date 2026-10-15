@@ -29,6 +29,8 @@ const usage = `proxbackup-agent — Proxmox Backup Server agent for Windows
 
 Usage:
   proxbackup-agent enroll <token>         enroll with a proxbackup-server (token from the web UI)
+  proxbackup-agent setup <token>          interactive setup with a setup token: asks for the client
+                                          name and console address, then installs and starts the service
   proxbackup-agent install | uninstall    install/remove the Windows service
   proxbackup-agent start | stop           start/stop the service
   proxbackup-agent run                    run in the foreground (what the service executes)
@@ -45,6 +47,11 @@ Run "proxbackup-agent backup -h" for the ad-hoc flags.
 
 func main() {
 	if len(os.Args) < 2 {
+		if token, _, ok := embeddedSetupToken(); ok {
+			// A setup .exe from the console, started by double-click.
+			runSetup(agent.DefaultDataDir(), token)
+			return
+		}
 		fmt.Fprintf(os.Stderr, usage, agent.DefaultDataDir())
 		os.Exit(2)
 	}
@@ -68,6 +75,12 @@ func main() {
 		if cfg, err = agent.Enroll(ctx, *dataDir, fs.Arg(0)); err == nil {
 			fmt.Printf("enrolled as %q (client %d) with %s\n", cfg.ClientName, cfg.ClientID, cfg.ServerURL)
 		}
+	case "setup":
+		fs.Parse(args)
+		if fs.NArg() != 1 {
+			fatalf("usage: proxbackup-agent setup <token>")
+		}
+		runSetup(*dataDir, fs.Arg(0))
 	case "run", "install", "uninstall", "start", "stop":
 		fs.Parse(args)
 		err = serviceCommand(cmd, *dataDir, log)
@@ -124,15 +137,41 @@ func (p *program) Stop(service.Service) error {
 	return nil
 }
 
-func serviceCommand(cmd, dataDir string, log *slog.Logger) error {
-	p := &program{dataDir: dataDir, log: log}
-	svc, err := service.New(p, &service.Config{
+// newService describes the agent service; exe is the binary it runs (empty = this one).
+func newService(p *program, dataDir, exe string) (service.Service, error) {
+	return service.New(p, &service.Config{
 		Name:        "proxbackup-agent",
 		DisplayName: "ProxBackup Agent",
 		Description: "Backs up this PC to Proxmox Backup Server (managed by ProxBackup Console).",
+		Executable:  exe,
 		Arguments:   []string{"run", "-data-dir", dataDir},
 		Option:      service.KeyValue{"StartType": "automatic", "OnFailure": "restart", "OnFailureDelayDuration": "30s"},
 	})
+}
+
+// runSetup runs the interactive setup with administrator rights and keeps
+// the console window open until the user has read the outcome.
+func runSetup(dataDir, token string) {
+	relaunched, err := elevate()
+	if relaunched {
+		return
+	}
+	if err == nil {
+		err = setup(dataDir, token)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "\nSetup failed:", err)
+	}
+	fmt.Print("\nPress Enter to close.")
+	fmt.Scanln()
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+func serviceCommand(cmd, dataDir string, log *slog.Logger) error {
+	p := &program{dataDir: dataDir, log: log}
+	svc, err := newService(p, dataDir, "")
 	if err != nil {
 		return err
 	}

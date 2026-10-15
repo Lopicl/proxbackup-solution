@@ -163,6 +163,16 @@ read on every run.
   server URL, a secret, and the server CA fingerprint. The agent generates an ECDSA key and
   CSR, and the server returns a client certificate signed by its internal CA. Every later
   call uses mTLS.
+* **Agent setup.** For rollouts, an admin creates a *setup token* instead: valid for any number
+  of PCs until it expires (4 h by default). The console serves its cached Windows agent with the
+  token appended (`agent exe ‖ token ‖ u32 len ‖ "PBXSETUP"`, see `internal/api/setup.go`;
+  Windows ignores data after the PE image). Started without arguments, the agent finds the
+  token, elevates through UAC, and asks for the client name (default: hostname) and the console
+  host/IP (default: the IP of `-public-url`'s host, kept with the token). The port comes from
+  `-public-url`. A taken or invalid name is a `409`/`400` and the setup asks again. It then copies
+  the plain agent to `%ProgramFiles%\ProxBackup` and installs the service there, or repoints an
+  existing one. `proxbackup-agent setup <token>` runs the same setup (dev consoles have no agent
+  to serve). Client creation is serialized, so PCs enrolling at once can't race for a name.
 * **Configuration.** The agent long-polls `POST /agent/v1/poll` and sends the revision of the
   configuration it has. When the server's revision differs, it pushes the full config: the PBS
   target (endpoint, fingerprint, datastore, namespace, scoped API token) and all enabled jobs
@@ -371,7 +381,9 @@ sequenceDiagram
 ## Security model
 
 * **Agent ↔ server:** mTLS using the internal CA. Enrollment codes are single-use and expire
-  (24 h by default, up to 30 days). Revoking a client in the UI marks it revoked, so its
+  (24 h by default, up to 30 days). Setup tokens are multi-use, so they are short-lived (4 h by
+  default, up to 30 days) and can be revoked under Clients; anyone holding one can enroll PCs
+  until then. Revoking a client in the UI marks it revoked, so its
   certificate is no longer accepted, and deletes its PBS token. Existing snapshots stay.
 * **Agent ↔ PBS:** the PBS certificate fingerprint is pinned. The scoped token has
   `DatastoreBackup` only, so a compromised PC cannot read other PCs' backups or delete its

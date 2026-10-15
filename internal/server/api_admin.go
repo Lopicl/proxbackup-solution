@@ -8,7 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -433,6 +437,164 @@ func (s *Server) handleDeleteEnrollment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.store.DeleteEnrollment(r.Context(), id); err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// ---- setup tokens ----
+
+// defaultSetupTTL is how long a setup token stays valid unless the admin picks another time.
+const defaultSetupTTL = 4 * time.Hour
+
+func setupCommand(token string) string {
+	return `proxbackup-agent.exe setup ` + token
+}
+
+func (s *Server) handleSetupTokens(w http.ResponseWriter, r *http.Request) {
+	ts, err := s.store.SetupTokens(r.Context())
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	writeJSON(w, orEmpty(ts))
+}
+
+// handleCreateSetupToken creates a token that enrolls any number of PCs until
+// it expires. Each PC's setup asks for its client name and the console address.
+func (s *Server) handleCreateSetupToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TargetID int64 `json:"target_id"`
+		TTLHours int   `json:"ttl_hours"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	ctx := r.Context()
+	if _, err := s.store.Target(ctx, req.TargetID); err != nil {
+		httpError(w, 400, errors.New("unknown target"))
+		return
+	}
+	ttl := defaultSetupTTL
+	if req.TTLHours > 0 && req.TTLHours <= 24*30 {
+		ttl = time.Duration(req.TTLHours) * time.Hour
+	}
+	if s.cfg.PublicURL == "" {
+		httpError(w, 400, errors.New("server has no -public-url configured"))
+		return
+	}
+	code := randToken(24)
+	expires := time.Now().Add(ttl).Unix()
+	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint(),
+		Multi: true, Expires: expires, Host: s.agentFacingIP(ctx)})
+	enc := base64.RawURLEncoding.EncodeToString(tok)
+	id, err := s.store.CreateSetupToken(ctx, hashToken(code), req.TargetID, expires, s.sealer.Seal(enc))
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	s.log.Info("setup token created", "id", id, "target", req.TargetID, "expires", time.Unix(expires, 0))
+	writeJSON(w, map[string]any{"id": id, "expires": expires, "token": enc, "command": setupCommand(enc)})
+}
+
+// agentFacingIP is the console address a setup offers by default: the IP of
+// the -public-url host (resolved if it is a name), else the name itself.
+func (s *Server) agentFacingIP(ctx context.Context) string {
+	u, err := url.Parse(s.cfg.PublicURL)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	h := u.Hostname()
+	if net.ParseIP(h) != nil {
+		return h
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", h)
+	if err != nil || len(addrs) == 0 {
+		return h
+	}
+	for _, a := range addrs {
+		if a.Unmap().Is4() && !a.IsLoopback() {
+			return a.Unmap().String()
+		}
+	}
+	if !addrs[0].IsLoopback() {
+		return addrs[0].String()
+	}
+	return h
+}
+
+// handleSetupToken shows a setup token's command again.
+func (s *Server) handleSetupToken(w http.ResponseWriter, r *http.Request) {
+	enc, err := s.setupTokenString(r)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	writeJSON(w, map[string]string{"token": enc, "command": setupCommand(enc)})
+}
+
+func (s *Server) setupTokenString(r *http.Request) (string, error) {
+	id, err := pathID(r)
+	if err != nil {
+		return "", err
+	}
+	sealed, err := s.store.SetupTokenSealed(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			return "", fmt.Errorf("setup token expired or revoked: %w", errNotFound)
+		}
+		return "", err
+	}
+	return s.sealer.Open(sealed)
+}
+
+// handleSetupDownload serves the console's Windows agent with the setup token
+// appended (see api.SetupTrailer): double-clicking it runs the setup.
+func (s *Server) handleSetupDownload(w http.ResponseWriter, r *http.Request) {
+	arch := r.PathValue("arch")
+	if arch != "amd64" && arch != "arm64" {
+		httpError(w, 400, errors.New("arch must be amd64 or arm64"))
+		return
+	}
+	enc, err := s.setupTokenString(r)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	b, err := s.updater.agentBinary(r.Context(), arch)
+	if err != nil {
+		httpError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	f, err := os.Open(b.path)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	defer f.Close()
+	trailer := api.SetupTrailer(enc)
+	w.Header().Set("Content-Type", "application/vnd.microsoft.portable-executable")
+	w.Header().Set("Content-Disposition", `attachment; filename="proxbackup-agent-setup-`+arch+`.exe"`)
+	w.Header().Set("Content-Length", strconv.FormatInt(b.size+int64(len(trailer)), 10))
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := io.Copy(w, f); err != nil {
+		return
+	}
+	w.Write(trailer)
+}
+
+// handleDeleteSetupToken revokes a setup token. PCs it already enrolled stay.
+func (s *Server) handleDeleteSetupToken(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	if err := s.store.DeleteSetupToken(r.Context(), id); err != nil {
 		httpError(w, statusFor(err), err)
 		return
 	}

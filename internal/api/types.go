@@ -215,12 +215,15 @@ type Event struct {
 	Result   *Result   `json:"result,omitempty"`
 }
 
-// EnrollRequest is sent with a one-time enrollment code.
+// EnrollRequest is sent with a one-time enrollment code or a setup token.
 type EnrollRequest struct {
 	Code     string `json:"code"`
 	CSR      string `json:"csr"` // PEM
 	Hostname string `json:"hostname"`
 	OS       string `json:"os"`
+	// ClientName is the name chosen on the PC; only setup tokens use it
+	// (a one-time code carries its own name).
+	ClientName string `json:"client_name,omitempty"`
 }
 
 // EnrollResponse returns the signed client certificate.
@@ -236,4 +239,9 @@ type EnrollmentToken struct {
 	URL           string `json:"u"`
 	Code          string `json:"c"`
 	CAFingerprint string `json:"f"` // sha256 of the server CA cert (hex)
+	// Setup tokens only: valid for many PCs until Expires (unix seconds);
+	// Host is the console address the setup offers as default.
+	Multi   bool   `json:"m,omitempty"`
+	Expires int64  `json:"e,omitempty"`
+	Host    string `json:"h,omitempty"`
 }
