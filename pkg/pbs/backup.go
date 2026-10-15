@@ -135,27 +135,35 @@ func (b *BackupSession) PreviousBackupTime(ctx context.Context) (int64, bool, er
 // registers its chunks on the server and lets us skip re-uploading them.
 // Returns false if there is no previous snapshot/archive.
 func (b *BackupSession) LoadPreviousIndex(ctx context.Context, archive string) (bool, error) {
+	idx, err := b.PreviousIndex(ctx, archive)
+	return idx != nil, err
+}
+
+// PreviousIndex is LoadPreviousIndex returning the index itself (nil if
+// there is no previous snapshot/archive). Its chunks can then be injected
+// into a new archive with InjectChunks.
+func (b *BackupSession) PreviousIndex(ctx context.Context, archive string) (*Index, error) {
 	data, err := b.sess.download(ctx, "previous", map[string]any{"archive-name": archive})
 	if err != nil {
 		if IsNotFound(err) {
-			return false, nil
+			return nil, nil
 		}
 		var ae *APIError
 		if errors.As(err, &ae) && ae.Status == http.StatusBadRequest {
-			return false, nil // archive missing in previous snapshot
+			return nil, nil // archive missing in previous snapshot
 		}
-		return false, err
+		return nil, err
 	}
 	idx, err := ParseIndex(data)
 	if err != nil {
-		return false, fmt.Errorf("pbs: previous index %s: %w", archive, err)
+		return nil, fmt.Errorf("pbs: previous index %s: %w", archive, err)
 	}
 	b.mu.Lock()
 	for _, e := range idx.Entries {
 		b.known[e.Digest] = struct{}{}
 	}
 	b.mu.Unlock()
-	return true, nil
+	return idx, nil
 }
 
 // UploadBlob stores a small file (< 128 MiB) like index.json.blob or client.log.blob.
@@ -368,6 +376,54 @@ func (w *ArchiveWriter) ReadFrom(r io.Reader) (int64, error) {
 			return total, err
 		}
 	}
+}
+
+// Position is the number of bytes written to the archive so far, including
+// injected chunks.
+func (w *ArchiveWriter) Position() uint64 { return w.offset + uint64(len(w.buf)) }
+
+// ForceBoundary ends the current chunk here (dynamic archives), so that what
+// follows starts a new chunk.
+func (w *ArchiveWriter) ForceBoundary() error {
+	if !w.dynamic {
+		return errors.New("pbs: chunk boundaries are fixed in a fixed index")
+	}
+	if err := w.firstErr(); err != nil {
+		return err
+	}
+	w.chunker.Reset()
+	if len(w.buf) == 0 {
+		return nil
+	}
+	return w.emit()
+}
+
+// InjectChunks appends chunks the server already has (from PreviousIndex) to
+// a dynamic archive without uploading them: the archive continues with their
+// exact contents. A chunk boundary is forced first.
+func (w *ArchiveWriter) InjectChunks(entries []IndexEntry) error {
+	if err := w.ForceBoundary(); err != nil {
+		return err
+	}
+	w.b.mu.Lock()
+	for _, e := range entries {
+		if _, ok := w.b.known[e.Digest]; !ok || e.End <= e.Start {
+			w.b.mu.Unlock()
+			return fmt.Errorf("pbs: cannot inject unknown chunk %x", e.Digest[:8])
+		}
+	}
+	w.b.mu.Unlock()
+	for _, e := range entries {
+		job := &chunkJob{offset: w.offset, size: e.End - e.Start, digest: e.Digest, done: make(chan struct{})}
+		close(job.done)
+		w.offset += job.size
+		select {
+		case w.order <- job:
+		case <-w.ctx.Done():
+			return w.ctxErr()
+		}
+	}
+	return nil
 }
 
 // emit hands the buffered chunk to the worker pool.

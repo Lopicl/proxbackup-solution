@@ -16,6 +16,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,4 +277,203 @@ func rawGet(ctx context.Context, c *pbs.Client, path string) ([]byte, error) {
 	var buf bytes.Buffer
 	err := c.Download(ctx, path, &buf)
 	return buf.Bytes(), err
+}
+
+// splitTree is the tree of the split archive test, in encoding order.
+func splitTree(variant int) []tfile {
+	files := []tfile{{"Big.bin", rnd(12<<20, 1)}}
+	for i := range 40 {
+		files = append(files, tfile{fmt.Sprintf("Docs/file-%02d.dat", i), rnd(1000+i*37, uint64(100+i))})
+	}
+	return append(files, tfile{"z-last.txt", []byte(fmt.Sprintf("variant %d\n", variant))})
+}
+
+// writeSplitTree encodes splitTree(variant). With prev (the previous metadata
+// archive and payload index), all files but the last are reused by injecting
+// every chunk of the previous payload archive.
+func writeSplitTree(t *testing.T, mw io.Writer, pw *pbs.ArchiveWriter, variant int, prevMeta []byte, prevIdx *pbs.Index) {
+	dir := pxar.Metadata{Mode: pxar.ModeIFDIR | 0o755, MtimeSecs: 1760000000}
+	file := pxar.Metadata{Mode: pxar.ModeIFREG | 0o644, MtimeSecs: 1760000000}
+	enc, err := pxar.NewSplitEncoder(mw, pw, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	offsets := map[string]uint64{}
+	var base uint64
+	if prevMeta != nil {
+		dec := pxar.NewDecoder(bytes.NewReader(prevMeta))
+		for {
+			e, err := dec.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			offsets[e.Path] = e.PayloadOffset
+		}
+		base = enc.PayloadPosition()
+		if err := pw.InjectChunks(prevIdx.Entries); err != nil {
+			t.Fatal(err)
+		}
+		enc.SkipPayload(prevIdx.Size)
+	}
+	inDocs := false
+	files := splitTree(variant)
+	for i, f := range files {
+		name := f.name
+		if d, n, ok := strings.Cut(f.name, "/"); ok {
+			if !inDocs {
+				if err := enc.CreateDir([]byte(d), dir); err != nil {
+					t.Fatal(err)
+				}
+				inDocs = true
+			}
+			name = n
+		} else if inDocs {
+			enc.FinishDir()
+			inDocs = false
+		}
+		if off, ok := offsets[f.name]; ok && i < len(files)-1 {
+			err = enc.AddPayloadRef([]byte(name), file, uint64(len(f.data)), base+off)
+		} else {
+			_, err = enc.AddFile([]byte(name), file, uint64(len(f.data)), bytes.NewReader(f.data))
+		}
+		if err != nil {
+			t.Fatalf("%s: %v", f.name, err)
+		}
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestE2ESplitArchiveReuse(t *testing.T) {
+	c, store := e2eClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	ns := "proxbackup-e2e"
+	if err := c.EnsureNamespace(ctx, store, ns); err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("e2e-split-%d", time.Now().UnixNano()%1e6)
+	var prevMeta []byte
+	run := func(variant int, at int64) (meta, payload pbs.Stats) {
+		ref := pbs.SnapshotRef{Store: store, NS: ns, Type: "host", ID: id, Time: at}
+		b, err := c.StartBackup(ctx, ref, pbs.BackupOptions{Compress: true, Concurrency: 4})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer b.Close()
+		if _, err := b.LoadPreviousIndex(ctx, "root.mpxar.didx"); err != nil {
+			t.Fatal(err)
+		}
+		prevIdx, err := b.PreviousIndex(ctx, "root.ppxar.didx")
+		if err != nil {
+			t.Fatal(err)
+		}
+		mw, err := b.NewDynamicArchive(ctx, "root.mpxar.didx")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pw, err := b.NewDynamicArchive(ctx, "root.ppxar.didx")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mbuf bytes.Buffer
+		if prevIdx == nil {
+			prevMeta = nil
+		}
+		writeSplitTree(t, io.MultiWriter(mw, &mbuf), pw, variant, prevMeta, prevIdx)
+		prevMeta = mbuf.Bytes()
+		if meta, err = mw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if payload, err = pw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Finish(ctx); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("backup %d: meta %+v payload %+v", variant, meta, payload)
+		return meta, payload
+	}
+	t0 := time.Now().Unix()
+	run(1, t0)
+	_, p2 := run(2, t0+1)
+	if p2.ReusedChunks < 1 || p2.UploadedBytes > 4096 {
+		t.Fatalf("second payload archive was not built from reused chunks: %+v", p2)
+	}
+
+	ref := pbs.SnapshotRef{Store: store, NS: ns, Type: "host", ID: id, Time: t0 + 1}
+	r, err := c.StartReader(ctx, ref, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	m, err := r.Manifest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := func(name string) io.Reader {
+		for _, f := range m.Files {
+			if f.Filename == name {
+				idx, err := r.Index(ctx, name, &f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return r.OpenIndex(ctx, idx, 4)
+			}
+		}
+		t.Fatalf("%s missing", name)
+		return nil
+	}
+	dec := pxar.NewSplitDecoder(open("root.mpxar.didx"), open("root.ppxar.didx"))
+	want := map[string][]byte{}
+	for _, f := range splitTree(2) {
+		want[f.name] = f.data
+	}
+	n := 0
+	for {
+		e, err := dec.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if e.Kind != pxar.KindFile {
+			continue
+		}
+		b, err := io.ReadAll(dec.Contents())
+		if err != nil || !bytes.Equal(b, want[e.Path]) {
+			t.Fatalf("%s: restored contents differ (%v)", e.Path, err)
+		}
+		n++
+	}
+	if n != len(want) {
+		t.Fatalf("restored %d of %d files", n, len(want))
+	}
+
+	// PBS's own accessor must read our split archive: a reused file and the new one.
+	for path, data := range map[string][]byte{"Docs/file-17.dat": want["Docs/file-17.dat"], "z-last.txt": want["z-last.txt"]} {
+		fp := base64.StdEncoding.EncodeToString([]byte("/root.mpxar.didx/" + path))
+		q := fmt.Sprintf("admin/datastore/%s/pxar-file-download?ns=%s&backup-type=host&backup-id=%s&backup-time=%d&filepath=%s",
+			store, ns, id, t0+1, fp)
+		body, err := rawGet(ctx, c, q)
+		if err != nil {
+			t.Fatalf("pxar-file-download %s: %v", path, err)
+		}
+		if !bytes.Equal(body, data) {
+			t.Fatalf("PBS returned wrong contents for %s (%d bytes)", path, len(body))
+		}
+	}
+	var upid string
+	if err := c.Call(ctx, http.MethodPost, "admin/datastore/"+store+"/verify",
+		map[string]any{"ns": ns, "backup-type": "host", "backup-id": id}, &upid); err != nil {
+		t.Fatal(err)
+	}
+	if status := waitTask(ctx, t, c, upid); status != "OK" {
+		t.Fatalf("verify task: %s", status)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -25,6 +26,30 @@ func statMeta(fi fs.FileInfo) winMeta {
 		cloudPlaceholder: d.FileAttributes&(attrRecallOnDataAccess|attrRecallOnOpen|attrOffline) != 0 &&
 			d.FileAttributes&syscall.FILE_ATTRIBUTE_DIRECTORY == 0,
 	}
+}
+
+// fileBasicInfo is FILE_BASIC_INFO; times are FILETIMEs.
+type fileBasicInfo struct {
+	CreationTime, LastAccessTime, LastWriteTime, ChangeTime int64
+	FileAttributes                                          uint32
+	_                                                       uint32
+}
+
+// changeTime returns the NTFS ChangeTime of p, or the zero time.
+func changeTime(p string) time.Time {
+	h, err := windows.CreateFile(windows.StringToUTF16Ptr(p), windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return time.Time{}
+	}
+	defer windows.CloseHandle(h)
+	var info fileBasicInfo
+	if err := windows.GetFileInformationByHandleEx(h, windows.FileBasicInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		return time.Time{}
+	}
+	ft := windows.Filetime{LowDateTime: uint32(info.ChangeTime), HighDateTime: uint32(info.ChangeTime >> 32)}
+	return time.Unix(0, ft.Nanoseconds())
 }
 
 // applyMeta restores timestamps and attributes after a file was written.

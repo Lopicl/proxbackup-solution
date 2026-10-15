@@ -14,6 +14,10 @@ import (
 const (
 	xattrAttrs = "user.proxbackup.attrs" // u32 LE FILE_ATTRIBUTE_* bits
 	xattrCtime = "user.proxbackup.ctime" // i64 LE creation time, unix nanoseconds
+	// i64 LE NTFS ChangeTime (any data or metadata change), unix nanoseconds.
+	// Only written with change detection; it catches edits that put the old
+	// LastWriteTime back. Not restored.
+	xattrChangeTime = "user.proxbackup.chtime"
 
 	// Names written before the rename to ProxBackup; still read on restore.
 	xattrAttrsLegacy = "user.pbspc.attrs"
@@ -36,6 +40,8 @@ type winMeta struct {
 	attrs uint32
 	ctime time.Time
 	mtime time.Time
+	// chtime is the change time, set by the walker for change detection only.
+	chtime time.Time
 	// cloudPlaceholder is set for OneDrive/Files-On-Demand style placeholders
 	// whose content would be downloaded (or fail) on read.
 	cloudPlaceholder bool
@@ -75,6 +81,11 @@ func toPxarMeta(fi fs.FileInfo, m winMeta) pxar.Metadata {
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], uint64(m.ctime.UnixNano()))
 		md.Xattrs = append(md.Xattrs, pxar.Xattr{Name: []byte(xattrCtime), Value: b[:]})
+	}
+	if !m.chtime.IsZero() {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], uint64(m.chtime.UnixNano()))
+		md.Xattrs = append(md.Xattrs, pxar.Xattr{Name: []byte(xattrChangeTime), Value: b[:]})
 	}
 	return md
 }

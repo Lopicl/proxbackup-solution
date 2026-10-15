@@ -25,6 +25,15 @@ func statMeta(fi fs.FileInfo) winMeta {
 	return m
 }
 
+// changeTime returns the inode change time of p, or the zero time.
+func changeTime(p string) time.Time {
+	var st unix.Stat_t
+	if err := unix.Lstat(p, &st); err != nil {
+		return time.Time{}
+	}
+	return time.Unix(st.Ctim.Unix())
+}
+
 func applyMeta(p string, mtime time.Time, attrs uint32, _ bool, _ time.Time) error {
 	if fi, err := os.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		// Set the link's own times; Chtimes would follow it to the target.

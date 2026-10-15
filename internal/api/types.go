@@ -74,6 +74,10 @@ type JobSpec struct {
 	Sources  []string `json:"sources,omitempty"`  // absolute Windows paths, e.g. C:\Users
 	Excludes []string `json:"excludes,omitempty"` // glob patterns
 	UseVSS   bool     `json:"use_vss"`
+	// ChangeDetection: "metadata" (pxar v2 split archives, unchanged files are
+	// not read), "data" (split archives, every file read) or "legacy"/"" (one
+	// pxar v1 archive, for PBS before 3.3).
+	ChangeDetection string `json:"change_detection,omitempty"`
 	// image
 	Volumes []string `json:"volumes,omitempty"` // e.g. "C:"
 	// restore
@@ -91,6 +95,8 @@ type JobConfig struct {
 	Excludes []string `json:"excludes,omitempty"`
 	Volumes  []string `json:"volumes,omitempty"`
 	UseVSS   bool     `json:"use_vss"`
+	// ChangeDetection as in JobSpec.
+	ChangeDetection string `json:"change_detection,omitempty"`
 	// Schedule is a cron expression evaluated in the PC's local time zone; empty = manual only.
 	Schedule string `json:"schedule"`
 	// WindowMinutes: a scheduled run may start up to this long after its time.
@@ -111,7 +117,7 @@ type AgentConfig struct {
 // Spec turns a job config into an executable job spec.
 func (c *AgentConfig) Spec(j JobConfig) JobSpec {
 	return JobSpec{JobID: j.ID, Kind: j.Kind, Target: c.Target, BackupID: j.BackupID,
-		Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS}
+		Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS, ChangeDetection: j.ChangeDetection}
 }
 
 // JobState is the agent's view of a job's schedule, reported on every poll.

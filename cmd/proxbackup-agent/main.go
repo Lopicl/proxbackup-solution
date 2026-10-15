@@ -197,8 +197,9 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 	ns := fs.String("ns", "", "namespace")
 	id := fs.String("id", "", "backup id (default: hostname)")
 	vssFlag := fs.Bool("vss", true, "use a VSS snapshot (Windows)")
+	changeDetection := fs.String("change-detection", "metadata", "backup: metadata | data (pxar v2 split archives) | legacy (pxar v1, PBS before 3.3)")
 	backupTime := fs.Int64("time", 0, "restore: snapshot time (unix seconds)")
-	archive := fs.String("archive", "", "restore: archive name, e.g. c-users.pxar.didx")
+	archive := fs.String("archive", "", "restore: archive name, e.g. c-users.mpxar.didx or c-users.pxar.didx")
 	target := fs.String("target", "", "restore: target directory")
 	overwrite := fs.String("overwrite", "skip", "restore: skip | overwrite | if-newer")
 	fs.Var(&sources, "source", "backup: path to back up (repeatable); image: volume, e.g. C:")
@@ -233,7 +234,7 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 	}
 	switch cmd {
 	case "backup":
-		spec.Kind, spec.Sources = api.KindFiles, sources
+		spec.Kind, spec.Sources, spec.ChangeDetection = api.KindFiles, sources, *changeDetection
 	case "image":
 		spec.Kind, spec.Volumes = api.KindImage, sources
 	case "restore":

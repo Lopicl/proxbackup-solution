@@ -30,7 +30,15 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 	}
 	ref := pbs.SnapshotRef{Store: j.spec.Target.Datastore, NS: j.spec.Target.Namespace, Type: "host", ID: spec.BackupID, Time: spec.BackupTime}
 	j.setPhase("restore")
-	j.archive.Store(spec.Archive)
+	// A split archive is restored through its metadata archive.
+	archive, payload := spec.Archive, ""
+	if label, ok := strings.CutSuffix(archive, ".ppxar.didx"); ok {
+		archive = label + ".mpxar.didx"
+	}
+	if label, ok := strings.CutSuffix(archive, ".mpxar.didx"); ok {
+		_, payload = splitNames(label)
+	}
+	j.archive.Store(archive)
 	r, err := c.StartReader(ctx, ref, nil)
 	if err != nil {
 		return res, fmt.Errorf("open snapshot %s: %w", ref, err)
@@ -40,16 +48,15 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 	if err != nil {
 		return res, err
 	}
-	var fi *pbs.FileInfo
-	for i := range m.Files {
-		if m.Files[i].Filename == spec.Archive {
-			fi = &m.Files[i]
+	open := func(name string) (*pbs.Index, error) {
+		for i := range m.Files {
+			if m.Files[i].Filename == name {
+				return r.Index(ctx, name, &m.Files[i])
+			}
 		}
+		return nil, fmt.Errorf("archive %s not in snapshot %s", name, ref)
 	}
-	if fi == nil {
-		return res, fmt.Errorf("archive %s not in snapshot %s", spec.Archive, ref)
-	}
-	idx, err := r.Index(ctx, spec.Archive, fi)
+	idx, err := open(archive)
 	if err != nil {
 		return res, err
 	}
@@ -57,14 +64,25 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 	stream := r.OpenIndex(ctx, idx, 6)
 	defer stream.Close()
 	src := countingReader{stream, &j.bytesRead}
+	dec := pxar.NewDecoder(src)
+	if payload != "" {
+		pidx, err := open(payload)
+		if err != nil {
+			return res, err
+		}
+		j.bytesTotal.Add(pidx.Size)
+		pstream := r.OpenIndex(ctx, pidx, 6)
+		defer pstream.Close()
+		dec = pxar.NewSplitDecoder(src, countingReader{pstream, &j.bytesRead})
+	}
 
 	if err := os.MkdirAll(spec.TargetDir, 0o755); err != nil {
 		return res, err
 	}
-	j.logf("info", "restoring %s from %s to %s", spec.Archive, ref, spec.TargetDir)
+	j.logf("info", "restoring %s from %s to %s", archive, ref, spec.TargetDir)
 
-	if strings.HasSuffix(spec.Archive, ".img.fidx") {
-		out := filepath.Join(spec.TargetDir, strings.TrimSuffix(spec.Archive, ".fidx"))
+	if strings.HasSuffix(archive, ".img.fidx") {
+		out := filepath.Join(spec.TargetDir, strings.TrimSuffix(archive, ".fidx"))
 		f, err := os.Create(out)
 		if err != nil {
 			return res, err
@@ -77,7 +95,7 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 		j.logf("info", "wrote image %s (%d bytes)", out, n)
 		return res, err
 	}
-	err = j.restorePxar(ctx, pxar.NewDecoder(src), spec)
+	err = j.restorePxar(ctx, dec, spec)
 	res.BytesTotal = j.bytesRead.Load()
 	return res, err
 }
