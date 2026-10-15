@@ -101,8 +101,11 @@ Development happens on the `alpha` branch, which is the default.
 ```sh
 make release                      # tag HEAD as v<VERSION> and push the tag
 scripts/release.sh --local        # or: build with `make dist` and publish from this machine via gh
-scripts/release.sh --local --prerelease
+scripts/release.sh --local --prerelease   # pre-release from a branch other than alpha
 ```
+
+Every release of a commit on `alpha` is published as a GitHub pre-release, so only consoles that
+opt in to pre-releases install it.
 
 Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it
 checks that the tag matches `VERSION`, runs the tests, builds `make dist` and publishes a GitHub

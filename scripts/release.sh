@@ -10,8 +10,10 @@
 #                                 and publish from this machine (needs gh with write access)
 #   scripts/release.sh --publish  publish an existing bin/dist (what the workflow runs)
 #
-# Options: --prerelease  mark the release as a pre-release (only consoles that opt in
-#                        to pre-releases install it)
+# Releases of commits on the alpha branch are always pre-releases (only consoles that
+# opt in to pre-releases install them).
+#
+# Options: --prerelease  mark the release as a pre-release from any branch
 #          --draft       create a draft (not visible to the updater until published)
 set -euo pipefail
 
@@ -41,7 +43,7 @@ for a in "$@"; do
     --publish) mode=publish ;;
     --prerelease) flags+=(--prerelease) ;;
     --draft) flags+=(--draft) ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "release.sh: unknown argument $a" >&2; exit 2 ;;
   esac
 done
@@ -55,13 +57,24 @@ check_tree() {
   [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch" 2>/dev/null)" ] || die "HEAD is not pushed to origin/$branch; push first"
 }
 
+# on_alpha reports whether HEAD is on origin/alpha; everything released from there
+# is a pre-release.
+on_alpha() {
+  git fetch -q origin alpha 2>/dev/null && git merge-base --is-ancestor HEAD FETCH_HEAD
+}
+
 publish() {
+  if on_alpha; then
+    echo "HEAD is on alpha; publishing $tag as a pre-release"
+    flags+=(--prerelease)
+  fi
   for f in SHA256SUMS "proxbackup-server_${version}_amd64.deb" "proxbackup-agent-windows-amd64.exe"; do
     [ -f "$dist/$f" ] || die "$dist/$f missing; run make dist"
   done
   if gh release view "$tag" >/dev/null 2>&1; then
     echo "release $tag exists; replacing its assets"
     gh release upload "$tag" "$dist"/* --clobber
+    if [[ " ${flags[*]-} " == *" --prerelease "* ]]; then gh release edit "$tag" --prerelease; fi
   else
     gh release create "$tag" "$dist"/* --target "$(git rev-parse HEAD)" \
       --title "ProxBackup $version" --generate-notes ${flags[@]+"${flags[@]}"}
@@ -72,7 +85,7 @@ publish() {
 case "$mode" in
   tag)
     check_tree
-    [ ${#flags[@]} -eq 0 ] || die "--prerelease/--draft need --local (or edit the release on GitHub)"
+    [ ${#flags[@]} -eq 0 ] || die "--prerelease/--draft need --local (or edit the release on GitHub; alpha releases are pre-releases anyway)"
     bump_version
     git tag -a "$tag" -m "ProxBackup $version"
     git push origin "$tag"
