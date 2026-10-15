@@ -13,6 +13,7 @@ VMs/containers and the PVE nodes themselves are managed and restored in one plac
 |------|-----|
 | File-level backups of Windows PCs | VSS snapshot → pxar v1 archive → dynamic chunk index (`*.pxar.didx`) |
 | Volume image backups | VSS snapshot of the volume device → fixed 4 MiB chunk index (`*.img.fidx`) |
+| Network share backups *(phase 2)* | An agent reads an SMB or NFS share (server-side snapshot when available) → pxar archive in a share-owned backup group. See [Network share backups](#network-share-backups) |
 | Central management | ProxBackup Console (on-premises management server) with web UI: clients, jobs, schedules, history, restore |
 | No inbound ports on PCs | Agents dial out to the ProxBackup Console (long-poll over mTLS) |
 | The PC decides when to back up | The server only pushes configuration. Each agent runs its own scheduler on the PC's clock, catches up missed runs if the job allows it, and keeps backing up while the server is down |
@@ -141,6 +142,8 @@ restore`, and `pxar` FUSE mounts all work.
   console over mTLS, checks size, hash and the version the binary reports, swaps it in next to
   the running executable and exits; the service manager restarts it. A failed update is
   retried after an hour.
+* **Network shares** *(phase 2).* `share` jobs back up SMB and NFS shares through the OS
+  client; see [Network share backups](#network-share-backups).
 * **Local IPC** *(phase 2, with the tray app).* A named pipe `\\.\pipe\proxbackup-agent` will
   serve the tray app (status, "Back up now", recent runs), with a pipe ACL that allows only
   interactive users plus SYSTEM.
@@ -367,7 +370,7 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
-| 2 | File restore from images (NTFS reader over the fixed index), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, immutable backups (lock window via the PBS `protected` flag, tamper-resistant retention, guided pull-sync to a second PBS; see [Security model](#security-model)) |
+| 2 | File restore from images (NTFS reader over the fixed index), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares read by an agent, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (lock window via the PBS `protected` flag, tamper-resistant retention, guided pull-sync to a second PBS; see [Security model](#security-model)) |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
@@ -389,6 +392,81 @@ docs/                   this document
 Today the non-Windows agent is a development build. It backs up and restores file contents,
 names, symlinks and timestamps correctly, but records every file as owned by root with default
 permissions. Don't use it to protect Mac or Linux machines until phase 3.
+
+## Network share backups
+
+*Roadmap phase 2.* Many sites keep their important files on a NAS or file server, not on
+the PCs. A `share` job lets any enrolled agent back up an SMB or NFS share to PBS. If the
+file server is itself a Windows machine you can install the agent on, a normal `files` job
+with VSS is still the better choice: local reads, a consistent snapshot, no credentials.
+
+**Job.** A new job kind `share` sits next to `files` and `image`. It is assigned to one
+agent (the *reader*) and lists share paths: UNC paths (`\\nas\finance`, `\\nas\home\scans`)
+for SMB, `nfs://server/export/path` for NFS. Includes, excludes, schedule, catch-up and
+retention work as for `files` jobs. Each share root becomes one archive, e.g.
+`smb-nas-finance.pxar.didx`.
+
+**Reading the share.** The agent uses the operating system's client, not its own SMB or NFS
+implementation, so Kerberos, SMB signing and encryption, DFS referrals and NFS mount options
+come for free.
+
+| | SMB | NFS |
+|---|---|---|
+| Windows agent | SMB redirector, `\\?\UNC\…` paths | *Client for NFS* feature (Windows Pro/Enterprise/Server). The agent checks for it and fails with a clear error if it's missing |
+| Linux/macOS agent *(phase 3)* | Mounted with `mount.cifs` / `mount_smbfs` into a private directory for the run | Mounted with `mount -t nfs` (read-only) into a private directory for the run |
+| Authentication | Computer account (`PC$`, Kerberos) by default in a domain, or a stored username/password | `AUTH_SYS` from the agent host, or Kerberos (`sec=krb5`) where the host has a keytab |
+| Metadata kept | attributes, timestamps, symlinks; ACLs and ADS with the phase 2 xattr mapping | mode, uid/gid, timestamps, symlinks (full Unix metadata with phase 3) |
+
+* **Credentials.** A stored share credential is entered in the console, sealed with the
+  master key like other secrets, and pushed only to the job's reader agent. On Windows the
+  agent keeps it DPAPI-protected (machine scope) in `jobs.json` and connects with
+  `WNetAddConnection2` in its own logon session for the run, then disconnects. Admins should
+  use a dedicated read-only account (Backup Operators on Windows file servers, so ACLs don't
+  hide files). Restores into the share ask for a write-capable credential at restore time and
+  don't store it.
+* **Consistency.** A share has no local VSS. The job's `server_snapshot` setting picks the
+  source:
+  * `prefer` (default): read from the newest server-side snapshot if it is younger than the
+    job's maximum age (default 24 h), otherwise read live and log a warning.
+  * `require`: fail the run if no fresh snapshot exists.
+  * `off`: always read live.
+
+  For SMB the agent lists the server's snapshots (`FSCTL_SRV_ENUMERATE_SNAPSHOTS`, the
+  *Previous Versions* API) and reads through `@GMT-…` paths. Windows file servers provide them
+  with *Shadow Copies of Shared Folders*, Samba with `vfs_shadow_copy2` over ZFS or btrfs, and
+  most NAS systems (TrueNAS, Synology, QNAP) expose their snapshots this way. For NFS the job
+  can name a snapshot directory pattern (e.g. `.zfs/snapshot/*`, NetApp `.snapshot/*`). The
+  snapshot used is recorded in the run log and in the snapshot's notes.
+* **Live reads.** Files that change while being read are reported in the run log. Locked or
+  unreadable files are skipped with a warning, never silently dropped. Offline and
+  recall-on-access files (HSM and cloud tiering) are skipped by default so a backup doesn't
+  recall a whole archive tier.
+* **Default excludes:** snapshot and recycle directories (`.snapshot`, `~snapshot`, `.zfs`,
+  `#recycle`, `@Recycle`, `$RECYCLE.BIN`) and NAS metadata (`@eaDir`, `.DS_Store`).
+* **Change detection.** Unchanged chunks aren't uploaded again, but every file is read every
+  run. For multi-terabyte shares the share read is the bottleneck. Metadata-based change
+  detection (skip unchanged files by size/mtime, as `proxmox-backup-client
+  --change-detection-mode=metadata` does with pxar v2 split archives) is an open follow-up.
+
+**Where the snapshots live.** Share snapshots don't belong to the reader PC, so they go into
+a shared namespace `<root-ns>/shares` with backup ID `share-<server>-<share>`, not into the
+reader's own namespace. The console grants the reader's token `DatastoreBackup` on that
+namespace. PBS only lets a token add to groups it owns, so moving a job to another reader
+(e.g. after replacing the PC) has the console change the group's owner with its admin token
+(`change-owner`). History stays in one group. Retention, notifications and run history
+work as for `files` jobs.
+
+**Console.** The job editor gains a "Network share" kind with path, credential and snapshot
+settings, and a **Test access** button that dispatches a short probe to the reader agent:
+resolve the server, authenticate, list the top level, report whether server-side snapshots
+exist and how old the newest is. The Clients list shows share jobs under their reader, and
+a Shares view lists every share with its last successful backup. Restore works as for file
+backups: to the original share (with a write credential) or to an alternate path on the
+reader.
+
+**Traffic.** Data crosses the network twice (share → reader → PBS), so the reader should sit
+close to the file server. A small always-on Windows VM works, or the PBS host itself running a
+Linux agent (phase 3); bandwidth limits (phase 2) apply to the PBS upload.
 
 ## Bare-metal recovery
 
@@ -685,4 +763,6 @@ name.
 | Locked files without VSS | VSS is the default; without it, files are skipped and warned about, never silently dropped |
 | Compromised console or PBS host deletes all backups (it holds an Admin token) | Phase 2: lock window via `protected`, plus a pull-synced second PBS or tape that the primary can't reach |
 | A compromised PVE host deletes or overwrites guest backups *(phase 7)* | Its PBS token has `DatastoreBackup` only and retention runs on the console; whole-guest restores over an existing VMID need explicit confirmation in the console |
+| A share's reader PC is compromised and leaks the share credential *(phase 2)* | The credential goes only to that one agent, DPAPI-protected at rest; admins use a dedicated read-only account. Write credentials for restores are never stored |
+| Share backups read inconsistent data (no VSS on a remote share) *(phase 2)* | Server-side snapshots by default (`server_snapshot = prefer`), `require` for strict jobs; live reads log every changed or skipped file |
 | Compromised PC floods its group so retention prunes the good snapshots | Phase 2: scheduled retention, per-day run cap, oldest good snapshot in the lock window always kept |
