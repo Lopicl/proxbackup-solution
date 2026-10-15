@@ -4,8 +4,8 @@ A centrally managed backup system for Windows PCs that stores backups **natively
 Proxmox Backup Server (PBS). There is no Linux proxy and no official `proxmox-backup-client`
 in the data path: the Windows agent speaks the PBS backup protocol itself, so backups get the
 same chunk-level deduplication, verification, sync and prune behaviour as any other PBS client.
-Roadmap phase 7 brings Proxmox VE guest backups into the same console, so PCs and VMs/containers
-are managed and restored in one place.
+Roadmap phase 7 brings Proxmox VE guest and host backups into the same console, so PCs,
+VMs/containers and the PVE nodes themselves are managed and restored in one place.
 
 ## Goals
 
@@ -18,7 +18,7 @@ are managed and restored in one place.
 | The PC decides when to back up | The server only pushes configuration. Each agent runs its own scheduler on the PC's clock, catches up missed runs if the job allows it, and keeps backing up while the server is down |
 | Ransomware resilience | Agents get a PBS token with **DatastoreBackup** only — they can add backups, never delete or prune them |
 | Interoperability | Snapshots are standard PBS snapshots: visible in the PBS GUI, verifiable, syncable, restorable with `proxmox-backup-client` on Linux |
-| Proxmox VE guests in the same console *(phase 7)* | The console connects to PVE clusters, manages `vzdump` jobs that write to the same PBS, and restores VMs, containers and single files. See [Proxmox VE backups](#proxmox-ve-backups) |
+| Proxmox VE in the same console *(phase 7)* | The console connects to PVE clusters, manages `vzdump` jobs that write to the same PBS, and restores VMs, containers and single files. A host agent on each node backs up the node's own configuration, and a guided rebuild restores a failed node. See [Proxmox VE backups](#proxmox-ve-backups) |
 | Hands-off updates | The console installs new GitHub releases in an admin-chosen maintenance window; Windows agents follow the console's version |
 
 ## System overview
@@ -372,7 +372,7 @@ docs/                   this document
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
 | 6 — MSP cloud console | Cloud-hosted, multi-tenant **ProxBackup Cloud** console for managed service providers: one pane of glass over all customers' sites, cross-customer alerting, policy templates, technician RBAC scoped per customer, reporting and usage metering for billing, PSA/RMM integrations, optional hosted management servers. See [MSP cloud console](#msp-cloud-console) |
-| 7 — Proxmox VE backups | Proxmox VE clusters managed from the console with their own **Proxmox VE** section in the web UI: cluster connection with a scoped PVE API token, guest inventory with protection coverage, `vzdump` backup jobs on PVE's own scheduler, run history from PVE tasks, console-side retention, and restores of whole VMs/containers (new or replacing, optional live-restore) and of single files. See [Proxmox VE backups](#proxmox-ve-backups) |
+| 7 — Proxmox VE backups | Proxmox VE clusters managed from the console with their own **Proxmox VE** section in the web UI: cluster connection with a scoped PVE API token, guest inventory with protection coverage, `vzdump` backup jobs on PVE's own scheduler, run history from PVE tasks, console-side retention, and restores of whole VMs/containers (new or replacing, optional live-restore) and of single files. **PVE host backups**: the Linux agent (phase 3) on each node backs up its configuration (`/etc/pve` database, network, storage, keys, package set, disk/ZFS/LVM layout), with single-file restore and diff in the console and a one-command **node rebuild** onto a fresh PVE install. See [Proxmox VE backups](#proxmox-ve-backups) |
 
 ## Platform support
 
@@ -606,12 +606,72 @@ can't prune). Phase 2's tamper-resistant retention and lock window apply to PVE 
   VM disks are opened by PVE's file-restore VM) and download files or folders as a zip.
 - Restores are runs in the history like PC restores, with progress from the PVE task.
 
-**Notifications:** failed or missed `vzdump` tasks, unprotected guests, and guests without a
-recent successful backup use the same channels and settings as PC alerts.
+### PVE host backups
+
+Guest backups don't protect the node itself: its network setup, storage definitions,
+cluster and Ceph config, certificates and SSH keys, and the packages installed on top of
+PVE. PVE has no built-in host backup, so the console adds one, using the phase 3 Linux
+agent on each node.
+
+**Setup:** the cluster page lists its nodes with a *host backup* column. "Protect nodes" shows
+one enrollment command (same mechanism as for PCs) to paste into each node's shell; the
+agent installs as a `.deb` with a systemd service. A default **host job** is created per
+node: daily, backup type `host`, backup ID `pve-<node>` in the cluster's namespace, with the
+same `DatastoreBackup`-only token model. The PVE API has no way to run commands on a node,
+so enrollment is the one manual step.
+
+**What a host backup contains** (small: typically well under 1 GiB, so a daily run is cheap):
+
+| Archive | Content |
+|---|---|
+| `pve-config.pxar.didx` | A consistent copy of the cluster config database (`/var/lib/pve-cluster/config.db`, taken with SQLite's online backup), plus `/etc/pve` as plain files so it can be browsed |
+| `host.pxar.didx` | `/etc` (network, hosts, corosync, Ceph config and keyrings, apt sources, systemd overrides, SSH host keys), `/root`, `/usr/local`, `/var/spool/cron`, and admin-added paths. Guest disks, ISOs, templates, `vzdump` dumps and Ceph OSD data are excluded |
+| `inventory.json.blob` | PVE and kernel versions, cluster name and members, manually installed packages and repos, disks and partition table, ZFS pools/datasets (with properties), LVM layout (`vgcfgbackup`), storage list, network interfaces with MAC addresses, bootloader (`proxmox-boot-tool status`) |
+
+The console shows a host backup like any file backup (browse, download), plus a **diff** view
+between two host snapshots or between a snapshot and the live node. That answers "what changed
+in `storage.cfg` or `interfaces` since last week?".
+
+**Restore, from easiest to most complete:**
+
+1. **Files and settings:** pick files in the console (e.g. `/etc/network/interfaces`, a VM's
+   `qemu-server/<id>.conf`), look at the diff, and restore them to the running node or
+   download them. Guest configs can be restored without touching guest disks.
+2. **Node rebuild (the default for a dead node):** reinstalling PVE from the official ISO takes
+   minutes and gives a clean, supported base. The rest is automated:
+   1. In the console, *Rebuild node* → pick the node and host snapshot. The console shows the
+      installer values to use (hostname, IP, disk/filesystem layout, PVE major version) from
+      the inventory, and one command with a one-time recovery code.
+   2. Install PVE from the ISO with those values, open the shell, paste the command.
+   3. The agent checks the PVE major version and disks, then restores in order: apt repos and
+      manually installed packages; network (interface names matched by MAC, so a replaced NIC
+      still gets the right config), hosts, DNS, SSH host keys, certificates; `/root` and
+      custom files; ZFS pools are re-imported and LVM volume groups re-activated when the data
+      disks survived.
+   4. **Standalone node:** the cluster config database is restored with `pve-cluster`
+      stopped, so all storages, users, permissions, firewall rules, backup jobs and guest
+      configs come back. **Cluster member:** the cluster's config is still alive on the other
+      nodes, so the wizard first removes the dead node from the cluster (`pvecm delnode`,
+      from a healthy node via the API), then the rebuilt node rejoins with `pvecm add`, and
+      only node-local files are restored.
+   5. Reboot. If guest disks were lost with the node, the console offers **"Restore this
+      node's guests"**: one bulk restore of the latest backup of every guest that ran there.
+3. **Bare metal:** sites that want a byte-for-byte copy of the boot disk can add a whole-disk
+   image job and restore it with ProxBackup Rescue (phase 4). The node rebuild is still the
+   recommended path, because it works on different hardware.
+
+**Security:** host backups contain the node's most sensitive secrets (cluster and Ceph keys,
+SSH host keys, the PVE CA, API token secrets in `/etc/pve/priv`). They should use client-side
+encryption (phase 2), and the recovery code for a rebuild is single-use, short-lived and bound
+to one node.
+
+**Notifications:** failed or missed `vzdump` tasks and host backups, unprotected guests and
+nodes, and guests or nodes without a recent successful backup use the same channels and settings as PC alerts.
 
 **Data model additions:** `PVE_CLUSTER` (URL, fingerprint, token, PBS target, namespace),
 `PVE_JOB` (mirror of the PVE job plus retention), and runs that reference a cluster and guest
-ID instead of a client.
+ID instead of a client. Node host agents are regular `CLIENT`s linked to their cluster and node
+name.
 
 ## Risks and mitigations
 
