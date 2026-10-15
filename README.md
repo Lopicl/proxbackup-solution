@@ -81,8 +81,10 @@ The version lives in [`VERSION`](VERSION) as `MAJOR.MINOR.BUILD.TOTAL`:
 
 Only package builds bump the version: `make deb`, `make dist`, and `scripts/release.sh`
 (once per release) run `scripts/version.sh build`, so `0.1.4.17` becomes `0.1.5.18`. Commits
-and plain `make server`/`make agent` builds leave it alone; commit the bumped `VERSION` after a
-package build. `make dist BUMP=0` packages the current version without bumping (the Release
+and plain `make server`/`make agent` builds leave it alone; commit the bumped `VERSION` (and
+`.build-source`) after a package build. A package build of the same source as the last one
+only bumps TOTAL (`0.1.5.18` becomes `0.1.5.19`): `.build-source` records the git tree of the
+source each bump was made from, ignoring `VERSION` itself. `make dist BUMP=0` packages the current version without bumping (the Release
 workflow uses it for the version `release.sh` tagged). Feature and milestone releases are
 bumped explicitly:
 
@@ -91,7 +93,8 @@ scripts/version.sh minor   # 0.1.5.18 -> 0.2.0.19
 scripts/version.sh major   # 0.2.3.22 -> 1.0.0.23
 ```
 
-`make` stamps the version into both binaries. The web UI shows it in the sidebar, and agents
+`make` stamps the version into both binaries, and into the agent exe's Windows version
+resource (Properties → Details). The web UI shows it in the sidebar, and agents
 report theirs to the server.
 
 Development happens on the `alpha` branch, which is the default.

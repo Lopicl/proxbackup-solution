@@ -29,7 +29,7 @@ bump_version() {
   tag="v$version"
   git rev-parse -q --verify "refs/tags/$tag" >/dev/null && die "tag $tag already exists"
   git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1 && die "tag $tag already exists on origin"
-  git add VERSION
+  git add VERSION .build-source
   git commit -q -m "chore: release $tag"
   git push -q origin HEAD
   echo "version bumped to $version"
