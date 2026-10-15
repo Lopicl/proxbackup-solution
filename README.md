@@ -8,7 +8,7 @@ ordinary PBS snapshots: deduplicated, verifiable, syncable, prunable.
 | --- | --- |
 | `proxbackup-agent` | **ProxBackup Agent**, a Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
 | `proxbackup-server` | **ProxBackup Console**, the on-premises management server with an embedded web UI: enrollment, jobs and schedules, run history and live logs, snapshot browser, restore, retention, notifications. |
-| `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar v1 archive format. |
+| `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar archive format (v1, and v2 split archives). |
 
 See [docs/architecture.md](docs/architecture.md) for the design, security model and roadmap.
 
@@ -55,7 +55,7 @@ Ad-hoc use without a server (handy for testing):
 ```bat
 proxbackup-agent.exe backup -pbs pbs.lan -fingerprint aa:bb:... -auth-id "user@pbs!pc" -secret-file token.txt ^
                        -store ds1 -ns pcs/test -source C:\Users\alice
-proxbackup-agent.exe restore ... -id <backup-id> -time <unix-time> -archive c-users-alice.pxar.didx -target C:\Restore
+proxbackup-agent.exe restore ... -id <backup-id> -time <unix-time> -archive c-users-alice.mpxar.didx -target C:\Restore
 ```
 
 ## Development
@@ -134,7 +134,8 @@ repository.
 The MVP has been verified end to end against **PBS 4.2** (Docker), with the agent running on macOS:
 
 - backup sessions, dynamic and fixed indexes, incremental chunk reuse, manifest
-- PBS's own pxar reader extracting files from our archives
+- PBS's own pxar reader extracting files from our archives, including pxar v2 split archives
+  whose unchanged files reuse the previous snapshot's chunks
 - server-side verify, prune and retention
 - enrollment and mTLS, least-privilege PBS provisioning
 - agent-side scheduling: on-time runs, catch-up after the agent was down, `missed` records with

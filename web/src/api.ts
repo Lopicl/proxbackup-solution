@@ -93,6 +93,7 @@ export interface Job {
   excludes: string[]
   volumes: string[]
   use_vss: boolean
+  change_detection: 'metadata' | 'data' | 'legacy'
   schedule: string
   window_minutes: number
   catch_up: boolean

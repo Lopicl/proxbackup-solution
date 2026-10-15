@@ -11,7 +11,7 @@ VMs/containers and the PVE nodes themselves are managed and restored in one plac
 
 | Goal | How |
 |------|-----|
-| File-level backups of Windows PCs | VSS snapshot → pxar archive → dynamic chunk index (`*.pxar.didx`; split `*.mpxar.didx` + `*.ppxar.didx` with pxar v2 in phase 1, so unchanged files aren't re-read) |
+| File-level backups of Windows PCs | VSS snapshot → pxar archive → dynamic chunk index (`*.mpxar.didx` + `*.ppxar.didx`, pxar v2 split archives, so unchanged files aren't re-read; `*.pxar.didx` for PBS before 3.3) |
 | Volume image backups | VSS snapshot of the volume device → fixed 4 MiB chunk index (`*.img.fidx`) |
 | Network share backups *(phase 2)* | The console itself reads SMB and NFS shares (server-side snapshot when available) and uploads them to PBS with a share-only backup token. See [Network share backups](#network-share-backups) |
 | Central management | ProxBackup Console (on-premises management server) with web UI: clients, jobs, schedules, history, restore |
@@ -77,7 +77,7 @@ upstream sources (`proxmox-backup` and `pxar` git repositories).
 | Incremental | `GET previous?archive-name=` downloads the last index and registers its chunks server-side; known chunks are appended without re-uploading |
 | Manifest | `index.json.blob`: `{backup-type, backup-id, backup-time, files:[{filename, crypt-mode, size, csum}], unprotected:{}, signature}` → `POST blob?file-name=&encoded-size=`, then `POST finish` |
 
-### 2. `pkg/pxar`: pxar encoder and decoder (v1; v2 in phase 1)
+### 2. `pkg/pxar`: pxar encoder and decoder (v1 and v2)
 
 File-level backups must be real pxar archives. That way the PBS GUI, `proxmox-backup-client
 restore`, and `pxar` FUSE mounts all work.
@@ -101,37 +101,51 @@ restore`, and `pxar` FUSE mounts all work.
 | Alternate data streams | xattr `user.proxbackup.ads.<name>` for small streams *(phase 2)* |
 | UTF-16 names | UTF-8 |
 
-**pxar v2 split archives** *(phase 1, to do).* The encoder writes pxar v1 today. File
-backups move to format version 2, the split-archive format `proxmox-backup-client` uses since
-PBS 3.3, so unchanged files are no longer read on every run.
+**pxar v2 split archives** *(phase 1).* File backups write format version 2, the
+split-archive format `proxmox-backup-client` uses since PBS 3.3, so unchanged files are not
+read on every run.
 
 * Each source becomes two archives: `<name>.mpxar.didx` (metadata: the entry tree, xattrs,
   goodbye tables) and `<name>.ppxar.didx` (payload: file contents only).
 * The metadata archive starts with a `FORMAT_VERSION` entry (version 2). Regular files carry a
-  `PAYLOAD_REF{offset, size}` into the payload stream instead of an inline `PAYLOAD`.
+  `PAYLOAD_REF{offset, size}` into the payload stream instead of an inline `PAYLOAD`: the
+  offset of the file's `PAYLOAD` header and its content size. As in upstream pxar, the root's
+  goodbye tail points at offset 0 (the `FORMAT_VERSION` item), and goodbye items cover the
+  metadata bytes only.
 * The payload stream is framed by `PAYLOAD_START_MARKER` and `PAYLOAD_TAIL_MARKER`, and each
-  file's data sits in its own `PAYLOAD` item.
+  file's data sits in its own `PAYLOAD` item. Bytes between payloads are padding that readers
+  skip; references only ever move forward, so the stream can be read sequentially.
 * **Metadata change detection** (per-job `change_detection`, default `metadata`): the agent
-  opens a reader on the group's previous snapshot and walks its `.mpxar` next to the live
-  tree. A file whose entry, size and xattrs match is not read. The agent injects the
-  previous `.ppxar` chunks that hold its data into the new payload index, forcing a chunk
-  boundary first. Reused chunks can carry padding from neighbouring files. Once padding
-  passes a threshold, the agent re-encodes files instead of reusing chunks, so the payload
-  archive doesn't grow without bound. `data` mode writes the same split archives but reads
-  every file, for jobs that need a full re-read.
+  opens a reader on the group's previous snapshot and walks its `.mpxar` in lockstep with the
+  live tree (both are depth first with byte-sorted names). A file whose size, mode, flags,
+  mtime and xattrs all match is not read. Unchanged files that sit next to each other in the
+  previous `.ppxar` are collected into a range (at most 64 chunks), with the entries around
+  them queued. When the range ends, the agent forces a chunk boundary and injects the
+  previous `.ppxar` chunks covering it into the new payload index; nothing is uploaded. The
+  next range continues in the same chunks while nothing else was written, so a boundary chunk
+  is never injected twice. Chunk bytes no file of the range uses are padding (leftovers of
+  changed or deleted files). If they exceed 10% of the range, its files are read and encoded
+  again instead, which drops that padding for good. In tests with small, steady changes, the
+  payload settles at about 5% padding with 95% of files reused. `data` mode writes the same
+  split archives but reads every file. `legacy` keeps the single pxar v1 archive.
 * **Windows change time.** Apps can restore an old `LastWriteTime` after editing a file, so
-  the entry alone can miss a change. The agent also stores NTFS `ChangeTime` in the xattr
-  `user.proxbackup.ctime` and includes it in the comparison.
-* **Compatibility.** The decoder keeps reading v1, so existing snapshots stay restorable. The
-  first v2 run of a job reads everything, because no previous `.mpxar` exists yet. Browsing
-  and restoring v2 needs PBS 3.3 or later. The console reads the PBS version per target and
-  keeps v1 for older servers.
-* **Catalog.** The PBS GUI browses split archives through the `.mpxar`. Whether
-  `catalog.pcat1.didx` is still needed for v2 file backups gets verified against PBS 4.2;
-  image backups keep it either way.
-* **Validation.** The E2E suite restores our v2 archives with `proxmox-backup-client` and
-  checks the reused-chunk path across several runs with unchanged, edited and
-  mtime-preserving edits.
+  the entry alone can miss a change. In split archives the agent also stores NTFS
+  `ChangeTime` in the xattr `user.proxbackup.chtime` (`user.proxbackup.ctime` already holds
+  the creation time), so it is part of the comparison. It is not restored.
+* **Compatibility.** The decoder reads v1 and v2, so existing snapshots stay restorable, and a
+  restore accepts a split archive by either name. Existing jobs switch to `metadata` with the
+  upgrade; their first v2 run reads everything, because no previous `.mpxar` exists yet. A
+  spec without `change_detection` (older console) means v1. Browsing and restoring v2 needs
+  PBS 3.3 or later: the console reads the PBS version per target (cached for an hour) and
+  sends `legacy` to agents of older servers.
+* **Catalog.** File backups still upload `catalog.pcat1.didx`, listing the `.mpxar` as the
+  archive. The PBS GUI can browse split archives through the `.mpxar` alone; whether the
+  catalog can be dropped for v2 is still open.
+* **Validation.** Unit tests round-trip v2 archives and run the reuse path over 10
+  generations of edits. The E2E suite builds a v2 snapshot from injected chunks on PBS 4.2,
+  restores it, extracts a reused and a new file through PBS's own `pxar-file-download`, and
+  runs a verify task. Restoring our v2 archives with `proxmox-backup-client` is still to do
+  (the E2E container is arm64, and Proxmox ships no arm64 client).
 
 ### 3. `proxbackup-agent`: ProxBackup Agent (Windows service)
 
@@ -158,8 +172,8 @@ PBS 3.3, so unchanged files are no longer read on every run.
 * **File backup.** For each volume touched by the sources, the agent creates one VSS
   snapshot, then walks `\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN\…`. Each source path
   is streamed into the pxar encoder, then the chunker, then the uploader. Each source becomes
-  one archive, e.g. `c-users.pxar.didx` (with pxar v2 in phase 1: `c-users.mpxar.didx` and
-  `c-users.ppxar.didx`, and unchanged files are not read).
+  one split archive, e.g. `c-users.mpxar.didx` and `c-users.ppxar.didx`, and unchanged files
+  are not read (`c-users.pxar.didx` with `legacy` change detection).
 * **Image backup.** The agent snapshots a volume with VSS and reads the shadow device
   sequentially into `drive-c.img.fidx` (4 MiB fixed chunks; zero chunks dedupe for free).
   Afterwards it lists the volume's files from the same shadow copy into the catalog, so the
@@ -384,7 +398,7 @@ sequenceDiagram
 cmd/proxbackup-server/  ProxBackup Console entrypoint (also `apply-update` for the root helper)
 cmd/proxbackup-agent/   ProxBackup Agent entrypoint (service + CLI: enroll, backup, image, restore)
 pkg/pbs/                PBS protocol: blob, chunker, catalog, backup & reader sessions, admin API
-pkg/pxar/               pxar encoder/decoder (v1; v2 split archives in phase 1)
+pkg/pxar/               pxar encoder/decoder (v1 and v2 split archives)
 internal/agent/         scheduler, job runner, VSS, file walker, image reader, catalog,
                         run reporter/spool, self-update
 internal/server/        HTTP API, auth, store (SQLite), PKI, config push, PBS provisioning,
@@ -404,7 +418,7 @@ docs/                   this document
 
 | Phase | Scope |
 |-------|-------|
-| **1 — MVP** (implemented except pxar v2; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, **pxar v2 split archives with metadata change detection** *(to do; see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-v2-in-phase-1))*, buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
+| **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, pxar v2 split archives with metadata change detection (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)), buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
 | 2 | File restore from images (NTFS reader over the fixed index), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (lock window via the PBS `protected` flag, tamper-resistant retention, guided pull-sync to a second PBS; see [Security model](#security-model)) |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
@@ -483,7 +497,7 @@ same way.
 * **Default excludes:** snapshot and recycle directories (`.snapshot`, `~snapshot`, `.zfs`,
   `#recycle`, `@Recycle`, `$RECYCLE.BIN`) and NAS metadata (`@eaDir`, `.DS_Store`).
 * **Change detection.** Share jobs write pxar v2 split archives with metadata change
-  detection (phase 1), so only changed files are read. Each run still lists every directory
+  detection, so only changed files are read. Each run still lists every directory
   and stats every file, which is cheap next to reading the data. NFS v3 and SMB have no
   equivalent of NTFS `ChangeTime` for every server, so jobs that must catch mtime-preserving
   edits can switch to `data` mode or schedule a periodic full read.
@@ -802,9 +816,9 @@ name.
 
 | Risk | Mitigation |
 |------|-----------|
-| Metadata change detection misses an edited file *(phase 1, pxar v2)* | Size, mtime, attributes, xattrs and NTFS `ChangeTime` must all match before a file is skipped; `data` mode and periodic full reads re-read everything |
+| Metadata change detection misses an edited file | Size, mtime, attributes, xattrs and NTFS `ChangeTime` must all match before a file is skipped; `data` mode and periodic full reads re-read everything |
 | PBS protocol changes | The protocol is versioned (`-v1`) and stable since PBS 1.0. `make e2e` runs the protocol tests against a PBS 4.2 container (not yet part of CI; the release workflow runs `make test`) |
-| pxar encoding bugs make backups unrestorable | Round-trip tests with our decoder; snapshots are browsable and downloadable in the PBS GUI. Validation with the official `pxar` crate / `proxmox-backup-client` in the E2E suite is still to do, and becomes a release gate with pxar v2, where a wrong payload offset or reused chunk silently corrupts files |
+| pxar encoding bugs make backups unrestorable | Round-trip tests with our decoder; snapshots are browsable and downloadable in the PBS GUI. For pxar v2, the E2E suite has PBS's own pxar reader extract files from a split snapshot built from reused chunks. A full restore with `proxmox-backup-client` is still to do and is a release gate, since a wrong payload offset or reused chunk silently corrupts files |
 | VSS failures (writers in bad state, no space) | The backup fails with the VSS error rather than silently reading live files. Jobs can turn VSS off (`use_vss`) to back up crash-inconsistent live data instead |
 | Long paths / odd names | `\\?\` prefixed paths throughout; files that can't be read or encoded are skipped with a warning in the run log |
 | A bad release breaks every console and agent | Updates install only in the admin's window, refuse downgrades, and verify `SHA256SUMS`; agents update only when idle and back off for an hour after a failure. Prereleases are opt-in |

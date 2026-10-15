@@ -176,6 +176,7 @@ function newJob(clientId: number, name: string): Partial<Job> {
     excludes: [],
     volumes: ['C:'],
     use_vss: true,
+    change_detection: 'metadata',
     schedule: '0 21 * * *',
     window_minutes: 60,
     catch_up: true,
@@ -238,6 +239,16 @@ function JobEditor({ job, onClose }: { job: Partial<Job>; onClose: () => void })
             </Field>
             <Field label="Exclude patterns" hint={<>One per line, e.g. <code>*.iso</code>, <code>**/Downloads</code>. Temp folders, pagefile etc. are always excluded.</>}>
               <textarea rows={5} value={(j.excludes ?? []).join('\n')} onChange={(e) => set({ excludes: lines(e.target.value) })} />
+            </Field>
+            <Field
+              label="Change detection"
+              hint="Unchanged files are skipped by size, timestamps and attributes. Needs PBS 3.3 or later; older servers automatically get the legacy format."
+            >
+              <select value={j.change_detection ?? 'metadata'} onChange={(e) => set({ change_detection: e.target.value as Job['change_detection'] })}>
+                <option value="metadata">Skip unchanged files (recommended)</option>
+                <option value="data">Read every file</option>
+                <option value="legacy">Legacy single archive (pxar v1)</option>
+              </select>
             </Field>
           </div>
         ) : (
@@ -359,13 +370,19 @@ function Snapshots({ clientId, onQueued }: { clientId: number; onQueued: (runId:
                 <td>{s.verification ? <span className={`badge ${s.verification.state === 'ok' ? 'ok' : 'bad'}`}>{s.verification.state}</span> : '—'}</td>
                 <td className="archives">
                   {s.files
-                    .filter((f) => f.filename.endsWith('.didx') || f.filename.endsWith('.fidx'))
-                    .map((f) => (
-                      <button key={f.filename} className="small" title={`Restore ${f.filename}`} onClick={() => setRestore({ snap: s, archive: f.filename })}>
-                        ⤓ {f.filename.replace(/\.(pxar\.didx|img\.fidx)$/, '')}
-                        <span className="muted-text"> {bytes(f.size)}</span>
-                      </button>
-                    ))}
+                    // A split archive (.mpxar + .ppxar) is restored as one; the catalog isn't restorable.
+                    .filter((f) => /\.(pxar|mpxar)\.didx$|\.img\.fidx$/.test(f.filename))
+                    .map((f) => {
+                      const payload = f.filename.endsWith('.mpxar.didx')
+                        ? s.files.find((p) => p.filename === f.filename.replace(/\.mpxar\.didx$/, '.ppxar.didx'))
+                        : undefined
+                      return (
+                        <button key={f.filename} className="small" title={`Restore ${f.filename}`} onClick={() => setRestore({ snap: s, archive: f.filename })}>
+                          ⤓ {f.filename.replace(/\.(m?pxar\.didx|img\.fidx)$/, '')}
+                          <span className="muted-text"> {bytes(f.size + (payload?.size ?? 0))}</span>
+                        </button>
+                      )
+                    })}
                 </td>
               </tr>
             ))}

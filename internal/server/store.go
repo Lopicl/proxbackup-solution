@@ -87,6 +87,8 @@ func (s *Store) migrate() error {
 		{"clients", "time_zone", "TEXT NOT NULL DEFAULT ''"},
 		{"admins", "must_change_pw", "INTEGER NOT NULL DEFAULT 0"},
 		{"enrollments", "command_enc", "BLOB"},
+		// Existing file jobs move to pxar v2 too; their first run reads everything.
+		{"jobs", "change_detection", "TEXT NOT NULL DEFAULT 'metadata'"},
 	}
 	for _, c := range cols {
 		var n int
@@ -173,6 +175,8 @@ type Job struct {
 	Retention     pbs.KeepOptions `json:"retention"`
 	Enabled       bool            `json:"enabled"`
 	CreatedAt     int64           `json:"created_at"`
+	// File jobs: metadata, data or legacy (see api.JobSpec.ChangeDetection).
+	ChangeDetection string `json:"change_detection"`
 	// Reported by the agent (it owns the schedule).
 	NextRun        int64 `json:"next_run,omitempty"`
 	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
@@ -513,13 +517,13 @@ func (s *Store) ReleaseEnrollment(ctx context.Context, id int64) {
 
 // ---- jobs ----
 
-const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at, window_minutes, catch_up`
+const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at, window_minutes, catch_up, change_detection`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	j := &Job{}
 	var src, exc, vol, ret string
 	err := sc.Scan(&j.ID, &j.ClientID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &vol, &j.UseVSS, &j.Schedule, &ret, &j.Enabled, &j.CreatedAt,
-		&j.WindowMinutes, &j.CatchUp)
+		&j.WindowMinutes, &j.CatchUp, &j.ChangeDetection)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -565,8 +569,9 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	if j.ID == 0 {
 		j.CreatedAt = now()
 		res, err := s.db.ExecContext(ctx, `INSERT INTO jobs(client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention,
-			enabled, created_at, window_minutes, catch_up) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.CreatedAt, j.WindowMinutes, j.CatchUp)
+			enabled, created_at, window_minutes, catch_up, change_detection) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.CreatedAt, j.WindowMinutes, j.CatchUp,
+			j.ChangeDetection)
 		if err != nil {
 			return err
 		}
@@ -574,8 +579,8 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?, schedule=?,
-		retention=?, enabled=?, window_minutes=?, catch_up=? WHERE id=?`,
-		j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.WindowMinutes, j.CatchUp, j.ID)
+		retention=?, enabled=?, window_minutes=?, catch_up=?, change_detection=? WHERE id=?`,
+		j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.WindowMinutes, j.CatchUp, j.ChangeDetection, j.ID)
 	return err
 }
 

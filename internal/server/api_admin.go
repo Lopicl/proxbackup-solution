@@ -326,7 +326,7 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !pbs.ValidArchiveName(req.Archive) || strings.HasSuffix(req.Archive, ".blob") {
-		httpError(w, 400, errors.New("archive must be a .pxar.didx or .img.fidx archive"))
+		httpError(w, 400, errors.New("archive must be a .pxar.didx, .mpxar.didx or .img.fidx archive"))
 		return
 	}
 	switch req.Overwrite {
@@ -511,6 +511,15 @@ func (s *Server) handleSaveJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if j.WindowMinutes <= 0 {
 		j.WindowMinutes = 60
+	}
+	switch j.ChangeDetection {
+	case "":
+		j.ChangeDetection = "metadata"
+	case "metadata", "data", "legacy":
+	default:
+		if err == nil {
+			err = errors.New("change_detection must be metadata, data or legacy")
+		}
 	}
 	if err == nil && j.WindowMinutes > 7*24*60 {
 		err = errors.New("start window must be at most 7 days")

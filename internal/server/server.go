@@ -48,6 +48,8 @@ type Server struct {
 
 	wakeMu sync.Mutex
 	wake   map[int64]chan struct{} // per-client long-poll wakeups
+
+	versions pbsVersions
 }
 
 // New opens the data directory and prepares the server.
