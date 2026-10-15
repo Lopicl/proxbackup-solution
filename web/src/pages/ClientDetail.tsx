@@ -40,7 +40,29 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
           Host <b>{c.hostname || '—'}</b>
         </span>
         <span>
-          Agent <b>{c.agent_version || '—'}</b> {c.os}
+          Agent <b>{c.agent_version || '—'}</b> {c.os}{' '}
+          {c.agent_update &&
+            (c.agent_update_pushed ? (
+              <b className="warn-text" title="The agent installs it as soon as no backup is running">
+                update to {c.agent_update} pushed{c.online ? '' : ' — applied when the PC connects'}
+              </b>
+            ) : (
+              <button
+                className="small"
+                title="Install the console's agent version on this PC now, even with automatic agent updates off. It waits for running backups to finish."
+                onClick={async () => {
+                  try {
+                    const r = await api.pushAgentUpdate(id)
+                    setMsg(`Agent update to ${r.version} pushed${c.online ? '' : ' — it is installed when the PC comes online'}.`)
+                    reload()
+                  } catch (e) {
+                    setMsg((e as Error).message)
+                  }
+                }}
+              >
+                Update agent to {c.agent_update}
+              </button>
+            ))}
         </span>
         <span>
           Namespace <code>{c.namespace}</code>

@@ -100,6 +100,7 @@ type updater struct {
 	status UpdateStatus
 	latest *update.Release
 	agents map[string]agentBinary // by arch, for s.cfg.Version
+	pushed map[int64]bool         // clients an admin pushed the agent update to (PushAgent)
 	busy   sync.Mutex             // one check/install at a time
 
 	resultMod time.Time
@@ -108,7 +109,7 @@ type updater struct {
 
 func newUpdater(s *Server) *updater {
 	u := &updater{s: s, gh: &update.Client{Repo: s.cfg.UpdateRepo}, dir: filepath.Join(s.cfg.DataDir, "updates"),
-		agents: map[string]agentBinary{}}
+		agents: map[string]agentBinary{}, pushed: map[int64]bool{}}
 	switch {
 	case !isVersion(s.cfg.Version):
 		u.note = "development build: updates are shown but not installed"
@@ -314,20 +315,71 @@ func (u *updater) cacheAgents(ctx context.Context) {
 	}
 }
 
-// agentOffer returns the update to offer an agent that reported os ("windows/amd64")
-// and version, or nil.
-func (u *updater) agentOffer(ctx context.Context, osArch, version string) *api.AgentUpdate {
+// agentOffer returns the update to offer the agent of client id that reported os
+// ("windows/amd64") and version, or nil. An update an admin pushed (PushAgent) is
+// offered even with automatic agent updates off, and marked Force.
+func (u *updater) agentOffer(ctx context.Context, id int64, osArch, version string) *api.AgentUpdate {
 	goos, arch, _ := strings.Cut(osArch, "/")
-	if goos != "windows" || !update.Newer(u.s.cfg.Version, version) || !u.settings(ctx).Agents {
-		return nil
-	}
 	u.mu.Lock()
 	b, ok := u.agents[arch]
+	pushed := u.pushed[id]
+	if goos != "windows" || !update.Newer(u.s.cfg.Version, version) {
+		delete(u.pushed, id)
+		ok = false
+	}
 	u.mu.Unlock()
-	if !ok {
+	if !ok || !pushed && !u.settings(ctx).Agents {
 		return nil
 	}
-	return &api.AgentUpdate{Version: u.s.cfg.Version, URL: "/agent/v1/update/windows-" + arch, SHA256: b.sha256, Size: b.size}
+	return &api.AgentUpdate{Version: u.s.cfg.Version, URL: "/agent/v1/update/windows-" + arch, SHA256: b.sha256, Size: b.size, Force: pushed}
+}
+
+// agentUpdate returns the version client c's agent can be updated to (the
+// console's), or "", and whether an admin already pushed it.
+func (u *updater) agentUpdate(c *Client) (string, bool) {
+	goos, _, _ := strings.Cut(c.OS, "/")
+	if goos != "windows" || !isVersion(u.s.cfg.Version) || !update.Newer(u.s.cfg.Version, c.AgentVersion) {
+		return "", false
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.s.cfg.Version, u.pushed[c.ID]
+}
+
+// PushAgent offers client c's agent the console's version right away, whatever
+// the automatic agent update setting. The agent installs it as soon as no job is
+// running; the push ends when it downloads the binary.
+func (u *updater) PushAgent(ctx context.Context, c *Client) error {
+	v, _ := u.agentUpdate(c)
+	if v == "" {
+		if !isVersion(u.s.cfg.Version) {
+			return errors.New("this console is a development build; it has no agent release to push")
+		}
+		if goos, _, _ := strings.Cut(c.OS, "/"); goos != "windows" {
+			return fmt.Errorf("the agent reports OS %q; only Windows agents update themselves", c.OS)
+		}
+		return fmt.Errorf("the agent already runs %s (console %s)", c.AgentVersion, u.s.cfg.Version)
+	}
+	u.busy.Lock()
+	u.cacheAgents(ctx)
+	u.busy.Unlock()
+	_, arch, _ := strings.Cut(c.OS, "/")
+	u.mu.Lock()
+	_, ok := u.agents[arch]
+	cacheErr := u.status.AgentCacheErr
+	if ok {
+		u.pushed[c.ID] = true
+	}
+	u.mu.Unlock()
+	if !ok {
+		if cacheErr == "" {
+			cacheErr = "no " + arch + " agent in the release"
+		}
+		return fmt.Errorf("agent %s for %s is not available: %s", v, arch, cacheErr)
+	}
+	u.s.log.Info("agent update pushed", "client", c.Name, "from", c.AgentVersion, "to", v)
+	u.s.wakeClient(c.ID)
+	return nil
 }
 
 func (s *Server) handleAgentBinary(w http.ResponseWriter, r *http.Request, c *Client) {
@@ -346,6 +398,9 @@ func (s *Server) handleAgentBinary(w http.ResponseWriter, r *http.Request, c *Cl
 	}
 	defer f.Close()
 	s.log.Info("agent downloading update", "client", c.Name, "version", s.cfg.Version, "arch", arch)
+	s.updater.mu.Lock()
+	delete(s.updater.pushed, c.ID) // a push is one-shot; a failed install falls back to the setting
+	s.updater.mu.Unlock()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Checksum-Sha256", b.sha256)
 	http.ServeContent(w, r, "", time.Time{}, f)

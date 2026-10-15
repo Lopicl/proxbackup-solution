@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,7 +17,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"proxbackup/internal/api"
 	"proxbackup/internal/update"
 )
 
@@ -77,20 +80,64 @@ func TestUpdaterCheckAndAgentOffer(t *testing.T) {
 	if st.NextInstall == 0 {
 		t.Fatal("default settings should schedule the install")
 	}
-	o := s.updater.agentOffer(ctx, "windows/arm64", "0.0.9.0")
+	o := s.updater.agentOffer(ctx, 1, "windows/arm64", "0.0.9.0")
 	if o == nil || o.Version != "0.1.0.1" || o.URL != "/agent/v1/update/windows-arm64" || o.Size != int64(len("agent 0.1.0.1")) {
 		t.Fatalf("offer = %+v", o)
 	}
 	for _, c := range [][2]string{{"windows/amd64", "0.1.0.1"}, {"windows/amd64", "0.2.0.0"}, {"windows/amd64", "dev"}, {"linux/amd64", "0.0.1.0"}} {
-		if o := s.updater.agentOffer(ctx, c[0], c[1]); o != nil {
+		if o := s.updater.agentOffer(ctx, 1, c[0], c[1]); o != nil {
 			t.Errorf("unexpected offer for %v: %+v", c, o)
 		}
 	}
 	us := s.updater.settings(ctx)
 	us.Agents = false
 	s.store.SetSetting(ctx, "updates", us)
-	if o := s.updater.agentOffer(ctx, "windows/amd64", "0.0.9.0"); o != nil {
+	if o := s.updater.agentOffer(ctx, 1, "windows/amd64", "0.0.9.0"); o != nil {
 		t.Fatal("agent updates are disabled")
+	}
+}
+
+func TestPushAgentUpdate(t *testing.T) {
+	s := newTestServer(t, "deb")
+	ctx := context.Background()
+	us := s.updater.settings(ctx)
+	us.Agents = false
+	s.store.SetSetting(ctx, "updates", us)
+	c := &Client{ID: 7, Name: "pc", OS: "windows/amd64", AgentVersion: "0.0.9.0"}
+
+	if v, pushed := s.updater.agentUpdate(c); v != "0.1.0.1" || pushed {
+		t.Fatalf("agentUpdate = %q, %v", v, pushed)
+	}
+	if o := s.updater.agentOffer(ctx, c.ID, c.OS, c.AgentVersion); o != nil {
+		t.Fatal("offer before the push with agent updates off")
+	}
+	for _, bad := range []*Client{
+		{ID: 8, OS: "windows/amd64", AgentVersion: "0.1.0.1"},
+		{ID: 9, OS: "linux/amd64", AgentVersion: "0.0.9.0"},
+	} {
+		if err := s.updater.PushAgent(ctx, bad); err == nil {
+			t.Errorf("push to %+v accepted", bad)
+		}
+	}
+	if err := s.updater.PushAgent(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, pushed := s.updater.agentUpdate(c); !pushed {
+		t.Fatal("push not recorded")
+	}
+	o := s.updater.agentOffer(ctx, c.ID, c.OS, c.AgentVersion)
+	if o == nil || !o.Force || o.Version != "0.1.0.1" {
+		t.Fatalf("offer = %+v", o)
+	}
+	if o := s.updater.agentOffer(ctx, 99, c.OS, c.AgentVersion); o != nil {
+		t.Fatal("push leaked to another client")
+	}
+	// Once the agent runs the console's version, the push is over.
+	if o := s.updater.agentOffer(ctx, c.ID, c.OS, "0.1.0.1"); o != nil {
+		t.Fatal("offer to an up-to-date agent")
+	}
+	if o := s.updater.agentOffer(ctx, c.ID, c.OS, c.AgentVersion); o != nil {
+		t.Fatal("push should be cleared")
 	}
 }
 
@@ -138,5 +185,47 @@ func TestApplyUpdateRejectsBadRequests(t *testing.T) {
 	// No request: nothing to do.
 	if err := ApplyUpdate(context.Background(), "0.1.0.1", dir, t.TempDir(), "o/r", log); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPushAgentUpdateWakesPoll(t *testing.T) {
+	s := newTestServer(t, "deb")
+	ctx := context.Background()
+	us := s.updater.settings(ctx)
+	us.Agents = false
+	s.store.SetSetting(ctx, "updates", us)
+	tg := &Target{Name: "pbs", Host: "pbs.lan", Datastore: "ds", AdminAuthID: "root@pam!t", PBSUser: "proxbackup@pbs", adminSecretEnc: []byte{}}
+	if err := s.store.SaveTarget(ctx, tg); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{Name: "pc", OS: "windows/amd64", TargetID: tg.ID, tokenSecretEnc: s.sealer.Seal("secret")}
+	if err := s.store.CreateClient(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	c.AgentVersion = "0.0.9.0"
+	poll := func() api.PollResponse {
+		cfg, _ := s.agentConfig(ctx, c)
+		body, _ := json.Marshal(api.PollRequest{OS: c.OS, AgentVersion: c.AgentVersion, ConfigRev: cfg.Rev})
+		w := httptest.NewRecorder()
+		s.handlePoll(w, httptest.NewRequest("POST", "/agent/v1/poll?wait=30", bytes.NewReader(body)), c)
+		var resp api.PollResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("poll: %d %s", w.Code, w.Body)
+		}
+		return resp
+	}
+	done := make(chan api.PollResponse)
+	go func() { done <- poll() }()
+	time.Sleep(200 * time.Millisecond)
+	if err := s.updater.PushAgent(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case resp := <-done:
+		if resp.Update == nil || !resp.Update.Force {
+			t.Fatalf("poll response = %+v", resp)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pushing the update did not wake the poll")
 	}
 }

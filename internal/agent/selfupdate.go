@@ -32,7 +32,7 @@ func (r *Runner) maybeUpdate(ctx context.Context, u *api.AgentUpdate) {
 		return
 	}
 	r.mu.Lock()
-	if r.updating || (r.updateFailed == u.Version && time.Since(r.updateFailedAt) < time.Hour) || r.busyLocked() {
+	if r.updating || (!u.Force && r.updateFailed == u.Version && time.Since(r.updateFailedAt) < time.Hour) || r.busyLocked() {
 		r.mu.Unlock()
 		return
 	}

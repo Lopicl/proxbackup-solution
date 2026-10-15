@@ -155,6 +155,10 @@ type Client struct {
 	ScheduleState []api.JobState `json:"schedule_state"`
 	TimeZone      string         `json:"time_zone"`
 	ConfigSynced  bool           `json:"config_synced"`
+	// AgentUpdate is the version the agent can be updated to (the console's), and
+	// AgentUpdatePushed whether an admin pushed it and the agent hasn't fetched it yet.
+	AgentUpdate       string `json:"agent_update,omitempty"`
+	AgentUpdatePushed bool   `json:"agent_update_pushed"`
 
 	tokenSecretEnc []byte
 }

@@ -135,13 +135,13 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 	s.store.TouchClient(ctx, c.ID, req)
 	s.store.MarkMissingLost(ctx, c.ID, req.RunningRuns)
 	agentRev := req.ConfigRev
-	offer := s.updater.agentOffer(ctx, req.OS, req.AgentVersion)
 
 	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
 	wait = min(max(wait, 0), 55)
 	deadline := time.After(time.Duration(wait) * time.Second)
 	for {
 		wake := s.wakeChan(c.ID)
+		offer := s.updater.agentOffer(ctx, c.ID, req.OS, req.AgentVersion)
 		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID), Update: offer}
 		cfg, err := s.agentConfig(ctx, c)
 		if err != nil {
@@ -164,7 +164,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 			}
 			resp.Jobs = append(resp.Jobs, *spec)
 		}
-		if len(resp.Jobs) > 0 || len(resp.Cancel) > 0 || resp.Config != nil {
+		if len(resp.Jobs) > 0 || len(resp.Cancel) > 0 || resp.Config != nil || offer != nil && offer.Force {
 			writeJSON(w, resp)
 			return
 		}

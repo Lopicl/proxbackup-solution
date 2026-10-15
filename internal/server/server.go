@@ -157,6 +157,7 @@ func (s *Server) uiRoutes() http.Handler {
 	admin.HandleFunc("GET /api/clients", s.handleClients)
 	admin.HandleFunc("GET /api/clients/{id}", s.handleClient)
 	admin.HandleFunc("DELETE /api/clients/{id}", s.handleRevokeClient)
+	admin.HandleFunc("POST /api/clients/{id}/agent-update", s.handlePushAgentUpdate)
 	admin.HandleFunc("GET /api/clients/{id}/snapshots", s.handleSnapshots)
 	admin.HandleFunc("POST /api/clients/{id}/restore", s.handleRestore)
 	admin.HandleFunc("POST /api/password", s.handleChangePassword)

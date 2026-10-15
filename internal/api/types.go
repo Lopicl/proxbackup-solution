@@ -155,6 +155,9 @@ type AgentUpdate struct {
 	URL     string `json:"url"` // path on the server, e.g. /agent/v1/update/windows-amd64 (mTLS)
 	SHA256  string `json:"sha256"`
 	Size    int64  `json:"size"`
+	// Force is set when an admin pushed the update: install it even if an
+	// earlier attempt failed within the hour.
+	Force bool `json:"force,omitempty"`
 }
 
 // RunRegister announces a run the agent started on its own (scheduled or

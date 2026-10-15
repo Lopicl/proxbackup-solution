@@ -257,7 +257,10 @@ read on every run.
     re-executes itself.
 
   The console also caches the matching Windows agent binaries and offers them to older agents
-  (see *Self-update* above; can be turned off). Releases are built by `make dist`, tagged with
+  (see *Self-update* above; can be turned off). An admin can also push the update to one
+  client with "Update agent to …" on its page: the poll is woken, the offer is made even with
+  automatic agent updates off and skips the agent's one-hour retry backoff, and the push ends
+  once the agent downloads the binary. Releases are built by `make dist`, tagged with
   `make release` (`v<VERSION>`), and published by the GitHub Actions workflow
   `.github/workflows/release.yml`.
 

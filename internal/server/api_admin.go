@@ -245,6 +245,7 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 	if cfg, err := s.agentConfig(ctx, c); err == nil {
 		c.ConfigSynced = cfg.Rev == c.ConfigRev
 	}
+	c.AgentUpdate, c.AgentUpdatePushed = s.updater.agentUpdate(c)
 	runs, _ := s.store.Runs(ctx, RunFilter{ClientID: c.ID, Limit: 50})
 	writeJSON(w, map[string]any{"client": c, "jobs": orEmpty(jobs), "runs": orEmpty(runs)})
 }
@@ -654,4 +655,26 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	}
 	s.wakeClient(run.ClientID)
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handlePushAgentUpdate(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	c, err := s.store.Client(r.Context(), id)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	if c.Revoked {
+		httpError(w, http.StatusConflict, errors.New("client is revoked"))
+		return
+	}
+	if err := s.updater.PushAgent(r.Context(), c); err != nil {
+		httpError(w, http.StatusConflict, err)
+		return
+	}
+	writeJSON(w, map[string]string{"version": s.cfg.Version})
 }

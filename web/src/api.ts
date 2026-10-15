@@ -72,6 +72,8 @@ export interface Client {
   created_at: number
   config_synced: boolean
   time_zone: string
+  agent_update?: string // version the agent can be updated to (the console's)
+  agent_update_pushed: boolean
 }
 
 export interface Keep {
@@ -265,6 +267,7 @@ export const api = {
   clients: () => request<Client[]>('GET', '/clients'),
   client: (id: number) => request<{ client: Client; jobs: Job[]; runs: Run[] }>('GET', `/clients/${id}`),
   revokeClient: (id: number) => request('DELETE', `/clients/${id}`),
+  pushAgentUpdate: (id: number) => request<{ version: string }>('POST', `/clients/${id}/agent-update`),
   snapshots: (id: number) => request<Snapshot[]>('GET', `/clients/${id}/snapshots`),
   restore: (id: number, spec: RestoreSpec) => request<{ run_id: number }>('POST', `/clients/${id}/restore`, spec),
 
