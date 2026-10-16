@@ -74,6 +74,8 @@ export interface Client {
   time_zone: string
   agent_update?: string // version the agent can be updated to (the console's)
   agent_update_pushed: boolean
+  encryption_fingerprint: string // '' until the first encrypted job is saved
+  encryption_created: number
 }
 
 export interface Keep {
@@ -96,6 +98,7 @@ export interface Job {
   volumes: string[]
   use_vss: boolean
   change_detection: 'metadata' | 'data' | 'legacy'
+  encrypt: boolean
   schedule: string
   window_minutes: number
   catch_up: boolean
@@ -157,6 +160,12 @@ export interface NotifySettings {
   on_success: boolean
   on_failure: boolean
   stale_days: number
+}
+
+export interface EncryptionSettings {
+  master_pubkey: string
+  master_bits?: number
+  master_fingerprint?: string
 }
 
 export interface UpdateSettings {
@@ -238,6 +247,22 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn
 }
 
+// Saves a GET response through the browser (errors come back as JSON).
+async function download(path: string, filename: string) {
+  const res = await fetch('/api' + path, { credentials: 'same-origin' })
+  if (!res.ok) {
+    const data = await res.json().catch(() => null)
+    if (res.status === 401) onUnauthorized()
+    throw new ApiError(res.status, data?.error ?? res.statusText)
+  }
+  const url = URL.createObjectURL(await res.blob())
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 60000)
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch('/api' + path, {
     method,
@@ -278,6 +303,8 @@ export const api = {
   pushAgentUpdate: (id: number) => request<{ version: string }>('POST', `/clients/${id}/agent-update`),
   snapshots: (id: number) => request<Snapshot[]>('GET', `/clients/${id}/snapshots`),
   restore: (id: number, spec: RestoreSpec) => request<{ run_id: number }>('POST', `/clients/${id}/restore`, spec),
+  // The client's encryption key as a PBS key file (proxmox-backup-client --keyfile).
+  downloadClientKey: (c: Client) => download(`/clients/${c.id}/encryption-key`, `${c.name}-encryption-key.json`),
 
   enrollments: () => request<Enrollment[]>('GET', '/enrollments'),
   enrollmentCommand: (id: number) => request<{ command: string }>('GET', `/enrollments/${id}/command`),
@@ -290,21 +317,8 @@ export const api = {
   createSetupToken: (target_id: number, ttl_hours: number) =>
     request<{ id: number; expires: number; token: string; command: string }>('POST', '/setup-tokens', { target_id, ttl_hours }),
   deleteSetupToken: (id: number) => request('DELETE', `/setup-tokens/${id}`),
-  // Saves the setup .exe for arch through the browser (errors come back as JSON).
-  downloadSetup: async (id: number, arch: 'amd64' | 'arm64') => {
-    const res = await fetch(`/api/setup-tokens/${id}/download/${arch}`, { credentials: 'same-origin' })
-    if (!res.ok) {
-      const data = await res.json().catch(() => null)
-      if (res.status === 401) onUnauthorized()
-      throw new ApiError(res.status, data?.error ?? res.statusText)
-    }
-    const url = URL.createObjectURL(await res.blob())
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `proxbackup-agent-setup-${arch}.exe`
-    a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 60000)
-  },
+  // Saves the setup .exe for arch through the browser.
+  downloadSetup: (id: number, arch: 'amd64' | 'arm64') => download(`/setup-tokens/${id}/download/${arch}`, `proxbackup-agent-setup-${arch}.exe`),
 
   saveJob: (j: Partial<Job>) =>
     j.id ? request<Job>('PUT', `/jobs/${j.id}`, strip(j, ['id', 'next_run', 'catch_up_pending', 'client_id', 'created_at'])) : request<Job>('POST', '/jobs', strip(j, ['next_run', 'catch_up_pending'])),
@@ -325,6 +339,9 @@ export const api = {
   notifySettings: () => request<NotifySettings>('GET', '/settings/notifications'),
   saveNotifySettings: (s: NotifySettings) => request<NotifySettings>('PUT', '/settings/notifications', strip(s, ['smtp_password_set'])),
   testNotify: () => request('POST', '/settings/notifications/test'),
+
+  encryptionSettings: () => request<EncryptionSettings>('GET', '/settings/encryption'),
+  saveEncryptionSettings: (s: EncryptionSettings) => request<EncryptionSettings>('PUT', '/settings/encryption', { master_pubkey: s.master_pubkey }),
 
   updates: () => request<Updates>('GET', '/settings/updates'),
   saveUpdateSettings: (s: UpdateSettings) => request<Updates>('PUT', '/settings/updates', s),

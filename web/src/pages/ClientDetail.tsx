@@ -76,6 +76,30 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         <span>
           Last success <b>{ago(c.last_success)}</b>
         </span>
+        <span>
+          Encryption{' '}
+          {c.encryption_fingerprint ? (
+            <>
+              <code title={`Key fingerprint ${c.encryption_fingerprint}, created ${dateTime(c.encryption_created)}`}>{c.encryption_fingerprint.slice(0, 23)}…</code>{' '}
+              <button
+                className="small"
+                title="The key is escrowed by this console. Keep a copy offline to restore with proxmox-backup-client --keyfile if the console is lost."
+                onClick={async () => {
+                  if (!confirm(`Download the encryption key of ${c.name}? Anyone with this file and read access to the datastore can decrypt its backups. Store it safely.`)) return
+                  try {
+                    await api.downloadClientKey(c)
+                  } catch (e) {
+                    setMsg((e as Error).message)
+                  }
+                }}
+              >
+                Download key
+              </button>
+            </>
+          ) : (
+            <b>off</b>
+          )}
+        </span>
         <span title="Schedules are evaluated by the agent on the PC's own clock">
           PC time zone <b>{c.time_zone || '—'}</b>
         </span>
@@ -127,6 +151,7 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
                     <td>
                       <b>{j.name}</b>
                       {!j.enabled && <span className="tag">disabled</span>}
+                      {j.encrypt && <span className="tag">encrypted</span>}
                     </td>
                     <td>{j.kind === 'files' ? 'Files' : 'Volume image'}</td>
                     <td className="ellipsis" title={(j.kind === 'files' ? j.sources : j.volumes).join(', ')}>
@@ -199,6 +224,7 @@ function newJob(clientId: number, name: string): Partial<Job> {
     volumes: ['C:'],
     use_vss: true,
     change_detection: 'metadata',
+    encrypt: false,
     schedule: '0 21 * * *',
     window_minutes: 60,
     catch_up: true,
@@ -332,9 +358,19 @@ function JobEditor({ job, onClose }: { job: Partial<Job>; onClose: () => void })
             </label>
           )}
           <label>
+            <input type="checkbox" checked={!!j.encrypt} onChange={(e) => set({ encrypt: e.target.checked })} /> Encrypt on the PC (AES-256-GCM with the
+            client's own key, escrowed by this console)
+          </label>
+          <label>
             <input type="checkbox" checked={!!j.enabled} onChange={(e) => set({ enabled: e.target.checked })} /> Enabled
           </label>
         </div>
+        {!!j.id && !!j.encrypt !== !!job.encrypt && (
+          <div className="notice">
+            {j.encrypt ? 'The next run encrypts everything' : 'The next run stores everything unencrypted'}: it reads every file and uploads all data again, since chunks
+            can't be shared between encrypted and unencrypted snapshots. Existing snapshots stay as they are and remain restorable.
+          </div>
+        )}
         <ErrorBox error={error} />
         <div className="buttons">
           {j.id && (
@@ -387,6 +423,7 @@ function Snapshots({ clientId, onQueued }: { clientId: number; onQueued: (runId:
                     {s['backup-type']}/{s['backup-id']}
                   </code>
                   {s.protected && <span className="tag">protected</span>}
+                  {s.files.some((f) => f['crypt-mode'] === 'encrypt') && <span className="tag">encrypted</span>}
                 </td>
                 <td className="num">{bytes(s.size)}</td>
                 <td>{s.verification ? <span className={`badge ${s.verification.state === 'ok' ? 'ok' : 'bad'}`}>{s.verification.state}</span> : '—'}</td>

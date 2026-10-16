@@ -231,7 +231,12 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 	if err != nil {
 		return nil, err
 	}
+	key, err := s.clientKey(ctx, c)
+	if err != nil {
+		return nil, err
+	}
 	cfg := &api.AgentConfig{
+		Crypt: key,
 		Target: api.PBSTarget{Host: t.Host, Fingerprint: t.Fingerprint, Datastore: t.Datastore, Namespace: c.Namespace,
 			AuthID: c.TokenID, Secret: secret},
 		Jobs: []api.JobConfig{},
@@ -243,7 +248,7 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 		cfg.Jobs = append(cfg.Jobs, api.JobConfig{ID: j.ID, Name: j.Name, Kind: j.Kind, BackupID: j.BackupID,
 			Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS,
 			ChangeDetection: s.changeDetection(ctx, t, j),
-			Schedule:        j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp})
+			Schedule:        j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp, Encrypt: j.Encrypt})
 	}
 	b, _ := json.Marshal(cfg)
 	sum := sha256.Sum256(b)
@@ -312,6 +317,10 @@ func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSp
 		BackupID: c.Name,
 		Restore:  run.Restore,
 	}
+	// Restores need the key too, for snapshots encrypted earlier.
+	if spec.Crypt, err = s.clientKey(ctx, c); err != nil {
+		return nil, err
+	}
 	if run.JobID > 0 {
 		j, err := s.store.Job(ctx, run.JobID)
 		if err != nil {
@@ -319,6 +328,7 @@ func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSp
 		}
 		spec.BackupID, spec.Sources, spec.Excludes, spec.Volumes, spec.UseVSS = j.BackupID, j.Sources, j.Excludes, j.Volumes, j.UseVSS
 		spec.ChangeDetection = s.changeDetection(ctx, t, j)
+		spec.Encrypt = j.Encrypt
 	}
 	return spec, nil
 }

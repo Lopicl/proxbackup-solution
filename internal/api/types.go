@@ -51,6 +51,16 @@ type PBSTarget struct {
 	Secret      string `json:"secret"`
 }
 
+// CryptKey is a client's encryption key, generated and escrowed by the server.
+type CryptKey struct {
+	Key         string `json:"key"`         // base64 of the 32 byte AES-256 key
+	Fingerprint string `json:"fingerprint"` // PBS key fingerprint ("aa:bb:…")
+	Created     int64  `json:"created"`     // unix seconds
+	// MasterPubKey, if set, is a PEM RSA public key: each encrypted snapshot
+	// also gets rsa-encrypted.key.blob, recoverable with the master private key.
+	MasterPubKey string `json:"master_pubkey,omitempty"`
+}
+
 // RestoreSpec describes a restore job.
 type RestoreSpec struct {
 	BackupID   string   `json:"backup_id"`
@@ -82,6 +92,11 @@ type JobSpec struct {
 	Volumes []string `json:"volumes,omitempty"` // e.g. "C:"
 	// restore
 	Restore *RestoreSpec `json:"restore,omitempty"`
+	// Encrypt backups client-side with Crypt. Crypt is also sent without
+	// Encrypt, so encrypted snapshots can be restored and change detection
+	// can read an encrypted previous snapshot.
+	Encrypt bool      `json:"encrypt,omitempty"`
+	Crypt   *CryptKey `json:"crypt,omitempty"`
 }
 
 // JobConfig is a backup job as pushed to the agent. The agent owns the
@@ -104,6 +119,8 @@ type JobConfig struct {
 	// CatchUp: if the window was missed (PC off, asleep or busy), run as soon as possible
 	// instead of recording the run as missed.
 	CatchUp bool `json:"catch_up"`
+	// Encrypt with the client key (AgentConfig.Crypt).
+	Encrypt bool `json:"encrypt,omitempty"`
 }
 
 // AgentConfig is everything the agent needs to run scheduled backups on its
@@ -112,12 +129,15 @@ type AgentConfig struct {
 	Rev    string      `json:"rev"` // content hash; the agent reports it back in PollRequest
 	Target PBSTarget   `json:"target"`
 	Jobs   []JobConfig `json:"jobs"`
+	// Crypt is the client's encryption key, once one exists.
+	Crypt *CryptKey `json:"crypt,omitempty"`
 }
 
 // Spec turns a job config into an executable job spec.
 func (c *AgentConfig) Spec(j JobConfig) JobSpec {
 	return JobSpec{JobID: j.ID, Kind: j.Kind, Target: c.Target, BackupID: j.BackupID,
-		Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS, ChangeDetection: j.ChangeDetection}
+		Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS, ChangeDetection: j.ChangeDetection,
+		Encrypt: j.Encrypt, Crypt: c.Crypt}
 }
 
 // JobState is the agent's view of a job's schedule, reported on every poll.

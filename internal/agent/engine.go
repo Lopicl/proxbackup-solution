@@ -34,8 +34,9 @@ type Reporter interface {
 
 // job holds per-run state shared by the backup/restore implementations.
 type job struct {
-	spec api.JobSpec
-	rep  Reporter
+	spec  api.JobSpec
+	rep   Reporter
+	crypt *pbs.CryptConfig // client key, nil if the client has none
 
 	logMu sync.Mutex
 	log   bytes.Buffer // uploaded as client.log.blob
@@ -84,13 +85,14 @@ func Run(ctx context.Context, spec api.JobSpec, rep Reporter) api.Result {
 		}
 	}()
 	var res api.Result
-	var err error
-	switch spec.Kind {
-	case api.KindFiles:
+	err := j.initCrypt()
+	switch {
+	case err != nil:
+	case spec.Kind == api.KindFiles:
 		res, err = j.runFiles(ctx)
-	case api.KindImage:
+	case spec.Kind == api.KindImage:
 		res, err = j.runImage(ctx)
-	case api.KindRestore:
+	case spec.Kind == api.KindRestore:
 		res, err = j.runRestore(ctx)
 	default:
 		err = fmt.Errorf("unknown job kind %q", spec.Kind)
@@ -125,7 +127,7 @@ func (j *job) snapshotRef(t int64) pbs.SnapshotRef {
 // the group's last snapshot (PBS rejects equal or older times).
 func (j *job) startSession(ctx context.Context, c *pbs.Client) (*pbs.BackupSession, error) {
 	t := time.Now().Unix()
-	s, err := c.StartBackup(ctx, j.snapshotRef(t), pbs.BackupOptions{Compress: true, Concurrency: 4,
+	s, err := c.StartBackup(ctx, j.snapshotRef(t), pbs.BackupOptions{Crypt: j.backupCrypt(), Compress: true, Concurrency: 4,
 		OnUpload: func(n int) { j.uploaded.Add(uint64(n)) }})
 	if err != nil {
 		return nil, fmt.Errorf("start backup session: %w", err)
@@ -138,7 +140,10 @@ func (j *job) finishSession(ctx context.Context, s *pbs.BackupSession, res *api.
 	j.logMu.Lock()
 	logData := bytes.Clone(j.log.Bytes())
 	j.logMu.Unlock()
-	if err := s.UploadBlob(ctx, "client.log.blob", logData, false); err != nil {
+	if err := s.UploadBlob(ctx, "client.log.blob", logData, j.backupCrypt() != nil); err != nil {
+		return err
+	}
+	if err := j.uploadMasterKeyCopy(ctx, s); err != nil {
 		return err
 	}
 	if err := s.Finish(ctx); err != nil {

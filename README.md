@@ -170,7 +170,9 @@ Known gaps (see the roadmap):
 - volume images are browsable in the PBS GUI file browser (via `catalog.pcat1.didx`), but single
   files can't be downloaded from them there: PBS only extracts files from pxar archives. File
   backups are browsable and downloadable.
-- no client-side encryption
+- encrypted snapshots can't be browsed or downloaded from in the PBS GUI (PBS never sees the
+  key). Restore them from the console, or with `proxmox-backup-client --keyfile` and the key
+  downloaded from the client's page
 - no NTFS ACLs or alternate data streams
 - no tray app
 - image restore writes a `.img` file. Bare-metal recovery of Windows and Linux machines via a

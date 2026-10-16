@@ -207,11 +207,20 @@ func (b *BackupSession) Finish(ctx context.Context) error {
 		"signature":   nil,
 	}
 	b.mu.Unlock()
-	if b.opts.Crypt != nil {
-		return errors.New("pbs: manifest signing for encrypted backups is not implemented yet")
-	}
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	data, err := json.Marshal(manifest)
 	if err != nil {
+		return err
+	}
+	if c := b.opts.Crypt; c != nil {
+		// Encrypted snapshots carry a signed manifest (BackupManifest::to_string).
+		sig, err := manifestSignature(data, c)
+		if err != nil {
+			return fmt.Errorf("pbs: sign manifest: %w", err)
+		}
+		manifest["signature"] = hex.EncodeToString(sig[:])
+		manifest["unprotected"] = map[string]any{"key-fingerprint": c.Fingerprint()}
+	}
+	if data, err = json.MarshalIndent(manifest, "", "  "); err != nil {
 		return err
 	}
 	raw, err := EncodeBlob(data, nil, true)

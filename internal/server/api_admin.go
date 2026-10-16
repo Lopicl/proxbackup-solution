@@ -691,6 +691,12 @@ func (s *Server) handleSaveJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	if j.Encrypt {
+		if err := s.ensureClientKey(ctx, c); err != nil {
+			httpError(w, 500, fmt.Errorf("create encryption key: %w", err))
+			return
+		}
+	}
 	if err := s.store.SaveJob(ctx, &j); err != nil {
 		httpError(w, 500, err)
 		return

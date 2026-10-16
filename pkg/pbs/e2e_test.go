@@ -251,6 +251,122 @@ func TestE2EBackupRestore(t *testing.T) {
 	}
 }
 
+// TestE2EEncrypted writes client-side encrypted snapshots (signed manifest)
+// and reads them back; PBS must verify them.
+func TestE2EEncrypted(t *testing.T) {
+	c, store := e2eClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	ns := "proxbackup-e2e"
+	if err := c.EnsureNamespace(ctx, store, ns); err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("e2e-enc-%d", time.Now().UnixNano()%1e6)
+	var key [32]byte
+	copy(key[:], rnd(32, 99))
+	crypt, err := pbs.NewCryptConfig(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	image := append(rnd(5<<20, 4), make([]byte, 3<<20)...)
+	t0 := time.Now().Unix()
+	run := func(variant int, at int64) pbs.Stats {
+		b, err := c.StartBackup(ctx, pbs.SnapshotRef{Store: store, NS: ns, Type: "host", ID: id, Time: at}, pbs.BackupOptions{Crypt: crypt, Compress: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer b.Close()
+		for _, a := range []string{"root.pxar.didx", "disk.img.fidx"} {
+			if _, err := b.LoadPreviousIndex(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+		}
+		aw, err := b.NewDynamicArchive(ctx, "root.pxar.didx")
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTree(t, aw, variant)
+		st, err := aw.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fw, err := b.NewFixedArchive(ctx, "disk.img.fidx", uint64(len(image)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fw.Write(image)
+		if _, err := fw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.UploadBlob(ctx, "client.log.blob", []byte("secret log\n"), true); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Finish(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	run(1, t0)
+	if st := run(2, t0+1); st.ReusedChunks == 0 {
+		t.Fatalf("encrypted incremental backup reused nothing: %+v", st)
+	}
+
+	ref := pbs.SnapshotRef{Store: store, NS: ns, Type: "host", ID: id, Time: t0 + 1}
+	r, err := c.StartReader(ctx, ref, crypt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	m, err := r.Manifest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Encrypted() || m.KeyFingerprint() != crypt.Fingerprint() || m.Signature == nil {
+		t.Fatalf("manifest not signed/encrypted: %+v", m)
+	}
+	for _, f := range m.Files {
+		if f.CryptMode != "encrypt" {
+			t.Errorf("%s: crypt-mode %s", f.Filename, f.CryptMode)
+		}
+		if f.Filename == "root.pxar.didx" {
+			idx, err := r.Index(ctx, f.Filename, &f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want bytes.Buffer
+			writeTree(t, &want, 2)
+			got, err := io.ReadAll(r.OpenIndex(ctx, idx, 4))
+			if err != nil || !bytes.Equal(got, want.Bytes()) {
+				t.Fatalf("restored pxar differs: %v", err)
+			}
+		}
+	}
+	if log, err := r.Blob(ctx, "client.log.blob"); err != nil || string(log) != "secret log\n" {
+		t.Fatalf("log blob: %q %v", log, err)
+	}
+
+	var other [32]byte
+	copy(other[:], rnd(32, 98))
+	wrong, _ := pbs.NewCryptConfig(other)
+	r2, err := c.StartReader(ctx, ref, wrong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	if _, err := r2.Manifest(ctx); err == nil || !strings.Contains(err.Error(), "wrong key") {
+		t.Fatalf("wrong key accepted: %v", err)
+	}
+
+	var upid string
+	if err := c.Call(ctx, http.MethodPost, "admin/datastore/"+store+"/verify",
+		map[string]any{"ns": ns, "backup-type": "host", "backup-id": id}, &upid); err != nil {
+		t.Fatal(err)
+	}
+	if status := waitTask(ctx, t, c, upid); status != "OK" {
+		t.Fatalf("verify task: %s", status)
+	}
+}
+
 func waitTask(ctx context.Context, t *testing.T, c *pbs.Client, upid string) string {
 	for {
 		var st struct {

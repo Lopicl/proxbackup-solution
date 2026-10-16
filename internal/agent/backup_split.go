@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"os"
 
 	"proxbackup/pkg/pbs"
@@ -38,14 +39,20 @@ func (j *job) openPrevious(ctx context.Context, c *pbs.Client, sess *pbs.BackupS
 		}
 		return nil, err
 	}
-	r, err := c.StartReader(ctx, j.snapshotRef(t), nil)
+	r, err := c.StartReader(ctx, j.snapshotRef(t), j.crypt)
 	if err != nil {
 		return nil, err
 	}
 	m, err := r.Manifest(ctx)
-	if err != nil {
+	if err != nil && !errors.Is(err, pbs.ErrWrongKey) {
 		r.Close()
 		return nil, err
+	}
+	if err != nil || !j.sameCrypt(m) {
+		// Chunks of a snapshot with another key (or none) can't be reused.
+		r.Close()
+		j.logf("info", "encryption changed since %s, reading every file", j.snapshotRef(t))
+		return nil, nil
 	}
 	p := &prevSnapshot{r: r, files: map[string]pbs.FileInfo{}}
 	for _, f := range m.Files {

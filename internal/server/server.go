@@ -162,6 +162,7 @@ func (s *Server) uiRoutes() http.Handler {
 	admin.HandleFunc("POST /api/clients/{id}/agent-update", s.handlePushAgentUpdate)
 	admin.HandleFunc("GET /api/clients/{id}/snapshots", s.handleSnapshots)
 	admin.HandleFunc("POST /api/clients/{id}/restore", s.handleRestore)
+	admin.HandleFunc("GET /api/clients/{id}/encryption-key", s.handleClientKey)
 	admin.HandleFunc("POST /api/password", s.handleChangePassword)
 	admin.HandleFunc("GET /api/enrollments", s.handleEnrollments)
 	admin.HandleFunc("POST /api/enrollments", s.handleCreateEnrollment)
@@ -186,6 +187,8 @@ func (s *Server) uiRoutes() http.Handler {
 	admin.HandleFunc("POST /api/settings/notifications/test", s.handleTestNotify)
 	admin.HandleFunc("GET /api/settings/updates", s.handleGetUpdates)
 	admin.HandleFunc("PUT /api/settings/updates", s.handleSaveUpdates)
+	admin.HandleFunc("GET /api/settings/encryption", s.handleGetEncryption)
+	admin.HandleFunc("PUT /api/settings/encryption", s.handleSaveEncryption)
 	admin.HandleFunc("POST /api/updates/check", s.handleCheckUpdates)
 	admin.HandleFunc("POST /api/updates/install", s.handleInstallUpdate)
 	admin.HandleFunc("GET /api/ca.pem", func(w http.ResponseWriter, r *http.Request) {

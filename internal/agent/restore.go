@@ -39,13 +39,16 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 		_, payload = splitNames(label)
 	}
 	j.archive.Store(archive)
-	r, err := c.StartReader(ctx, ref, nil)
+	r, err := c.StartReader(ctx, ref, j.crypt)
 	if err != nil {
 		return res, fmt.Errorf("open snapshot %s: %w", ref, err)
 	}
 	defer r.Close()
 	m, err := r.Manifest(ctx)
 	if err != nil {
+		return res, err
+	}
+	if err := j.checkRestoreKey(m, ref); err != nil {
 		return res, err
 	}
 	open := func(name string) (*pbs.Index, error) {

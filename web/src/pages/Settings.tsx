@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useEffect, useState } from 'react'
-import { api, type NotifySettings } from '../api'
+import { api, type EncryptionSettings, type NotifySettings } from '../api'
 import { Card, ErrorBox, Field } from '../ui'
 import { UpdatesCard } from './Updates'
 
@@ -97,6 +97,7 @@ export function Settings() {
           </div>
         </form>
       </Card>
+      <EncryptionCard />
       <UpdatesCard />
       <Card title="Server certificate authority">
         <p className="muted-text">
@@ -108,5 +109,66 @@ export function Settings() {
         </a>
       </Card>
     </>
+  )
+}
+
+function EncryptionCard() {
+  const [s, setS] = useState<EncryptionSettings | null>(null)
+  const [error, setError] = useState('')
+  const [msg, setMsg] = useState('')
+  useEffect(() => {
+    api.encryptionSettings().then(setS, (e: Error) => setError(e.message))
+  }, [])
+  if (!s) return <ErrorBox error={error} />
+  return (
+    <Card title="Client-side encryption">
+      <p className="muted-text">
+        Jobs with encryption on are encrypted on the PC with a key of its own, created with the client's first encrypted job. This console keeps every key
+        (sealed with its master key), sends it to the agent and uses it for restores, so a lost PC's backups stay restorable. Download a client's key on its page
+        to restore with <code>proxmox-backup-client --keyfile</code>.
+      </p>
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault()
+          setError('')
+          setMsg('')
+          try {
+            setS(await api.saveEncryptionSettings(s))
+            setMsg('Saved. Agents get the change with their next connection.')
+          } catch (err) {
+            setError((err as Error).message)
+          }
+        }}
+      >
+        <Field
+          label="RSA master public key (optional)"
+          hint={
+            <>
+              With a master key, every encrypted snapshot also holds its key encrypted with it (<code>rsa-encrypted.key.blob</code>), recoverable without this
+              console: <code>proxmox-backup-client key import-with-master-key</code>. Create one with <code>proxmox-backup-client key create-master-key</code>{' '}
+              and paste <code>master-public.pem</code>; keep the private key offline.
+            </>
+          }
+        >
+          <textarea
+            rows={4}
+            value={s.master_pubkey}
+            onChange={(e) => setS({ ...s, master_pubkey: e.target.value })}
+            placeholder="-----BEGIN PUBLIC KEY-----"
+            spellCheck={false}
+          />
+        </Field>
+        {s.master_fingerprint && (
+          <p className="muted-text small">
+            RSA {s.master_bits} bits, SHA-256 <code>{s.master_fingerprint}</code>
+          </p>
+        )}
+        {msg && <div className="notice">{msg}</div>}
+        <ErrorBox error={error} />
+        <div className="buttons">
+          <button className="primary">Save</button>
+        </div>
+      </form>
+    </Card>
   )
 }

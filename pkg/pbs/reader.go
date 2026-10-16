@@ -47,7 +47,8 @@ func (r *ReaderSession) DownloadRaw(ctx context.Context, name string) ([]byte, e
 	return r.sess.download(ctx, "download", map[string]any{"file-name": name})
 }
 
-// Manifest downloads and decodes index.json.blob.
+// Manifest downloads and decodes index.json.blob. With a crypt config, the
+// signature of an encrypted snapshot's manifest is verified.
 func (r *ReaderSession) Manifest(ctx context.Context) (*Manifest, error) {
 	raw, err := r.DownloadRaw(ctx, "index.json.blob")
 	if err != nil {
@@ -59,6 +60,9 @@ func (r *ReaderSession) Manifest(ctx context.Context) (*Manifest, error) {
 	}
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	if err := verifyManifest(data, &m, r.crypt); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -102,7 +106,12 @@ func (r *ReaderSession) Chunk(ctx context.Context, digest [32]byte) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	if r.crypt.ComputeDigest(data) != digest {
+	// Unencrypted chunks are addressed by plain sha256, even with a key loaded.
+	crypt := r.crypt
+	if !BlobIsEncrypted(raw) {
+		crypt = nil
+	}
+	if crypt.ComputeDigest(data) != digest {
 		return nil, errors.New("pbs: chunk digest mismatch")
 	}
 	return data, nil

@@ -92,6 +92,12 @@ func (s *Store) migrate() error {
 		{"enrollments", "command_enc", "BLOB"},
 		// Existing file jobs move to pxar v2 too; their first run reads everything.
 		{"jobs", "change_detection", "TEXT NOT NULL DEFAULT 'metadata'"},
+		// Client-side encryption: the client key, sealed with the master key.
+		// It is kept when the client is revoked (escrow for recovery).
+		{"clients", "crypt_key_enc", "BLOB"},
+		{"clients", "crypt_fingerprint", "TEXT NOT NULL DEFAULT ''"},
+		{"clients", "crypt_created", "INTEGER NOT NULL DEFAULT 0"},
+		{"jobs", "encrypt", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		var n int
@@ -162,8 +168,12 @@ type Client struct {
 	// AgentUpdatePushed whether an admin pushed it and the agent hasn't fetched it yet.
 	AgentUpdate       string `json:"agent_update,omitempty"`
 	AgentUpdatePushed bool   `json:"agent_update_pushed"`
+	// The client's encryption key ("" = none yet; created with the first encrypted job).
+	EncryptionFingerprint string `json:"encryption_fingerprint"`
+	EncryptionCreated     int64  `json:"encryption_created"`
 
 	tokenSecretEnc []byte
+	cryptKeyEnc    []byte
 }
 
 type Job struct {
@@ -184,6 +194,8 @@ type Job struct {
 	CreatedAt     int64           `json:"created_at"`
 	// File jobs: metadata, data or legacy (see api.JobSpec.ChangeDetection).
 	ChangeDetection string `json:"change_detection"`
+	// Encrypt client-side with the client key.
+	Encrypt bool `json:"encrypt"`
 	// Reported by the agent (it owns the schedule).
 	NextRun        int64 `json:"next_run,omitempty"`
 	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
@@ -363,13 +375,14 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 // ---- clients ----
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
-	config_rev, schedule_state, time_zone`
+	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
 	var sched string
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
-		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone)
+		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
+		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -425,6 +438,18 @@ func (s *Store) TouchClient(ctx context.Context, id int64, req api.PollRequest) 
 	sched, _ := json.Marshal(nonNilStates(req.Schedule))
 	s.db.ExecContext(ctx, `UPDATE clients SET last_seen=?, hostname=?, os=?, agent_version=?, config_rev=?, schedule_state=?, time_zone=?
 		WHERE id=?`, now(), req.Hostname, req.OS, req.AgentVersion, req.ConfigRev, sched, req.TimeZone, id)
+}
+
+// SetClientKey stores a new encryption key for a client that has none. It
+// returns false if the client got a key meanwhile.
+func (s *Store) SetClientKey(ctx context.Context, id int64, keyEnc []byte, fingerprint string, created int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE clients SET crypt_key_enc=?, crypt_fingerprint=?, crypt_created=? WHERE id=? AND crypt_key_enc IS NULL`,
+		keyEnc, fingerprint, created, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
 }
 
 func nonNilStates(s []api.JobState) []api.JobState {
@@ -603,13 +628,13 @@ func (s *Store) DeleteSetupToken(ctx context.Context, id int64) error {
 
 // ---- jobs ----
 
-const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at, window_minutes, catch_up, change_detection`
+const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at, window_minutes, catch_up, change_detection, encrypt`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	j := &Job{}
 	var src, exc, vol, ret string
 	err := sc.Scan(&j.ID, &j.ClientID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &vol, &j.UseVSS, &j.Schedule, &ret, &j.Enabled, &j.CreatedAt,
-		&j.WindowMinutes, &j.CatchUp, &j.ChangeDetection)
+		&j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -655,9 +680,9 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	if j.ID == 0 {
 		j.CreatedAt = now()
 		res, err := s.db.ExecContext(ctx, `INSERT INTO jobs(client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention,
-			enabled, created_at, window_minutes, catch_up, change_detection) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			enabled, created_at, window_minutes, catch_up, change_detection, encrypt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.CreatedAt, j.WindowMinutes, j.CatchUp,
-			j.ChangeDetection)
+			j.ChangeDetection, j.Encrypt)
 		if err != nil {
 			return err
 		}
@@ -665,8 +690,8 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?, schedule=?,
-		retention=?, enabled=?, window_minutes=?, catch_up=?, change_detection=? WHERE id=?`,
-		j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.WindowMinutes, j.CatchUp, j.ChangeDetection, j.ID)
+		retention=?, enabled=?, window_minutes=?, catch_up=?, change_detection=?, encrypt=? WHERE id=?`,
+		j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.WindowMinutes, j.CatchUp, j.ChangeDetection, j.Encrypt, j.ID)
 	return err
 }
 

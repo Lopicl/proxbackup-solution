@@ -241,6 +241,8 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 	archive := fs.String("archive", "", "restore: archive name, e.g. c-users.mpxar.didx or c-users.pxar.didx")
 	target := fs.String("target", "", "restore: target directory")
 	overwrite := fs.String("overwrite", "skip", "restore: skip | overwrite | if-newer")
+	keyFile := fs.String("keyfile", "", "PBS key file (kdf none, e.g. downloaded from the console): backups are encrypted with it, restores decrypt with it")
+	masterPub := fs.String("master-pubkey", "", "backup with -keyfile: RSA master public key (PEM); the key is stored in the snapshot encrypted with it")
 	fs.Var(&sources, "source", "backup: path to back up (repeatable); image: volume, e.g. C:")
 	fs.Var(&excludes, "exclude", "backup: exclude pattern (repeatable)")
 	fs.Var(&paths, "path", "restore: only restore this archive path (repeatable)")
@@ -270,6 +272,23 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 		BackupID: *id,
 		UseVSS:   *vssFlag,
 		Excludes: excludes,
+	}
+	if *keyFile != "" {
+		b, err := os.ReadFile(*keyFile)
+		if err != nil {
+			return err
+		}
+		if spec.Crypt, err = agent.KeyFromFile(b); err != nil {
+			return err
+		}
+		spec.Encrypt = true
+		if *masterPub != "" {
+			pem, err := os.ReadFile(*masterPub)
+			if err != nil {
+				return err
+			}
+			spec.Crypt.MasterPubKey = string(pem)
+		}
 	}
 	switch cmd {
 	case "backup":
