@@ -232,7 +232,8 @@ func (s *Server) wakeChan(id int64) <-chan struct{} {
 	return ch
 }
 
-// housekeeping marks lost runs, trims history and checks for stale clients.
+// housekeeping marks lost runs, trims history, checks for stale clients and
+// releases expired snapshot locks.
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
@@ -255,6 +256,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 			lastDaily = time.Now()
 			s.store.PruneHistory(ctx, 180*24*time.Hour)
 			s.notify.CheckStale(ctx)
+			s.releaseLocks(ctx)
 		}
 	}
 }

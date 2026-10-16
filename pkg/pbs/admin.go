@@ -55,6 +55,16 @@ func (c *Client) ListSnapshots(ctx context.Context, store, ns, btype, id string)
 	return out, err
 }
 
+// SetProtected sets or clears the protected flag of a snapshot. PBS refuses to
+// prune or forget protected snapshots.
+func (c *Client) SetProtected(ctx context.Context, store, ns, btype, id string, backupTime int64, protected bool) error {
+	params := map[string]any{"backup-type": btype, "backup-id": id, "backup-time": backupTime, "protected": protected}
+	if ns != "" {
+		params["ns"] = ns
+	}
+	return c.Call(ctx, http.MethodPut, "admin/datastore/"+url.PathEscape(store)+"/protected", params, nil)
+}
+
 // KeepOptions is a PBS retention policy. Zero values are omitted.
 type KeepOptions struct {
 	Last    int `json:"keep-last,omitempty"`

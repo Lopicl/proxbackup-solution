@@ -103,6 +103,7 @@ export interface Job {
   window_minutes: number
   catch_up: boolean
   retention: Keep
+  lock_days: number // snapshots stay protected on PBS this long (0 = off)
   enabled: boolean
   next_run?: number
   catch_up_pending?: boolean

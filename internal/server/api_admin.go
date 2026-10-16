@@ -687,6 +687,9 @@ func (s *Server) handleSaveJob(w http.ResponseWriter, r *http.Request) {
 	if err == nil && j.WindowMinutes > 7*24*60 {
 		err = errors.New("start window must be at most 7 days")
 	}
+	if err == nil && (j.LockDays < 0 || j.LockDays > maxLockDays) {
+		err = fmt.Errorf("lock period must be between 0 and %d days", maxLockDays)
+	}
 	if err != nil {
 		httpError(w, 400, err)
 		return

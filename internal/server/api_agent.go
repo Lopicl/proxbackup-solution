@@ -391,50 +391,79 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, c *Client)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// afterRun applies retention and sends notifications.
+// afterRun locks the new snapshot, applies retention and sends notifications.
 func (s *Server) afterRun(ctx context.Context, runID int64) {
 	run, err := s.store.Run(ctx, runID)
 	if err != nil {
 		return
 	}
 	if (run.State == api.RunSuccess || run.State == api.RunWarning) && run.JobID > 0 && run.Kind != api.KindRestore {
-		if err := s.applyRetention(ctx, run); err != nil {
-			s.log.Error("retention failed", "run", runID, "err", err)
-			s.store.AddLogs(ctx, runID, []LogLine{{Time: now(), Level: "error", Msg: "server: prune failed: " + err.Error()}})
-		}
+		s.afterBackup(ctx, run)
 	}
 	s.notify.RunFinished(ctx, run)
 }
 
-func (s *Server) applyRetention(ctx context.Context, run *Run) error {
+// afterBackup protects the new snapshot for the job's lock period, then prunes
+// the group. Protected snapshots are always kept by PBS prune (and don't count
+// towards the keep-* buckets), so locking first keeps the new one safe.
+func (s *Server) afterBackup(ctx context.Context, run *Run) {
 	j, err := s.store.Job(ctx, run.JobID)
-	if err != nil || j.Retention.IsZero() {
-		return nil
+	if err != nil || (j.LockDays <= 0 && j.Retention.IsZero()) {
+		return
+	}
+	logErr := func(what string, err error) {
+		s.log.Error(what+" failed", "run", run.ID, "err", err)
+		s.store.AddLogs(ctx, run.ID, []LogLine{{Time: now(), Level: "error", Msg: "server: " + what + " failed: " + err.Error()}})
 	}
 	c, err := s.store.Client(ctx, run.ClientID)
 	if err != nil {
-		return err
+		logErr("retention", err)
+		return
 	}
 	t, err := s.store.Target(ctx, c.TargetID)
 	if err != nil {
-		return err
+		logErr("retention", err)
+		return
 	}
 	pc, err := s.adminClient(t)
 	if err != nil {
-		return err
+		logErr("retention", err)
+		return
 	}
+	if j.LockDays > 0 && run.Result.BackupTime > 0 {
+		if err := s.lockSnapshot(ctx, pc, t, c, j, run.Result.BackupTime); err != nil {
+			logErr("lock", err)
+		} else {
+			s.store.AddLogs(ctx, run.ID, []LogLine{{Time: now(), Level: "info",
+				Msg: fmt.Sprintf("server: snapshot protected for %d day(s)", j.LockDays)}})
+		}
+	}
+	if !j.Retention.IsZero() {
+		if err := s.applyRetention(ctx, pc, t, c, j, run.ID); err != nil {
+			logErr("prune", err)
+		}
+	}
+}
+
+func (s *Server) applyRetention(ctx context.Context, pc *pbs.Client, t *Target, c *Client, j *Job, runID int64) error {
 	res, err := pc.PruneGroup(ctx, t.Datastore, c.Namespace, "host", j.BackupID, j.Retention, false)
 	if err != nil {
 		return err
 	}
-	removed := 0
+	removed, protected := 0, 0
 	for _, p := range res {
-		if !p.Keep {
+		switch {
+		case p.Protected:
+			protected++
+		case !p.Keep:
 			removed++
 		}
 	}
-	s.store.AddLogs(ctx, run.ID, []LogLine{{Time: now(), Level: "info",
-		Msg: fmt.Sprintf("server: retention applied, %d snapshot(s) kept, %d pruned", len(res)-removed, removed)}})
+	msg := fmt.Sprintf("server: retention applied, %d snapshot(s) kept, %d pruned", len(res)-removed, removed)
+	if protected > 0 {
+		msg += fmt.Sprintf(" (%d kept as protected)", protected)
+	}
+	s.store.AddLogs(ctx, runID, []LogLine{{Time: now(), Level: "info", Msg: msg}})
 	return nil
 }
 

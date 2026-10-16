@@ -152,6 +152,11 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
                       <b>{j.name}</b>
                       {!j.enabled && <span className="tag">disabled</span>}
                       {j.encrypt && <span className="tag">encrypted</span>}
+                      {j.lock_days > 0 && (
+                        <span className="tag" title={`New snapshots are protected on PBS for ${j.lock_days} day(s)`}>
+                          locked {j.lock_days}d
+                        </span>
+                      )}
                     </td>
                     <td>{j.kind === 'files' ? 'Files' : 'Volume image'}</td>
                     <td className="ellipsis" title={(j.kind === 'files' ? j.sources : j.volumes).join(', ')}>
@@ -229,6 +234,7 @@ function newJob(clientId: number, name: string): Partial<Job> {
     window_minutes: 60,
     catch_up: true,
     retention: { 'keep-last': 3, 'keep-daily': 14, 'keep-weekly': 8, 'keep-monthly': 12 },
+    lock_days: 14,
     enabled: true,
   }
 }
@@ -335,7 +341,10 @@ function JobEditor({ job, onClose }: { job: Partial<Job>; onClose: () => void })
             </Field>
           </div>
         )}
-        <Field label="Retention" hint="Applied by the server after each successful run (PBS prune). All zero keeps everything.">
+        <Field
+          label="Retention"
+          hint="Applied by the server after each successful run (PBS prune). All zero keeps everything. Snapshots inside the lock period are always kept, on top of these counts."
+        >
           <div className="keep">
             {keepKeys.map((k) => (
               <label key={k}>
@@ -349,6 +358,12 @@ function JobEditor({ job, onClose }: { job: Partial<Job>; onClose: () => void })
               </label>
             ))}
           </div>
+        </Field>
+        <Field
+          label="Lock period (days)"
+          hint="Each new snapshot is marked protected on PBS and released after this many days: until then nothing can prune or delete it, not even this PC or an operator by mistake. 0 = off."
+        >
+          <input type="number" min={0} max={3650} value={j.lock_days ?? 0} onChange={(e) => set({ lock_days: Number(e.target.value) || 0 })} />
         </Field>
         <div className="checks">
           {j.kind === 'files' && (

@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS run_logs (
   id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, ts INTEGER NOT NULL, level TEXT NOT NULL, msg TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS run_logs_run ON run_logs(run_id, id);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS snapshot_locks (
+  id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, target_id INTEGER NOT NULL, namespace TEXT NOT NULL,
+  backup_type TEXT NOT NULL, backup_id TEXT NOT NULL, backup_time INTEGER NOT NULL, lock_days INTEGER NOT NULL,
+  UNIQUE(target_id, namespace, backup_type, backup_id, backup_time));
 `
 
 // Store wraps the SQLite database.
@@ -98,6 +102,8 @@ func (s *Store) migrate() error {
 		{"clients", "crypt_fingerprint", "TEXT NOT NULL DEFAULT ''"},
 		{"clients", "crypt_created", "INTEGER NOT NULL DEFAULT 0"},
 		{"jobs", "encrypt", "INTEGER NOT NULL DEFAULT 0"},
+		// Immutable backups: days a new snapshot stays protected (0 = off).
+		{"jobs", "lock_days", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		var n int
@@ -196,6 +202,8 @@ type Job struct {
 	ChangeDetection string `json:"change_detection"`
 	// Encrypt client-side with the client key.
 	Encrypt bool `json:"encrypt"`
+	// LockDays keeps each new snapshot protected on PBS for that many days (0 = off).
+	LockDays int `json:"lock_days"`
 	// Reported by the agent (it owns the schedule).
 	NextRun        int64 `json:"next_run,omitempty"`
 	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
@@ -628,13 +636,13 @@ func (s *Store) DeleteSetupToken(ctx context.Context, id int64) error {
 
 // ---- jobs ----
 
-const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at, window_minutes, catch_up, change_detection, encrypt`
+const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at, window_minutes, catch_up, change_detection, encrypt, lock_days`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	j := &Job{}
 	var src, exc, vol, ret string
 	err := sc.Scan(&j.ID, &j.ClientID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &vol, &j.UseVSS, &j.Schedule, &ret, &j.Enabled, &j.CreatedAt,
-		&j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt)
+		&j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.LockDays)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -680,9 +688,9 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 	if j.ID == 0 {
 		j.CreatedAt = now()
 		res, err := s.db.ExecContext(ctx, `INSERT INTO jobs(client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention,
-			enabled, created_at, window_minutes, catch_up, change_detection, encrypt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			enabled, created_at, window_minutes, catch_up, change_detection, encrypt, lock_days) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.CreatedAt, j.WindowMinutes, j.CatchUp,
-			j.ChangeDetection, j.Encrypt)
+			j.ChangeDetection, j.Encrypt, j.LockDays)
 		if err != nil {
 			return err
 		}
@@ -690,8 +698,9 @@ func (s *Store) SaveJob(ctx context.Context, j *Job) error {
 		return nil
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?, schedule=?,
-		retention=?, enabled=?, window_minutes=?, catch_up=?, change_detection=?, encrypt=? WHERE id=?`,
-		j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.WindowMinutes, j.CatchUp, j.ChangeDetection, j.Encrypt, j.ID)
+		retention=?, enabled=?, window_minutes=?, catch_up=?, change_detection=?, encrypt=?, lock_days=? WHERE id=?`,
+		j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.WindowMinutes, j.CatchUp, j.ChangeDetection, j.Encrypt,
+		j.LockDays, j.ID)
 	return err
 }
 
@@ -979,6 +988,52 @@ func (s *Store) PruneHistory(ctx context.Context, keep time.Duration) {
 	cut := time.Now().Add(-keep).Unix()
 	s.db.ExecContext(ctx, `DELETE FROM run_logs WHERE run_id IN (SELECT id FROM runs WHERE finished_at>0 AND finished_at<?)`, cut)
 	s.db.ExecContext(ctx, `DELETE FROM runs WHERE finished_at>0 AND finished_at<?`, cut)
+}
+
+// ---- snapshot locks ----
+
+// SnapshotLock is a snapshot the console protected on PBS (immutable backups).
+// Only these are unprotected again, never snapshots an operator protected.
+type SnapshotLock struct {
+	ID         int64
+	JobID      int64
+	TargetID   int64
+	Namespace  string
+	BackupType string
+	BackupID   string
+	BackupTime int64
+	// LockDays at protection time; used when the job has been deleted.
+	LockDays int
+}
+
+func (s *Store) AddSnapshotLock(ctx context.Context, l SnapshotLock) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO snapshot_locks(job_id, target_id, namespace, backup_type, backup_id, backup_time, lock_days)
+		VALUES(?,?,?,?,?,?,?) ON CONFLICT DO UPDATE SET job_id=excluded.job_id, lock_days=excluded.lock_days`,
+		l.JobID, l.TargetID, l.Namespace, l.BackupType, l.BackupID, l.BackupTime, l.LockDays)
+	return err
+}
+
+func (s *Store) SnapshotLocks(ctx context.Context) ([]SnapshotLock, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, target_id, namespace, backup_type, backup_id, backup_time, lock_days
+		FROM snapshot_locks ORDER BY backup_time`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SnapshotLock
+	for rows.Next() {
+		var l SnapshotLock
+		if err := rows.Scan(&l.ID, &l.JobID, &l.TargetID, &l.Namespace, &l.BackupType, &l.BackupID, &l.BackupTime, &l.LockDays); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteSnapshotLock(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM snapshot_locks WHERE id=?`, id)
+	return err
 }
 
 // ---- settings ----

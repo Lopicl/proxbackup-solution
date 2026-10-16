@@ -403,8 +403,13 @@ sequenceDiagram
   encryption on or off makes the next run read and upload everything (chunks of differently
   keyed snapshots are never reused, the agent checks the previous manifest's key fingerprint).
 * **Immutable backups (phase 2):** PBS has no WORM mode, so immutability is layered:
-  * *Lock window:* the console marks every new snapshot `protected` and unprotects it after a
-    per-job lock period (e.g. 14 days). PBS refuses to prune or forget protected snapshots,
+  * *Lock window (implemented):* jobs have a lock period in days (default 14 for new jobs,
+    0 = off). After each successful run the console marks the new snapshot `protected`
+    (`PUT admin/datastore/{store}/protected`), before pruning, and records it in
+    `snapshot_locks`. A daily housekeeping pass unprotects recorded snapshots older than the
+    job's *current* lock period (so shortening it releases older ones; deleted jobs use the
+    period recorded at lock time). Snapshots protected by hand are never touched. PBS refuses
+    to prune or forget protected snapshots, and prune keeps them *on top of* the keep-* counts,
     which also guards against operator mistakes.
   * *Tamper-resistant retention:* today the console prunes after every reported run, so a
     compromised PC that floods the group with junk backups can push the good snapshots out

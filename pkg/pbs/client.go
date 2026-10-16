@@ -129,14 +129,16 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("pbs: HTTP %d: %s", e.Status, strings.TrimSpace(e.Message))
 }
 
-// IsNotFound reports whether err is a 404 (or the "no valid previous backup" 400 PBS uses).
+// IsNotFound reports whether err is a 404, or one of the 400s PBS uses for
+// missing things ("no valid previous backup", "snapshot ... does not exist!").
 func IsNotFound(err error) bool {
 	var ae *APIError
 	if !errors.As(err, &ae) {
 		return false
 	}
 	return ae.Status == http.StatusNotFound ||
-		(ae.Status == http.StatusBadRequest && strings.Contains(ae.Message, "no valid previous backup"))
+		(ae.Status == http.StatusBadRequest &&
+			(strings.Contains(ae.Message, "no valid previous backup") || strings.Contains(ae.Message, "does not exist")))
 }
 
 func decodeAPIResponse(resp *http.Response, out any) error {

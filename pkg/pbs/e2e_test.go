@@ -593,3 +593,70 @@ func TestE2ESplitArchiveReuse(t *testing.T) {
 		t.Fatalf("verify task: %s", status)
 	}
 }
+
+// TestE2EProtected checks the lock window primitives: a protected snapshot
+// survives prune (and doesn't count towards keep-last), and unprotecting a
+// missing snapshot reports not found.
+func TestE2EProtected(t *testing.T) {
+	c, store := e2eClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	ns := "proxbackup-e2e"
+	if err := c.EnsureNamespace(ctx, store, ns); err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf("e2e-lock-%d", time.Now().UnixNano()%1e6)
+	t0 := time.Now().Unix()
+	for i := range int64(3) {
+		b, err := c.StartBackup(ctx, pbs.SnapshotRef{Store: store, NS: ns, Type: "host", ID: id, Time: t0 + i}, pbs.BackupOptions{Compress: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.UploadBlob(ctx, "client.log.blob", []byte("lock test\n"), false); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Finish(ctx); err != nil {
+			t.Fatal(err)
+		}
+		b.Close()
+	}
+	// Protect the oldest; keep-last 1 then keeps it plus the newest.
+	if err := c.SetProtected(ctx, store, ns, "host", id, t0, true); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.PruneGroup(ctx, store, ns, "host", id, pbs.KeepOptions{Last: 1}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := map[int64]bool{}
+	for _, p := range res {
+		if p.Keep {
+			kept[p.BackupTime] = true
+		}
+		if p.BackupTime == t0 && (!p.Protected || !p.Keep) {
+			t.Fatalf("protected snapshot not kept: %+v", p)
+		}
+	}
+	if len(kept) != 2 || !kept[t0] || !kept[t0+2] {
+		t.Fatalf("prune result %+v", res)
+	}
+	snaps, err := c.ListSnapshots(ctx, store, ns, "host", id)
+	if err != nil || len(snaps) != 2 {
+		t.Fatalf("snapshots after prune: %+v, %v", snaps, err)
+	}
+	if err := c.SetProtected(ctx, store, ns, "host", id, t0, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetProtected(ctx, store, ns, "host", id, t0+1, false); !pbs.IsNotFound(err) {
+		t.Fatalf("unprotect of a pruned snapshot: %v (want not found)", err)
+	}
+	if res, err = c.PruneGroup(ctx, store, ns, "host", id, pbs.KeepOptions{Last: 1}, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range res {
+		if p.BackupTime == t0 && p.Keep {
+			t.Fatalf("unprotected snapshot still kept: %+v", p)
+		}
+	}
+	c.Call(ctx, http.MethodDelete, "admin/datastore/"+store+"/groups", map[string]any{"ns": ns, "backup-type": "host", "backup-id": id}, nil)
+}
