@@ -510,22 +510,41 @@ function RestoreDialog({
           }
         }}
       >
-        <Field label="Restore to folder on the PC" hint={isImage ? 'The volume image is written as a .img file into this folder.' : 'Use the original location to roll back files in place.'}>
+        <Field
+          label="Restore to folder on the PC"
+          hint={
+            isImage
+              ? 'Selected files keep their folder structure here. Without paths, the whole volume image is written as a .img file.'
+              : 'Use the original location to roll back files in place.'
+          }
+        >
           <input value={target} onChange={(e) => setTarget(e.target.value)} required />
         </Field>
-        {!isImage && (
-          <>
-            <Field label="Only these paths (optional)" hint={<>Archive-relative, one per line, e.g. <code>alice/Documents</code>. Empty restores everything.</>}>
-              <textarea rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} />
-            </Field>
-            <Field label="Existing files">
-              <select value={overwrite} onChange={(e) => setOverwrite(e.target.value as typeof overwrite)}>
-                <option value="skip">Keep existing files</option>
-                <option value="if-newer">Replace if the backup is newer</option>
-                <option value="overwrite">Always replace</option>
-              </select>
-            </Field>
-          </>
+        <Field
+          label={isImage ? 'Files or folders from the volume (optional)' : 'Only these paths (optional)'}
+          hint={
+            isImage ? (
+              <>
+                Paths on the NTFS volume, one per line, e.g. <code>Users/alice/Documents</code>; <code>/</code> restores every file. Only the
+                selected files are downloaded. Empty restores the raw image.
+              </>
+            ) : (
+              <>
+                Archive-relative, one per line, e.g. <code>alice/Documents</code>. Empty restores everything.
+              </>
+            )
+          }
+        >
+          <textarea rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} />
+        </Field>
+        {(!isImage || paths.trim() !== '') && (
+          <Field label="Existing files">
+            <select value={overwrite} onChange={(e) => setOverwrite(e.target.value as typeof overwrite)}>
+              <option value="skip">Keep existing files</option>
+              <option value="if-newer">Replace if the backup is newer</option>
+              <option value="overwrite">Always replace</option>
+            </select>
+          </Field>
         )}
         <ErrorBox error={error} />
         <div className="buttons">

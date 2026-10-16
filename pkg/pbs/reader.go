@@ -191,3 +191,114 @@ func (ir *IndexReader) Close() error {
 	ir.once.Do(ir.cancel)
 	return nil
 }
+
+// IndexReaderAt gives random access to an archive's contents, for formats
+// that are read out of order (file systems inside volume images). It keeps
+// the most recently used chunks and reads a few chunks ahead of sequential
+// access. Safe for concurrent use.
+type IndexReaderAt struct {
+	ctx       context.Context
+	fetch     func(ctx context.Context, digest [32]byte) ([]byte, error)
+	idx       *Index
+	cacheSize int
+
+	mu    sync.Mutex
+	cache map[int]*chunkFuture
+	lru   []int // chunk numbers, least recently used first
+	last  int   // previously read chunk, to detect sequential access
+}
+
+// readAhead is how many chunks IndexReaderAt prefetches during sequential reads.
+const readAhead = 2
+
+// OpenIndexAt returns a random-access reader caching up to cacheChunks chunks.
+func (r *ReaderSession) OpenIndexAt(ctx context.Context, idx *Index, cacheChunks int) *IndexReaderAt {
+	return newIndexReaderAt(ctx, idx, cacheChunks, r.Chunk)
+}
+
+func newIndexReaderAt(ctx context.Context, idx *Index, cacheChunks int, fetch func(context.Context, [32]byte) ([]byte, error)) *IndexReaderAt {
+	return &IndexReaderAt{ctx: ctx, fetch: fetch, idx: idx, cacheSize: max(cacheChunks, readAhead+2), cache: map[int]*chunkFuture{}, last: -2}
+}
+
+// Size returns the archive size.
+func (ra *IndexReaderAt) Size() int64 { return int64(ra.idx.Size) }
+
+// ReadAt implements io.ReaderAt.
+func (ra *IndexReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("pbs: negative offset")
+	}
+	n := 0
+	for n < len(p) {
+		pos := uint64(off) + uint64(n)
+		if pos >= ra.idx.Size {
+			return n, io.EOF
+		}
+		i, err := ra.idx.Find(pos)
+		if err != nil {
+			return n, err
+		}
+		data, err := ra.chunk(i)
+		if err != nil {
+			return n, err
+		}
+		n += copy(p[n:], data[pos-ra.idx.Entries[i].Start:])
+	}
+	return n, nil
+}
+
+func (ra *IndexReaderAt) chunk(i int) ([]byte, error) {
+	ra.mu.Lock()
+	f := ra.start(i)
+	ra.touch(i) // before read-ahead, so it can't evict chunk i
+	if i == ra.last+1 {
+		for k := 1; k <= readAhead && i+k < len(ra.idx.Entries); k++ {
+			ra.start(i + k)
+		}
+	}
+	ra.last = i
+	ra.mu.Unlock()
+	<-f.done
+	if f.err != nil {
+		ra.mu.Lock()
+		if ra.cache[i] == f { // retry on the next read
+			delete(ra.cache, i)
+		}
+		ra.mu.Unlock()
+	}
+	return f.data, f.err
+}
+
+// start returns the cached or in-flight fetch of chunk i, starting one if needed.
+func (ra *IndexReaderAt) start(i int) *chunkFuture {
+	if f, ok := ra.cache[i]; ok {
+		return f
+	}
+	f := &chunkFuture{done: make(chan struct{})}
+	ra.cache[i] = f
+	ra.lru = append(ra.lru, i)
+	e := ra.idx.Entries[i]
+	go func() {
+		f.data, f.err = ra.fetch(ra.ctx, e.Digest)
+		if f.err == nil && uint64(len(f.data)) != e.End-e.Start {
+			f.err = fmt.Errorf("pbs: chunk size mismatch (%d != %d)", len(f.data), e.End-e.Start)
+		}
+		close(f.done)
+	}()
+	for len(ra.cache) > ra.cacheSize {
+		old := ra.lru[0]
+		ra.lru = ra.lru[1:]
+		delete(ra.cache, old)
+	}
+	return f
+}
+
+// touch marks chunk i as most recently used.
+func (ra *IndexReaderAt) touch(i int) {
+	for k, c := range ra.lru {
+		if c == i {
+			ra.lru = append(append(ra.lru[:k:k], ra.lru[k+1:]...), i)
+			return
+		}
+	}
+}

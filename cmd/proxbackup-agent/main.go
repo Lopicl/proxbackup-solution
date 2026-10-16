@@ -245,7 +245,7 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 	masterPub := fs.String("master-pubkey", "", "backup with -keyfile: RSA master public key (PEM); the key is stored in the snapshot encrypted with it")
 	fs.Var(&sources, "source", "backup: path to back up (repeatable); image: volume, e.g. C:")
 	fs.Var(&excludes, "exclude", "backup: exclude pattern (repeatable)")
-	fs.Var(&paths, "path", "restore: only restore this archive path (repeatable)")
+	fs.Var(&paths, "path", "restore: only restore this archive path (repeatable); for an .img.fidx archive, a file or folder on its NTFS volume (/ for all), restored without writing the whole image")
 	fs.Parse(args)
 
 	secret := os.Getenv("PROXBACKUP_SECRET")

@@ -168,14 +168,15 @@ server-driven scheduling.
 Known gaps (see the roadmap):
 
 - volume images are browsable in the PBS GUI file browser (via `catalog.pcat1.didx`), but single
-  files can't be downloaded from them there: PBS only extracts files from pxar archives. File
-  backups are browsable and downloadable.
+  files can't be downloaded from them there: PBS only extracts files from pxar archives. Restore
+  them from the console instead: the agent reads NTFS straight from the image and restores just
+  the selected files and folders (no ADS, junctions, EFS or CompactOS-compressed files).
 - encrypted snapshots can't be browsed or downloaded from in the PBS GUI (PBS never sees the
   key). Restore them from the console, or with `proxmox-backup-client --keyfile` and the key
   downloaded from the client's page
 - no NTFS ACLs or alternate data streams
 - no tray app
-- image restore writes a `.img` file. Bare-metal recovery of Windows and Linux machines via a
+- whole-volume image restore writes a `.img` file. Bare-metal recovery of Windows and Linux machines via a
   Linux-based rescue boot image is planned (roadmap phase 4). Macs will get data restore onto a
   fresh macOS install instead.
 - macOS/Linux agents are development builds only: no snapshots, no Unix owners/permissions/

@@ -4,9 +4,12 @@ package pbs
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"io"
 	"math/rand/v2"
+	"sync/atomic"
 	"testing"
 )
 
@@ -200,5 +203,46 @@ func TestArchiveNames(t *testing.T) {
 		if ValidArchiveName(bad) {
 			t.Errorf("%s should be invalid", bad)
 		}
+	}
+}
+
+func TestIndexReaderAt(t *testing.T) {
+	data := randBytes(10*1000+123, 7)
+	chunks := map[[32]byte][]byte{}
+	idx := &Index{Size: uint64(len(data)), ChunkSize: 1000}
+	for off := 0; off < len(data); off += 1000 {
+		c := data[off:min(off+1000, len(data))]
+		d := sha256.Sum256(c)
+		chunks[d] = c
+		idx.Entries = append(idx.Entries, IndexEntry{Start: uint64(off), End: uint64(off + len(c)), Digest: d})
+	}
+	ra := newIndexReaderAt(t.Context(), idx, 4, func(_ context.Context, d [32]byte) ([]byte, error) {
+		return chunks[d], nil
+	})
+	r := rand.New(rand.NewPCG(1, 2))
+	for range 500 {
+		off := r.IntN(len(data) + 10)
+		buf := make([]byte, r.IntN(3000))
+		n, err := ra.ReadAt(buf, int64(off))
+		want := data[min(off, len(data)):min(off+len(buf), len(data))]
+		if n != len(want) || !bytes.Equal(buf[:n], want) {
+			t.Fatalf("ReadAt(%d, %d): got %d bytes", off, len(buf), n)
+		}
+		if (n < len(buf)) != (err == io.EOF) {
+			t.Fatalf("ReadAt(%d, %d): n=%d err=%v", off, len(buf), n, err)
+		}
+	}
+	// A sequential read fetches each chunk once, thanks to the cache.
+	var seqFetches atomic.Int64
+	ra = newIndexReaderAt(t.Context(), idx, 4, func(_ context.Context, d [32]byte) ([]byte, error) {
+		seqFetches.Add(1)
+		return chunks[d], nil
+	})
+	got, err := io.ReadAll(io.NewSectionReader(ra, 0, ra.Size()))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("sequential read: %v", err)
+	}
+	if n := seqFetches.Load(); n != int64(len(idx.Entries)) {
+		t.Errorf("sequential read fetched %d chunks, want %d", n, len(idx.Entries))
 	}
 }

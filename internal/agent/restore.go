@@ -63,6 +63,9 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 	if err != nil {
 		return res, err
 	}
+	if strings.HasSuffix(archive, ".img.fidx") && len(spec.Paths) > 0 {
+		return j.restoreImageFiles(ctx, r, idx, spec)
+	}
 	j.bytesTotal.Store(idx.Size)
 	stream := r.OpenIndex(ctx, idx, 6)
 	defer stream.Close()
@@ -176,49 +179,57 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 }
 
 func (j *job) restoreFile(dec *pxar.Decoder, e *pxar.Entry, target, overwrite string) error {
-	mtime := time.Unix(e.Meta.MtimeSecs, int64(e.Meta.MtimeNanos))
+	attrs, has, ctime := fromPxarMeta(e.Meta)
+	_, err := j.writeRestored(e.Path, target, overwrite, dec.Contents(),
+		time.Unix(e.Meta.MtimeSecs, int64(e.Meta.MtimeNanos)), attrs, has, ctime)
+	return err
+}
+
+// writeRestored writes one restored file through a temporary name and applies
+// its metadata. It reports whether the file was written; existing files are
+// kept according to overwrite, and unwritable targets are skipped with a warning.
+func (j *job) writeRestored(rel, target, overwrite string, src io.Reader, mtime time.Time, attrs uint32, hasAttrs bool, ctime time.Time) (bool, error) {
 	if st, err := os.Lstat(target); err == nil {
 		switch overwrite {
 		case "overwrite":
 		case "if-newer":
 			if !mtime.After(st.ModTime()) {
-				return nil
+				return false, nil
 			}
 		default: // "skip"
-			j.logf("info", "exists, skipped: %s", e.Path)
-			return nil
+			j.logf("info", "exists, skipped: %s", rel)
+			return false, nil
 		}
 		// Clear read-only so we can replace it.
 		os.Chmod(target, 0o644)
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
+		return false, err
 	}
 	tmp := target + ".proxbackup-restore"
 	f, err := os.Create(tmp)
 	if err != nil {
 		j.skipped.Add(1)
-		j.logf("warn", "cannot create %s: %v", path.Clean(e.Path), err)
-		return nil
+		j.logf("warn", "cannot create %s: %v", path.Clean(rel), err)
+		return false, nil
 	}
-	_, err = io.Copy(f, dec.Contents())
+	_, err = io.Copy(f, src)
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		os.Remove(tmp)
-		return fmt.Errorf("%s: %w", e.Path, err)
+		return false, fmt.Errorf("%s: %w", rel, err)
 	}
 	if err := os.Rename(tmp, target); err != nil {
 		os.Remove(tmp)
 		j.skipped.Add(1)
-		j.logf("warn", "cannot replace %s: %v", e.Path, err)
-		return nil
+		j.logf("warn", "cannot replace %s: %v", rel, err)
+		return false, nil
 	}
-	attrs, has, ctime := fromPxarMeta(e.Meta)
-	if err := applyMeta(target, mtime, attrs, has, ctime); err != nil {
-		j.logf("warn", "metadata for %s: %v", e.Path, err)
+	if err := applyMeta(target, mtime, attrs, hasAttrs, ctime); err != nil {
+		j.logf("warn", "metadata for %s: %v", rel, err)
 	}
 	j.files.Add(1)
-	return nil
+	return true, nil
 }

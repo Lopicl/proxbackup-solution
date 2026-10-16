@@ -196,7 +196,7 @@ read on every run.
   sequentially into `drive-c.img.fidx` (4 MiB fixed chunks; zero chunks dedupe for free).
   Afterwards it lists the volume's files from the same shadow copy into the catalog, so the
   image can be browsed in the PBS GUI like a file backup (downloads need a pxar archive, so
-  per-file restore from images is not possible there).
+  per-file restore from images is not possible there; see *File restore from images*).
 * **Catalog.** Every snapshot carries `catalog.pcat1.didx`, the file list the PBS GUI file
   browser reads. Its root holds one folder per archive. File backups fill it while encoding the
   pxar; a catalog failure only costs browsability, never the backup.
@@ -205,6 +205,23 @@ read on every run.
 * **Restore.** The agent opens a reader session, downloads the index, fetches chunks on
   demand, decodes pxar, and writes files to the original or an alternate path. The overwrite
   policy (`skip`, `overwrite` or `if-newer`) is chosen per restore.
+* **File restore from images** *(phase 2, implemented)*. Restoring an `.img.fidx` archive with
+  paths selected reads the NTFS file system inside the image instead of writing the whole
+  volume. `pkg/ntfs` is a read-only NTFS reader over an `io.ReaderAt`; `pkg/pbs`
+  `IndexReaderAt` provides one over the fixed index, fetching chunks on demand with a small LRU
+  cache (16 × 4 MiB) and read-ahead on sequential reads. So only the chunks holding the MFT,
+  the directory indexes and the selected files' clusters are downloaded. Paths are relative to
+  the volume root and matched case-insensitively (`/` = every file); files keep their folder
+  structure under the target folder, with timestamps, creation time and the
+  read-only/hidden/system/archive attributes, under the usual overwrite policy. The reader
+  handles fragmented files, sparse files, LZNT1 (NTFS) compression, large directories
+  (`$INDEX_ALLOCATION`) and attribute lists (files with many hard links or extents). Left out,
+  with a warning: junctions and symlinks, EFS-encrypted files, files compressed by CompactOS
+  (WOF) or Windows Server dedup (their data isn't in the main stream), and cloud placeholders
+  whose content isn't on the PC. NTFS metadata files and `System Volume Information` are never
+  restored; alternate data streams aren't yet (logged). Tests use an NTFS volume created by
+  Windows (`pkg/ntfs/testdata`); the Windows path was verified end to end (VSS image → PBS →
+  file restore) on the Windows 11 VM.
 * **Self-update (Windows).** When the console runs a newer version, the poll reply offers it
   (version, SHA-256, size). Once no job is running, the agent downloads the binary from the
   console over mTLS, checks size, hash and the version the binary reports, swaps it in next to
@@ -438,6 +455,7 @@ cmd/proxbackup-server/  ProxBackup Console entrypoint (also `apply-update` for t
 cmd/proxbackup-agent/   ProxBackup Agent entrypoint (service + CLI: enroll, backup, image, restore)
 pkg/pbs/                PBS protocol: blob, chunker, catalog, backup & reader sessions, admin API
 pkg/pxar/               pxar encoder/decoder (v1 and v2 split archives)
+pkg/ntfs/               read-only NTFS reader (file restore from volume images)
 internal/agent/         scheduler, job runner, VSS, file walker, image reader, catalog,
                         run reporter/spool, self-update
 internal/server/        HTTP API, auth, store (SQLite), PKI, config push, PBS provisioning,
