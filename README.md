@@ -162,8 +162,8 @@ The MVP has been verified end to end against **PBS 4.2** (Docker), with the agen
 
 **Verified on Windows 11 (ARM64 VM) against PBS 4.2:** VSS snapshots, file backup and restore
 (contents, attributes, timestamps, symlinks; junctions skipped), incremental reuse, volume
-images, and browsing both in the PBS GUI. **Not yet verified:** the service wrapper and
-server-driven scheduling.
+images, browsing both in the PBS GUI, and single-file restore from volume images. The agent
+runs as a Windows service, installed by the enrollment command or the agent setup `.exe`.
 
 Known gaps (see the roadmap):
 
