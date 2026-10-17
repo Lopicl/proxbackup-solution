@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -122,6 +123,8 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errors.New("admin token secret is required"))
 		return
 	}
+	// A new root namespace must exist on PBS before agents are pointed at it.
+	nsChanged := t.ID != 0 && t.RootNS != req.RootNS
 	t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser =
 		req.Name, req.Host, strings.TrimSpace(req.Fingerprint), req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser
 	if req.AdminSecret == "" && t.ID == 0 {
@@ -133,9 +136,26 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	if req.AdminSecret != "" {
 		t.adminSecretEnc = s.sealer.Seal(req.AdminSecret)
 	}
+	var pc *pbs.Client
+	if nsChanged {
+		var err error
+		if pc, err = s.adminClient(t); err == nil {
+			err = prepareRootNamespace(ctx, pc, t)
+		}
+		if err != nil {
+			httpError(w, 502, fmt.Errorf("PBS: %w", err))
+			return
+		}
+	}
 	if err := s.store.SaveTarget(ctx, t); err != nil {
 		httpError(w, 500, err)
 		return
+	}
+	if nsChanged {
+		if err := s.moveTargetClients(ctx, pc, t); err != nil {
+			httpError(w, 502, fmt.Errorf("saved, but moving clients to the new namespace failed: %w", err))
+			return
+		}
 	}
 	// Host or fingerprint changes are part of every client's config: push them.
 	if cs, err := s.store.Clients(ctx); err == nil {
@@ -306,10 +326,25 @@ func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
-	snaps, err := pc.ListSnapshots(ctx, t.Datastore, c.Namespace, "", "")
-	if err != nil {
-		httpError(w, 502, err)
-		return
+	type snapshot struct {
+		pbs.SnapshotInfo
+		NS  string `json:"ns"`
+		Old bool   `json:"old,omitempty"` // in a namespace the client used before
+	}
+	var snaps []snapshot
+	for i, ns := range append([]string{c.Namespace}, c.OldNamespaces...) {
+		list, err := pc.ListSnapshots(ctx, t.Datastore, ns, "", "")
+		if err != nil {
+			if i == 0 {
+				httpError(w, 502, err)
+				return
+			}
+			s.log.Warn("list snapshots in old namespace", "client", c.Name, "ns", ns, "err", err)
+			continue
+		}
+		for _, sn := range list {
+			snaps = append(snaps, snapshot{sn, ns, i > 0})
+		}
 	}
 	sort.Slice(snaps, func(i, j int) bool { return snaps[i].BackupTime > snaps[j].BackupTime })
 	writeJSON(w, orEmpty(snaps))
@@ -343,8 +378,16 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	if _, err := s.store.Client(ctx, id); err != nil {
+	c, err := s.store.Client(ctx, id)
+	if err != nil {
 		httpError(w, statusFor(err), err)
+		return
+	}
+	switch {
+	case req.Namespace == c.Namespace:
+		req.Namespace = ""
+	case req.Namespace != "" && !slices.Contains(c.OldNamespaces, req.Namespace):
+		httpError(w, 400, errors.New("snapshot namespace does not belong to this client"))
 		return
 	}
 	runID, err := s.store.QueueRun(ctx, 0, id, api.KindRestore, "manual", &req)

@@ -138,7 +138,7 @@ function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?
           <Field label="Datastore">
             <input value={t.datastore ?? ''} onChange={(e) => set({ datastore: e.target.value })} required />
           </Field>
-          <Field label="Root namespace" hint="Each client gets a child namespace below this one.">
+          <Field label="Root namespace" hint="Each client gets a child namespace below this one. Changing it creates it on PBS and moves existing clients there; their older snapshots stay restorable.">
             <input value={t.root_ns ?? ''} onChange={(e) => set({ root_ns: e.target.value })} placeholder="pcs" />
           </Field>
         </div>

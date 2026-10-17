@@ -32,6 +32,7 @@ export interface RestoreSpec {
   paths?: string[]
   target_dir: string
   overwrite: 'skip' | 'overwrite' | 'if-newer'
+  ns?: string // namespace of a snapshot taken before the client moved
 }
 
 export interface Run {
@@ -129,6 +130,8 @@ export interface Snapshot {
   protected: boolean
   files: { filename: string; size: number; 'crypt-mode': string }[]
   verification?: { state: string }
+  ns: string
+  old?: boolean // in a namespace the client used before
 }
 
 export interface LogLine {

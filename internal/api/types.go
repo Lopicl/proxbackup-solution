@@ -70,6 +70,9 @@ type RestoreSpec struct {
 	TargetDir  string   `json:"target_dir"`      // where to restore to
 	Overwrite  string   `json:"overwrite"`       // "skip" | "overwrite" | "if-newer"
 	TargetDisk string   `json:"target_disk,omitempty"`
+	// Namespace of the snapshot when it isn't the client's current one (it
+	// was taken before the client moved to another namespace).
+	Namespace string `json:"ns,omitempty"`
 }
 
 // JobSpec is sent from server to agent to start a run.

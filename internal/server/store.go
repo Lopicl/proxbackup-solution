@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -104,6 +105,9 @@ func (s *Store) migrate() error {
 		{"jobs", "encrypt", "INTEGER NOT NULL DEFAULT 0"},
 		// Immutable backups: days a new snapshot stays protected (0 = off).
 		{"jobs", "lock_days", "INTEGER NOT NULL DEFAULT 0"},
+		// Namespaces a client used before its target's root namespace changed;
+		// their snapshots stay listed and restorable.
+		{"clients", "old_namespaces", "TEXT NOT NULL DEFAULT '[]'"},
 	}
 	for _, c := range cols {
 		var n int
@@ -156,10 +160,12 @@ type Client struct {
 	AgentVersion string `json:"agent_version"`
 	TargetID     int64  `json:"target_id"`
 	Namespace    string `json:"namespace"`
-	TokenID      string `json:"token_id"`
-	LastSeen     int64  `json:"last_seen"`
-	Revoked      bool   `json:"revoked"`
-	CreatedAt    int64  `json:"created_at"`
+	// OldNamespaces hold the client's snapshots from before a root namespace change.
+	OldNamespaces []string `json:"old_namespaces"`
+	TokenID       string   `json:"token_id"`
+	LastSeen      int64    `json:"last_seen"`
+	Revoked       bool     `json:"revoked"`
+	CreatedAt     int64    `json:"created_at"`
 	// Derived for the UI.
 	Online      bool   `json:"online"`
 	LastRun     *Run   `json:"last_run,omitempty"`
@@ -383,18 +389,22 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 // ---- clients ----
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
-	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created`
+	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
-	var sched string
+	var sched, oldNS string
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
-		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated)
+		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
 	json.Unmarshal([]byte(sched), &c.ScheduleState)
+	json.Unmarshal([]byte(oldNS), &c.OldNamespaces)
+	if c.OldNamespaces == nil {
+		c.OldNamespaces = []string{}
+	}
 	c.Online = !c.Revoked && time.Since(time.Unix(c.LastSeen, 0)) < 2*time.Minute
 	return c, err
 }
@@ -439,6 +449,23 @@ func (s *Store) CreateClient(ctx context.Context, c *Client) error {
 		return err
 	}
 	c.ID, _ = res.LastInsertId()
+	return nil
+}
+
+// MoveClientNamespace points a client at ns, remembering its current namespace
+// so earlier snapshots stay reachable.
+func (s *Store) MoveClientNamespace(ctx context.Context, c *Client, ns string) error {
+	old := []string{}
+	for _, o := range append(c.OldNamespaces, c.Namespace) {
+		if o != ns && !slices.Contains(old, o) {
+			old = append(old, o)
+		}
+	}
+	b, _ := json.Marshal(old)
+	if _, err := s.db.ExecContext(ctx, `UPDATE clients SET namespace=?, old_namespaces=? WHERE id=?`, ns, string(b), c.ID); err != nil {
+		return err
+	}
+	c.Namespace, c.OldNamespaces = ns, old
 	return nil
 }
 

@@ -178,6 +178,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 	deadline := time.After(time.Duration(wait) * time.Second)
 	for {
 		wake := s.wakeChan(c.ID)
+		if fresh, err := s.store.Client(ctx, c.ID); err == nil {
+			c = fresh // e.g. moved to another namespace while this poll waited
+		}
 		offer := s.updater.agentOffer(ctx, c.ID, req.OS, req.AgentVersion)
 		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID), Update: offer}
 		cfg, err := s.agentConfig(ctx, c)
@@ -316,6 +319,9 @@ func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSp
 			AuthID: c.TokenID, Secret: secret},
 		BackupID: c.Name,
 		Restore:  run.Restore,
+	}
+	if run.Restore != nil && run.Restore.Namespace != "" {
+		spec.Target.Namespace = run.Restore.Namespace // snapshot from before a namespace move
 	}
 	// Restores need the key too, for snapshots encrypted earlier.
 	if spec.Crypt, err = s.clientKey(ctx, c); err != nil {
@@ -475,6 +481,51 @@ func (s *Server) adminClient(t *Target) (*pbs.Client, error) {
 	return pbs.NewClient(pbs.Config{Host: t.Host, Fingerprint: t.Fingerprint, AuthID: t.AdminAuthID, Secret: secret})
 }
 
+// clientNamespace is the PBS namespace a client named name gets on t.
+func clientNamespace(t *Target, name string) string {
+	if root := strings.Trim(t.RootNS, "/"); root != "" {
+		return root + "/" + name
+	}
+	return name
+}
+
+// prepareRootNamespace creates t's root namespace and lets the agents' PBS
+// user back up below it. Token privileges are intersected with the owning
+// user's, so the user needs DatastoreBackup on the root namespace and each
+// token on its own namespace.
+func prepareRootNamespace(ctx context.Context, pc *pbs.Client, t *Target) error {
+	root := strings.Trim(t.RootNS, "/")
+	if err := pc.EnsureNamespace(ctx, t.Datastore, root); err != nil {
+		return fmt.Errorf("namespace %s: %w", root, err)
+	}
+	if err := pc.EnsureUser(ctx, t.PBSUser, "proxbackup managed agents"); err != nil {
+		return fmt.Errorf("user %s: %w", t.PBSUser, err)
+	}
+	if err := pc.GrantACL(ctx, pbs.DatastoreACLPath(t.Datastore, root), "DatastoreBackup", t.PBSUser); err != nil {
+		return fmt.Errorf("user ACL: %w", err)
+	}
+	return nil
+}
+
+// prepareClientNamespace creates ns and grants the agent token backup rights on it.
+func prepareClientNamespace(ctx context.Context, pc *pbs.Client, t *Target, ns, tokenID string) error {
+	if err := pc.EnsureNamespace(ctx, t.Datastore, ns); err != nil {
+		return fmt.Errorf("namespace %s: %w", ns, err)
+	}
+	path := pbs.DatastoreACLPath(t.Datastore, ns)
+	// Tokens created before the target's PBS user changed belong to the old user,
+	// which has no rights below the new root namespace.
+	if user, _, _ := strings.Cut(tokenID, "!"); user != t.PBSUser {
+		if err := pc.GrantACL(ctx, path, "DatastoreBackup", user); err != nil {
+			return fmt.Errorf("user ACL: %w", err)
+		}
+	}
+	if err := pc.GrantACL(ctx, path, "DatastoreBackup", tokenID); err != nil {
+		return fmt.Errorf("token ACL: %w", err)
+	}
+	return nil
+}
+
 // provisionClient creates the namespace, API token and ACL for a new client.
 // The token gets DatastoreBackup only: it can create snapshots in its own
 // namespace but cannot read other clients' data, delete or prune.
@@ -483,30 +534,44 @@ func (s *Server) provisionClient(ctx context.Context, t *Target, name string) (n
 	if err != nil {
 		return "", "", "", err
 	}
-	ns = name
-	if t.RootNS != "" {
-		ns = strings.Trim(t.RootNS, "/") + "/" + name
+	if err = prepareRootNamespace(ctx, pc, t); err != nil {
+		return "", "", "", err
 	}
-	if err = pc.EnsureNamespace(ctx, t.Datastore, ns); err != nil {
-		return "", "", "", fmt.Errorf("namespace: %w", err)
-	}
-	user := t.PBSUser
-	if err = pc.EnsureUser(ctx, user, "proxbackup managed agents"); err != nil {
-		return "", "", "", fmt.Errorf("user %s: %w", user, err)
-	}
-	// Token privileges are intersected with the owning user's, so the user needs
-	// DatastoreBackup on the root namespace and each token on its own namespace.
-	if err = pc.GrantACL(ctx, pbs.DatastoreACLPath(t.Datastore, strings.Trim(t.RootNS, "/")), "DatastoreBackup", user); err != nil {
-		return "", "", "", fmt.Errorf("user ACL: %w", err)
-	}
-	pc.DeleteToken(ctx, user, name) // stale token from a previous enrollment of the same name
-	tokenID, secret, err = pc.CreateToken(ctx, user, name, "proxbackup agent "+name)
+	ns = clientNamespace(t, name)
+	pc.DeleteToken(ctx, t.PBSUser, name) // stale token from a previous enrollment of the same name
+	tokenID, secret, err = pc.CreateToken(ctx, t.PBSUser, name, "proxbackup agent "+name)
 	if err != nil {
 		return "", "", "", fmt.Errorf("token: %w", err)
 	}
-	if err = pc.GrantACL(ctx, pbs.DatastoreACLPath(t.Datastore, ns), "DatastoreBackup", tokenID); err != nil {
-		pc.DeleteToken(ctx, user, name)
-		return "", "", "", fmt.Errorf("token ACL: %w", err)
+	if err = prepareClientNamespace(ctx, pc, t, ns, tokenID); err != nil {
+		pc.DeleteToken(ctx, t.PBSUser, name)
+		return "", "", "", err
 	}
 	return ns, tokenID, secret, nil
+}
+
+// moveTargetClients points the clients of t at their namespace below t's
+// current root namespace, creating it and its ACLs on PBS. Earlier snapshots
+// stay in the old namespace, where the token keeps its rights.
+func (s *Server) moveTargetClients(ctx context.Context, pc *pbs.Client, t *Target) error {
+	cs, err := s.store.Clients(ctx)
+	if err != nil {
+		return err
+	}
+	for _, c := range cs {
+		ns := clientNamespace(t, c.Name)
+		if c.TargetID != t.ID || c.Namespace == ns {
+			continue
+		}
+		if err := prepareClientNamespace(ctx, pc, t, ns, c.TokenID); err != nil {
+			return fmt.Errorf("client %s: %w", c.Name, err)
+		}
+		old := c.Namespace
+		if err := s.store.MoveClientNamespace(ctx, c, ns); err != nil {
+			return err
+		}
+		s.log.Info("client moved to new namespace", "client", c.Name, "from", old, "to", ns)
+		s.wakeClient(c.ID)
+	}
+	return nil
 }

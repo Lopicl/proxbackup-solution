@@ -431,12 +431,17 @@ function Snapshots({ clientId, onQueued }: { clientId: number; onQueued: (runId:
           </thead>
           <tbody>
             {data.map((s) => (
-              <tr key={s['backup-id'] + s['backup-time']}>
+              <tr key={s.ns + s['backup-id'] + s['backup-time']}>
                 <td>{dateTime(s['backup-time'])}</td>
                 <td>
                   <code>
                     {s['backup-type']}/{s['backup-id']}
                   </code>
+                  {s.old && (
+                    <span className="tag" title="Taken before this client moved to its current namespace">
+                      {s.ns}
+                    </span>
+                  )}
                   {s.protected && <span className="tag">protected</span>}
                   {s.files.some((f) => f['crypt-mode'] === 'encrypt') && <span className="tag">encrypted</span>}
                 </td>
@@ -499,6 +504,7 @@ function RestoreDialog({
             const r = await api.restore(clientId, {
               backup_id: snap['backup-id'],
               backup_time: snap['backup-time'],
+              ns: snap.ns,
               archive,
               target_dir: target,
               paths: paths.split('\n').map((p) => p.trim()).filter(Boolean),
