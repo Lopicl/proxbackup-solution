@@ -103,6 +103,21 @@ func TestLatestAndDownload(t *testing.T) {
 	if r, _ := c.Latest(ctx, true); r.Tag != "v0.3.0.9" {
 		t.Fatalf("Latest(prerelease) = %s", r.Tag)
 	}
+	rs, _ := c.Releases(ctx)
+	var tags []string
+	for _, b := range Between(rs, "0.1.0.0", "0.2.0.5", false) {
+		tags = append(tags, b.Tag)
+	}
+	if strings.Join(tags, " ") != "v0.2.0.5 v0.1.2.3" {
+		t.Fatalf("Between = %v", tags)
+	}
+	tags = nil
+	for _, b := range Between(rs, "0.1.2.3", "0.3.0.9", true) {
+		tags = append(tags, b.Tag)
+	}
+	if strings.Join(tags, " ") != "v0.3.0.9 v0.2.0.5" {
+		t.Fatalf("Between(prerelease) = %v", tags)
+	}
 	sums, err := c.Sums(ctx, r)
 	if err != nil {
 		t.Fatal(err)

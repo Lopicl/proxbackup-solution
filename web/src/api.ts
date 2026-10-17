@@ -184,6 +184,13 @@ export interface UpdateResult {
   error?: string
 }
 
+export interface ReleaseNote {
+  version: string
+  url: string
+  published_at: number
+  body?: string
+}
+
 export interface UpdateStatus {
   current: string
   mode: '' | 'deb' | 'binary'
@@ -193,7 +200,7 @@ export interface UpdateStatus {
   check_error?: string
   latest?: string
   latest_url?: string
-  latest_notes?: string
+  notes?: ReleaseNote[]
   published_at?: number
   available: boolean
   next_install?: number

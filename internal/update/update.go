@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -184,7 +185,7 @@ func (c *Client) get(ctx context.Context, url string, accept string) (*http.Resp
 // Releases lists the repository's published releases with a valid version
 // tag, newest first.
 func (c *Client) Releases(ctx context.Context) ([]Release, error) {
-	resp, err := c.get(ctx, fmt.Sprintf("%s/repos/%s/releases?per_page=30", c.api(), c.repo()), "application/vnd.github+json")
+	resp, err := c.get(ctx, fmt.Sprintf("%s/repos/%s/releases?per_page=100", c.api(), c.repo()), "application/vnd.github+json")
 	if err != nil {
 		return nil, err
 	}
@@ -209,6 +210,12 @@ func (c *Client) Latest(ctx context.Context, prerelease bool) (*Release, error) 
 	if err != nil {
 		return nil, err
 	}
+	return LatestOf(rs, prerelease), nil
+}
+
+// LatestOf picks the newest release by version from rs, skipping pre-releases
+// unless allowed, or nil if there is none.
+func LatestOf(rs []Release, prerelease bool) *Release {
 	var best *Release
 	for i := range rs {
 		r := &rs[i]
@@ -225,7 +232,29 @@ func (c *Client) Latest(ctx context.Context, prerelease bool) (*Release, error) 
 			best = r
 		}
 	}
-	return best, nil
+	return best
+}
+
+// Between returns the releases newer than current up to and including latest,
+// newest first, skipping pre-releases unless allowed (latest itself is always
+// included). These are the releases an update from current to latest brings.
+func Between(rs []Release, current, latest string, prerelease bool) []Release {
+	var out []Release
+	for _, r := range rs {
+		v, _ := r.Version()
+		if r.Prerelease && !prerelease && v != latest {
+			continue
+		}
+		if Newer(v, current) && !Newer(v, latest) {
+			out = append(out, r)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, _ := out[i].Version()
+		b, _ := out[j].Version()
+		return Newer(a, b)
+	})
+	return out
 }
 
 // ByVersion returns the release tagged v<version>.

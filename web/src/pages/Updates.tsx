@@ -83,10 +83,20 @@ export function UpdatesCard() {
               : s.auto_install
                 ? 'Select at least one day to install it automatically.'
                 : 'Automatic installation is off.'}
-          {st.latest_notes && (
+          {!!st.notes?.length && (
             <details>
-              <summary>Release notes</summary>
-              <pre className="log">{st.latest_notes}</pre>
+              <summary>{st.notes.length > 1 ? `Release notes (${st.notes.length} versions)` : 'Release notes'}</summary>
+              {st.notes.map((n) => (
+                <div key={n.version}>
+                  <p>
+                    <a href={n.url} target="_blank" rel="noreferrer">
+                      <b>{n.version}</b>
+                    </a>
+                    {n.published_at ? <span className="small"> ({dateTime(n.published_at)})</span> : null}
+                  </p>
+                  <pre className="log">{n.body || 'No release notes.'}</pre>
+                </div>
+              ))}
             </details>
           )}
         </div>

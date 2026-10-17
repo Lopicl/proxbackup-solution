@@ -23,7 +23,8 @@ import (
 	"proxbackup/internal/update"
 )
 
-// fakeGitHub serves releases v0.1.0.1 (the running console) and v0.1.1.2.
+// fakeGitHub serves releases v0.1.0.1 (the running console), the newer
+// v0.1.0.5 and v0.1.1.2, and the older v0.0.9.0.
 func fakeGitHub(t *testing.T) *httptest.Server {
 	agent := []byte("agent 0.1.0.1")
 	sum := sha256.Sum256(agent)
@@ -38,7 +39,7 @@ func fakeGitHub(t *testing.T) *httptest.Server {
 		}
 		switch {
 		case r.URL.Path == "/repos/o/r/releases":
-			json.NewEncoder(w).Encode([]update.Release{rel("0.1.1.2"), rel("0.1.0.1")})
+			json.NewEncoder(w).Encode([]update.Release{rel("0.1.0.5"), rel("0.1.1.2"), rel("0.1.0.1"), rel("0.0.9.0")})
 		case strings.HasPrefix(r.URL.Path, "/repos/o/r/releases/tags/v"):
 			json.NewEncoder(w).Encode(rel(strings.TrimPrefix(r.URL.Path, "/repos/o/r/releases/tags/v")))
 		case strings.HasSuffix(r.URL.Path, "/"+update.SumsAsset):
@@ -76,6 +77,9 @@ func TestUpdaterCheckAndAgentOffer(t *testing.T) {
 	st := s.updater.Status(ctx)
 	if st.Latest != "0.1.1.2" || !st.Available || st.AgentVersion != "0.1.0.1" || len(st.AgentArchs) != 2 {
 		t.Fatalf("status = %+v", st)
+	}
+	if len(st.Notes) != 2 || st.Notes[0].Version != "0.1.1.2" || st.Notes[1].Version != "0.1.0.5" || st.Notes[0].URL != "https://example/0.1.1.2" {
+		t.Fatalf("notes = %+v", st.Notes)
 	}
 	if st.NextInstall == 0 {
 		t.Fatal("default settings should schedule the install")

@@ -73,7 +73,7 @@ type UpdateStatus struct {
 	CheckError    string        `json:"check_error,omitempty"`
 	Latest        string        `json:"latest,omitempty"`
 	LatestURL     string        `json:"latest_url,omitempty"`
-	LatestNotes   string        `json:"latest_notes,omitempty"`
+	Notes         []ReleaseNote `json:"notes,omitempty"` // releases from current (exclusive) to latest, newest first
 	PublishedAt   int64         `json:"published_at,omitempty"`
 	Available     bool          `json:"available"`
 	NextInstall   int64         `json:"next_install,omitempty"`
@@ -82,6 +82,14 @@ type UpdateStatus struct {
 	AgentVersion  string        `json:"agent_version,omitempty"` // version offered to agents
 	AgentArchs    []string      `json:"agent_archs,omitempty"`
 	AgentCacheErr string        `json:"agent_cache_error,omitempty"`
+}
+
+// ReleaseNote is one release's changelog.
+type ReleaseNote struct {
+	Version     string `json:"version"`
+	URL         string `json:"url"`
+	PublishedAt int64  `json:"published_at"`
+	Body        string `json:"body,omitempty"`
 }
 
 type agentBinary struct {
@@ -226,7 +234,8 @@ func (u *updater) Check(ctx context.Context) error {
 	us := u.settings(ctx)
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	r, err := u.gh.Latest(ctx, us.Prerelease)
+	rs, err := u.gh.Releases(ctx)
+	r := update.LatestOf(rs, us.Prerelease)
 	u.mu.Lock()
 	u.status.LastCheck = time.Now().Unix()
 	u.status.CheckError = ""
@@ -236,13 +245,22 @@ func (u *updater) Check(ctx context.Context) error {
 		v, _ := r.Version()
 		u.latest = r
 		u.status.Latest, u.status.LatestURL, u.status.PublishedAt = v, r.HTMLURL, r.PublishedAt.Unix()
-		u.status.LatestNotes = r.Body
-		if len(u.status.LatestNotes) > 4000 {
-			u.status.LatestNotes = u.status.LatestNotes[:4000] + "…"
+		between := update.Between(rs, u.s.cfg.Version, v, us.Prerelease)
+		if len(between) == 0 && !isVersion(u.s.cfg.Version) {
+			between = []update.Release{*r} // development build: just the latest
+		}
+		u.status.Notes = nil
+		for _, b := range between {
+			bv, _ := b.Version()
+			body := b.Body
+			if len(body) > 4000 {
+				body = body[:4000] + "…"
+			}
+			u.status.Notes = append(u.status.Notes, ReleaseNote{Version: bv, URL: b.HTMLURL, PublishedAt: b.PublishedAt.Unix(), Body: body})
 		}
 	} else {
 		u.latest = nil
-		u.status.Latest, u.status.LatestURL, u.status.LatestNotes, u.status.PublishedAt = "", "", "", 0
+		u.status.Latest, u.status.LatestURL, u.status.Notes, u.status.PublishedAt = "", "", nil, 0
 	}
 	u.mu.Unlock()
 	if err != nil {
