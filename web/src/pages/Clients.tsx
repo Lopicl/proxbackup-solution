@@ -101,6 +101,11 @@ export function Clients() {
                       <Link to={`/clients/${c.id}`}>
                         <b>{c.name}</b>
                       </Link>
+                      {c.tags.map((t) => (
+                        <span key={t} className="tag">
+                          #{t}
+                        </span>
+                      ))}
                     </td>
                     <td>{c.hostname}</td>
                     <td className="muted-text">

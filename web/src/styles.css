@@ -154,4 +154,14 @@ pre.copy { background: var(--bg); padding: 12px; border-radius: 6px; white-space
 aside .user { display: none; }
   main { padding: 16px; }
   .grid2, .keep { grid-template-columns: 1fr 1fr; }
+  .grid3 { grid-template-columns: 1fr; }
 }
+
+/* group jobs */
+.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 16px; }
+.member-filter { margin-top: 8px; }
+.member-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 4px 12px; max-height: 200px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-top: 6px; }
+.member-list label { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.member-list input { width: auto; }
+.run-count { white-space: nowrap; margin-right: 4px; }

@@ -1,17 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState } from 'react'
-import { api, type Job, type Keep, type Snapshot } from '../api'
+import { ALL_CLIENTS, api, type GroupJob, type GroupMember, type Snapshot } from '../api'
 import { RunsTable } from './RunsTable'
-import { ago, bytes, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, useLoad } from '../ui'
+import { GroupJobEditor, JobTags, keepText, MemberEditor, newGroupJob, ScheduleText } from './Jobs'
+import { ago, bytes, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
 
 export function ClientDetail({ id, tab }: { id: number; tab: string }) {
   const { data, error, reload } = useLoad(() => api.client(id), [id], 5000)
-  const [editing, setEditing] = useState<Partial<Job> | null>(null)
+  const groups = useLoad(api.groupJobs, [], 5000)
+  const [editing, setEditing] = useState<Partial<GroupJob> | null>(null)
+  const [member, setMember] = useState<{ m: GroupMember; group: string } | null>(null)
+  const [editingTags, setEditingTags] = useState(false)
   const [msg, setMsg] = useState('')
   if (error) return <ErrorBox error={error} />
   if (!data) return null
   const c = data.client
+  const reloadAll = () => {
+    reload()
+    groups.reload()
+  }
+  // The group jobs this client is a member of.
+  const memberships = (groups.data ?? []).flatMap((g) => g.members.filter((m) => m.client_id === id).map((m) => ({ g, m })))
 
   const tabs = [
     ['jobs', `Jobs (${data.jobs.length})`],
@@ -63,6 +73,21 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
                 Update agent to {c.agent_update}
               </button>
             ))}
+        </span>
+        <span>
+          Tags{' '}
+          {c.tags.length ? (
+            c.tags.map((t) => (
+              <span key={t} className="tag">
+                #{t}
+              </span>
+            ))
+          ) : (
+            <b>none</b>
+          )}{' '}
+          <button className="small ghost" title="Tags group clients: jobs can target every client with a tag" onClick={() => setEditingTags(true)}>
+            Edit
+          </button>
         </span>
         <span>
           Namespace <code>{c.namespace}</code>
@@ -125,59 +150,72 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         <Card
           title="Backup jobs"
           actions={
-            <button className="primary" onClick={() => setEditing(newJob(id, c.name))}>
+            <button className="primary" onClick={() => setEditing(newGroupJob([id]))}>
               New job
             </button>
           }
         >
-          {data.jobs.length === 0 ? (
-            <Empty>No backup jobs. Create one to start protecting this PC.</Empty>
+          {memberships.length === 0 ? (
+            <Empty>{groups.data ? 'No backup jobs. Create one, or add this PC to an existing job on the Jobs page.' : 'Loading…'}</Empty>
           ) : (
             <table>
               <thead>
                 <tr>
-                  <th>Name</th>
+                  <th>Job</th>
                   <th>Type</th>
                   <th>What</th>
                   <th>Schedule</th>
                   <th>Next run</th>
+                  <th>Last run</th>
                   <th>Retention</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {data.jobs.map((j) => (
-                  <tr key={j.id} className={j.enabled ? '' : 'disabled'}>
+                {memberships.map(({ g, m }) => (
+                  <tr key={m.id} className={m.enabled ? '' : 'disabled'}>
                     <td>
-                      <b>{j.name}</b>
-                      {!j.enabled && <span className="tag">disabled</span>}
-                      {j.encrypt && <span className="tag">encrypted</span>}
-                      {j.lock_days > 0 && (
-                        <span className="tag" title={`New snapshots are protected on PBS for ${j.lock_days} day(s)`}>
-                          locked {j.lock_days}d
+                      <Link to={`/jobs/${g.id}`}>
+                        <b>{g.name}</b>
+                      </Link>
+                      <JobTags j={g} />
+                      {!m.member_enabled && <span className="tag">disabled here</span>}
+                      {g.members.length > 1 && (
+                        <span className="tag" title={`Shared with ${g.members.length - 1} other client(s)`}>
+                          {g.members.length} clients
+                        </span>
+                      )}
+                      {m.via_tags.map((t) => (
+                        <span key={t} className="tag" title="Member through this tag">
+                          {t === ALL_CLIENTS ? 'all clients' : '#' + t}
+                        </span>
+                      ))}
+                    </td>
+                    <td>{g.kind === 'files' ? 'Files' : 'Volume image'}</td>
+                    <td className="ellipsis" title={(g.kind === 'files' ? g.sources : g.volumes).join(', ')}>
+                      {(g.kind === 'files' ? g.sources : g.volumes).join(', ')}
+                      {m.extra_excludes.length > 0 && (
+                        <span className="tag" title={`Also excludes ${m.extra_excludes.join(', ')}`}>
+                          +{m.extra_excludes.length} excludes
                         </span>
                       )}
                     </td>
-                    <td>{j.kind === 'files' ? 'Files' : 'Volume image'}</td>
-                    <td className="ellipsis" title={(j.kind === 'files' ? j.sources : j.volumes).join(', ')}>
-                      {(j.kind === 'files' ? j.sources : j.volumes).join(', ')}
+                    <td>
+                      <ScheduleText j={g} />
                     </td>
                     <td>
-                      <code>{j.schedule || 'manual'}</code>
-                      {j.schedule && <span className="tag">{j.catch_up ? 'catch-up' : 'skip if missed'}</span>}
+                      {m.catch_up_pending ? <span className="badge info">catch-up pending</span> : m.next_run ? dateTime(m.next_run) : '—'}
                     </td>
-                    <td>
-                      {j.catch_up_pending ? <span className="badge info">catch-up pending</span> : j.next_run ? dateTime(j.next_run) : '—'}
-                    </td>
-                    <td>{keepText(j.retention)}</td>
+                    <td>{m.last_run ? <StateBadge state={m.last_run.state} /> : '—'}</td>
+                    <td>{keepText(g.retention)}</td>
                     <td className="row-actions">
                       <button
                         className="small"
                         onClick={async () => {
                           try {
-                            const r = await api.runJob(j.id)
+                            const r = await api.runJob(m.id)
                             setMsg(`Run #${r.run_id} queued${c.online ? '' : ' — it starts when the PC comes online'}.`)
-                            reload()
+                            reloadAll()
                           } catch (e) {
                             setMsg((e as Error).message)
                           }
@@ -185,8 +223,11 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
                       >
                         Run now
                       </button>
-                      <button className="small ghost" onClick={() => setEditing(j)}>
-                        Edit
+                      <button className="small ghost" onClick={() => setMember({ m, group: g.name })} title="Settings of this job on this client">
+                        Settings
+                      </button>
+                      <button className="small ghost" onClick={() => setEditing(g)} title={g.members.length > 1 ? `Changes apply to all ${g.members.length} clients` : ''}>
+                        Edit job
                       </button>
                     </td>
                   </tr>
@@ -206,11 +247,31 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
       {tab === 'snapshots' && <Snapshots clientId={id} onQueued={(r) => (location.hash = `/runs/${r}`)} />}
 
       {editing && (
-        <JobEditor
+        <GroupJobEditor
           job={editing}
           onClose={() => {
             setEditing(null)
-            reload()
+            reloadAll()
+          }}
+        />
+      )}
+      {member && (
+        <MemberEditor
+          member={member.m}
+          groupName={member.group}
+          onClose={() => {
+            setMember(null)
+            reloadAll()
+          }}
+        />
+      )}
+      {editingTags && (
+        <TagsEditor
+          clientId={id}
+          tags={c.tags}
+          onClose={() => {
+            setEditingTags(false)
+            reloadAll()
           }}
         />
       )}
@@ -218,189 +279,30 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
   )
 }
 
-function newJob(clientId: number, name: string): Partial<Job> {
-  return {
-    client_id: clientId,
-    name: 'User files',
-    kind: 'files',
-    backup_id: name,
-    sources: ['C:\\Users'],
-    excludes: [],
-    volumes: ['C:'],
-    use_vss: true,
-    change_detection: 'metadata',
-    encrypt: false,
-    schedule: '0 21 * * *',
-    window_minutes: 60,
-    catch_up: true,
-    retention: { 'keep-last': 3, 'keep-daily': 14, 'keep-weekly': 8, 'keep-monthly': 12 },
-    lock_days: 14,
-    enabled: true,
-  }
-}
-
-function keepText(k: Keep): string {
-  const parts = Object.entries(k)
-    .filter(([, v]) => v)
-    .map(([key, v]) => `${v} ${key.replace('keep-', '')}`)
-  return parts.length ? parts.join(', ') : 'keep all'
-}
-
-const schedulePresets: [string, string][] = [
-  ['0 21 * * *', 'Daily at 21:00'],
-  ['0 12,21 * * 1-5', 'Weekdays 12:00 and 21:00'],
-  ['0 */4 * * *', 'Every 4 hours'],
-  ['0 22 * * 0', 'Weekly, Sunday 22:00'],
-  ['', 'Manual only'],
-]
-
-const keepKeys: (keyof Keep)[] = ['keep-last', 'keep-hourly', 'keep-daily', 'keep-weekly', 'keep-monthly', 'keep-yearly']
-
-function JobEditor({ job, onClose }: { job: Partial<Job>; onClose: () => void }) {
-  const [j, setJ] = useState<Partial<Job>>(job)
+function TagsEditor({ clientId, tags, onClose }: { clientId: number; tags: string[]; onClose: () => void }) {
+  const [text, setText] = useState(tags.join(' '))
   const [error, setError] = useState('')
-  const set = (patch: Partial<Job>) => setJ({ ...j, ...patch })
-  const lines = (s: string) => s.split('\n').map((l) => l.trim()).filter(Boolean)
-
   return (
-    <Modal title={j.id ? `Edit job “${job.name}”` : 'New backup job'} onClose={onClose} wide>
+    <Modal title="Client tags" onClose={onClose}>
       <form
         onSubmit={async (e) => {
           e.preventDefault()
           try {
-            await api.saveJob(j)
+            await api.setClientTags(clientId, text.split(/[\s,]+/).filter(Boolean))
             onClose()
           } catch (err) {
             setError((err as Error).message)
           }
         }}
       >
-        <div className="grid2">
-          <Field label="Name">
-            <input value={j.name ?? ''} onChange={(e) => set({ name: e.target.value })} required />
-          </Field>
-          <Field label="Type">
-            <select value={j.kind} onChange={(e) => set({ kind: e.target.value as Job['kind'], backup_id: '' })} disabled={!!j.id}>
-              <option value="files">Files and folders (pxar)</option>
-              <option value="image">Volume image (block level)</option>
-            </select>
-          </Field>
-        </div>
-        {j.kind === 'files' ? (
-          <div className="grid2">
-            <Field label="Folders to back up" hint="One absolute path per line.">
-              <textarea rows={5} value={(j.sources ?? []).join('\n')} onChange={(e) => set({ sources: lines(e.target.value) })} />
-            </Field>
-            <Field label="Exclude patterns" hint={<>One per line, e.g. <code>*.iso</code>, <code>**/Downloads</code>. Temp folders, pagefile etc. are always excluded.</>}>
-              <textarea rows={5} value={(j.excludes ?? []).join('\n')} onChange={(e) => set({ excludes: lines(e.target.value) })} />
-            </Field>
-            <Field
-              label="Change detection"
-              hint="Unchanged files are skipped by size, timestamps and attributes. Needs PBS 3.3 or later; older servers automatically get the legacy format."
-            >
-              <select value={j.change_detection ?? 'metadata'} onChange={(e) => set({ change_detection: e.target.value as Job['change_detection'] })}>
-                <option value="metadata">Skip unchanged files (recommended)</option>
-                <option value="data">Read every file</option>
-                <option value="legacy">Legacy single archive (pxar v1)</option>
-              </select>
-            </Field>
-          </div>
-        ) : (
-          <Field label="Volumes" hint="Drive letters, one per line, e.g. C:. Each volume becomes a 4 MiB fixed-chunk image archive.">
-            <textarea rows={3} value={(j.volumes ?? []).join('\n')} onChange={(e) => set({ volumes: lines(e.target.value) })} />
-          </Field>
-        )}
-        <div className="grid2">
-          <Field
-            label="Schedule (cron, PC local time)"
-            hint="minute hour day-of-month month day-of-week, or @daily / @every 6h. Empty = manual. The agent starts the job itself — the server only pushes this configuration."
-          >
-            <input value={j.schedule ?? ''} onChange={(e) => set({ schedule: e.target.value })} placeholder="0 21 * * *" />
-            <div className="chips">
-              {schedulePresets.map(([v, label]) => (
-                <button type="button" key={label} className={`chip ${j.schedule === v ? 'on' : ''}`} onClick={() => set({ schedule: v })}>
-                  {label}
-                </button>
-              ))}
-            </div>
-          </Field>
-          <Field label="Backup ID (PBS backup group)" hint="Leave empty for the default.">
-            <input value={j.backup_id ?? ''} onChange={(e) => set({ backup_id: e.target.value })} />
-          </Field>
-        </div>
-        {j.schedule && (
-          <div className="grid2">
-            <Field label="Start window (minutes)" hint="A scheduled run may start up to this long after its time and still count as on time.">
-              <input type="number" min={1} max={10080} value={j.window_minutes ?? 60} onChange={(e) => set({ window_minutes: Number(e.target.value) })} />
-            </Field>
-            <Field label="If the PC is off, asleep or busy during the window">
-              <select value={j.catch_up ? 'catch' : 'skip'} onChange={(e) => set({ catch_up: e.target.value === 'catch' })}>
-                <option value="catch">Run as soon as it is available again (catch-up)</option>
-                <option value="skip">Skip it and record the run as missed</option>
-              </select>
-            </Field>
-          </div>
-        )}
         <Field
-          label="Retention"
-          hint="Applied by the server after each successful run (PBS prune). All zero keeps everything. Snapshots inside the lock period are always kept, on top of these counts."
+          label="Tags"
+          hint="Separated by spaces or commas, e.g. office laptops. Lowercase letters, digits, '.', '_' and '-'. Jobs that target a tag attach or detach this client right away."
         >
-          <div className="keep">
-            {keepKeys.map((k) => (
-              <label key={k}>
-                <span>{k.replace('keep-', '')}</span>
-                <input
-                  type="number"
-                  min={0}
-                  value={j.retention?.[k] ?? 0}
-                  onChange={(e) => set({ retention: { ...j.retention, [k]: Number(e.target.value) || undefined } })}
-                />
-              </label>
-            ))}
-          </div>
+          <input value={text} onChange={(e) => setText(e.target.value.toLowerCase())} autoFocus />
         </Field>
-        <Field
-          label="Lock period (days)"
-          hint="Each new snapshot is marked protected on PBS and released after this many days: until then nothing can prune or delete it, not even this PC or an operator by mistake. 0 = off."
-        >
-          <input type="number" min={0} max={3650} value={j.lock_days ?? 0} onChange={(e) => set({ lock_days: Number(e.target.value) || 0 })} />
-        </Field>
-        <div className="checks">
-          {j.kind === 'files' && (
-            <label>
-              <input type="checkbox" checked={!!j.use_vss} onChange={(e) => set({ use_vss: e.target.checked })} /> Use VSS snapshot (recommended, consistent and
-              includes open files)
-            </label>
-          )}
-          <label>
-            <input type="checkbox" checked={!!j.encrypt} onChange={(e) => set({ encrypt: e.target.checked })} /> Encrypt on the PC (AES-256-GCM with the
-            client's own key, escrowed by this console)
-          </label>
-          <label>
-            <input type="checkbox" checked={!!j.enabled} onChange={(e) => set({ enabled: e.target.checked })} /> Enabled
-          </label>
-        </div>
-        {!!j.id && !!j.encrypt !== !!job.encrypt && (
-          <div className="notice">
-            {j.encrypt ? 'The next run encrypts everything' : 'The next run stores everything unencrypted'}: it reads every file and uploads all data again, since chunks
-            can't be shared between encrypted and unencrypted snapshots. Existing snapshots stay as they are and remain restorable.
-          </div>
-        )}
         <ErrorBox error={error} />
         <div className="buttons">
-          {j.id && (
-            <button
-              type="button"
-              className="danger left"
-              onClick={async () => {
-                if (!confirm('Delete this job? Snapshots on PBS are kept.')) return
-                await api.deleteJob(j.id!)
-                onClose()
-              }}
-            >
-              Delete
-            </button>
-          )}
           <button type="button" onClick={onClose}>
             Cancel
           </button>

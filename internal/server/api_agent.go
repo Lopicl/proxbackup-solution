@@ -159,6 +159,12 @@ func (s *Server) enrollClient(ctx context.Context, e *Enrollment, req api.Enroll
 	if err := s.store.CreateClient(ctx, c); err != nil {
 		return nil, nil, err
 	}
+	// Group jobs for all clients pick up the new one.
+	if affected, err := s.store.SyncAllGroups(ctx); err != nil {
+		s.log.Error("attach group jobs", "client", c.Name, "err", err)
+	} else if err := s.membersChanged(ctx, affected); err != nil {
+		s.log.Error("attach group jobs", "client", c.Name, "err", err)
+	}
 	return c, certPEM, nil
 }
 
@@ -249,9 +255,10 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 			continue
 		}
 		cfg.Jobs = append(cfg.Jobs, api.JobConfig{ID: j.ID, Name: j.Name, Kind: j.Kind, BackupID: j.BackupID,
-			Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS,
+			Sources: j.Sources, Excludes: j.AllExcludes(), Volumes: j.Volumes, UseVSS: j.UseVSS,
 			ChangeDetection: s.changeDetection(ctx, t, j),
-			Schedule:        j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp, Encrypt: j.Encrypt})
+			Schedule:        j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp, Encrypt: j.Encrypt,
+			StartDelay: j.StartDelay})
 	}
 	b, _ := json.Marshal(cfg)
 	sum := sha256.Sum256(b)
@@ -332,7 +339,7 @@ func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSp
 		if err != nil {
 			return nil, fmt.Errorf("job %d: %w", run.JobID, err)
 		}
-		spec.BackupID, spec.Sources, spec.Excludes, spec.Volumes, spec.UseVSS = j.BackupID, j.Sources, j.Excludes, j.Volumes, j.UseVSS
+		spec.BackupID, spec.Sources, spec.Excludes, spec.Volumes, spec.UseVSS = j.BackupID, j.Sources, j.AllExcludes(), j.Volumes, j.UseVSS
 		spec.ChangeDetection = s.changeDetection(ctx, t, j)
 		spec.Encrypt = j.Encrypt
 	}

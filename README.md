@@ -55,7 +55,9 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
    a *Volume image* job. The schedule is pushed to the PC, and the **agent** starts the backup on
    the PC's own clock. If the PC is off, asleep or busy during the start window, the job either
    catches up as soon as possible (default) or is recorded as *missed*. *Run now* triggers it
-   from the server immediately.
+   from the server immediately. A job can cover many PCs: on the **Jobs** page, pick clients by
+   name or by tag (or all clients). Each PC keeps its own backup group and history, can be
+   disabled or get extra excludes, and an optional start spread staggers the PCs' start times.
 
 Ad-hoc use without a server (handy for testing):
 

@@ -181,6 +181,19 @@ read on every run.
   the poll, so changes arrive within seconds when the PC is online. At startup the agent tries a
   quick sync (≤10 s) before its first schedule check, so changes made while the PC was off take
   effect immediately.
+* **Group jobs.** Every backup job is a group job: one definition (type, sources, excludes,
+  schedule, window, catch-up, retention, lock period, change detection, encryption) assigned to
+  clients chosen by name and/or by client tag (`*` = all clients, so newly enrolled PCs join).
+  Each member is its own row in `jobs`, with its own id (the agent schedules by it), PBS backup
+  group (`<client>`, `<client>-image` or a fixed backup id, always in the client's own
+  namespace), run history, retention and locks. Members can be disabled and can add exclude
+  patterns. Saving a group job or a client's tags attaches/detaches members and wakes the
+  affected agents; offline PCs get the change on their next poll. An optional start spread gives
+  each member a stable offset (hash of group and client) within N minutes, sent as the job's
+  `start_delay`, so many PCs don't hit PBS in the same minute. "Run now" works for the whole
+  group (enabled members without an active run) or for one member. Jobs that predate group jobs
+  were migrated to one group job each, keeping their ids, backup groups, history and locks.
+  Permissions (who may manage group jobs, scoping by client tag) come with user management.
 * **Scheduling (agent-side).** See [Client-side scheduling](#client-side-scheduling) below.
   "Run now" and restores are the only work the server dispatches.
 * **Reporting.** The agent registers runs it started itself with `POST /agent/v1/runs`, which is
@@ -338,7 +351,10 @@ stateDiagram-v2
 erDiagram
   TARGET ||--o{ CLIENT : "stores"
   TARGET ||--o{ ENROLLMENT : "for"
-  CLIENT ||--o{ JOB : has
+  CLIENT ||--o{ JOB : "is member through"
+  GROUP_JOB ||--o{ JOB : "materializes as"
+  GROUP_JOB ||--o{ GROUP_JOB_CLIENT : "selects by name"
+  CLIENT ||--o{ GROUP_JOB_CLIENT : ""
   JOB ||--o{ RUN : produces
   RUN ||--o{ RUN_LOG : has
   CLIENT ||--o{ RUN : executes
@@ -346,8 +362,10 @@ erDiagram
   ADMIN ||--o{ SESSION : has
 
   TARGET { int id string name string host string fingerprint string datastore string root_ns string admin_auth_id blob admin_secret_enc string pbs_user }
-  CLIENT { int id string name string hostname string os string agent_version string cert_serial int target_id string namespace string token_id blob token_secret_enc datetime last_seen bool revoked string config_rev string schedule_state string time_zone blob crypt_key_enc string crypt_fingerprint datetime crypt_created }
-  JOB { int id int client_id string name string kind string backup_id string sources string excludes string volumes bool use_vss string schedule int window_minutes bool catch_up string retention bool enabled bool encrypt }
+  CLIENT { int id string name string hostname string os string agent_version string cert_serial int target_id string namespace string token_id blob token_secret_enc datetime last_seen bool revoked string config_rev string schedule_state string time_zone blob crypt_key_enc string crypt_fingerprint datetime crypt_created string tags }
+  GROUP_JOB { int id string name string kind string backup_id string sources string excludes string volumes bool use_vss string schedule int window_minutes bool catch_up string retention bool enabled string change_detection bool encrypt int lock_days int spread_minutes string member_tags }
+  GROUP_JOB_CLIENT { int group_id int client_id }
+  JOB { int id int client_id int group_id string backup_id bool enabled string extra_excludes }
   RUN { int id string uuid int job_id int client_id string kind string state string trigger string restore_spec datetime scheduled_for datetime queued_at datetime started_at datetime finished_at string progress string result string error string snapshot bool cancel_requested }
   RUN_LOG { int id int run_id datetime ts string level string msg }
   ENROLLMENT { int id string code_hash string client_name int target_id datetime expires datetime used_at int client_id blob command_enc }
@@ -355,7 +373,9 @@ erDiagram
   SESSION { string token_hash int admin_id datetime expires }
 ```
 
-`kind` is `files`/`image` for jobs and also `restore` for runs. JSON columns (`sources`,
+A `JOB` row is one client's membership in a group job; the definition lives in `GROUP_JOB`
+(the definition columns still on `jobs` are only read for jobs of clients revoked before group
+jobs existed). `kind` is `files`/`image` for jobs and also `restore` for runs. JSON columns (`sources`,
 `retention`, `progress`, …) are stored as text. A `settings` key/value table holds
 notification and update settings. Run history older than 180 days is pruned daily.
 

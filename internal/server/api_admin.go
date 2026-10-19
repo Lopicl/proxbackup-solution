@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"proxbackup/internal/api"
-	"proxbackup/internal/schedule"
 	"proxbackup/pkg/pbs"
 )
 
@@ -667,87 +666,40 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, orEmpty(jobs))
 }
 
-var backupIDRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
+// memberReq holds a member's own settings; the definition belongs to its group job.
+type memberReq struct {
+	Enabled       bool     `json:"enabled"`
+	ExtraExcludes []string `json:"extra_excludes"`
+}
 
-func (s *Server) handleSaveJob(w http.ResponseWriter, r *http.Request) {
-	var j Job
-	if err := decodeJSON(r, &j); err != nil {
-		httpError(w, 400, err)
-		return
-	}
-	ctx := r.Context()
-	if r.PathValue("id") != "" {
-		id, err := pathID(r)
-		if err != nil {
-			httpError(w, 400, err)
-			return
-		}
-		old, err := s.store.Job(ctx, id)
-		if err != nil {
-			httpError(w, statusFor(err), err)
-			return
-		}
-		j.ID, j.ClientID = id, old.ClientID
-	}
-	c, err := s.store.Client(ctx, j.ClientID)
-	if err != nil || c.Revoked {
-		httpError(w, 400, errors.New("unknown client"))
-		return
-	}
-	j.Sources, j.Excludes, j.Volumes = cleanList(j.Sources), cleanList(j.Excludes), cleanList(j.Volumes)
-	if j.BackupID == "" {
-		j.BackupID = c.Name
-		if j.Kind == api.KindImage {
-			j.BackupID = c.Name + "-image"
-		}
-	}
-	switch {
-	case j.Name == "":
-		err = errors.New("name is required")
-	case j.Kind != api.KindFiles && j.Kind != api.KindImage:
-		err = errors.New("kind must be files or image")
-	case j.Kind == api.KindFiles && len(j.Sources) == 0:
-		err = errors.New("at least one source path is required")
-	case j.Kind == api.KindImage && len(j.Volumes) == 0:
-		err = errors.New("at least one volume is required")
-	case !backupIDRe.MatchString(j.BackupID):
-		err = errors.New("invalid backup id")
-	case j.Schedule != "":
-		err = schedule.Validate(j.Schedule)
-	}
-	if j.WindowMinutes <= 0 {
-		j.WindowMinutes = 60
-	}
-	switch j.ChangeDetection {
-	case "":
-		j.ChangeDetection = "metadata"
-	case "metadata", "data", "legacy":
-	default:
-		if err == nil {
-			err = errors.New("change_detection must be metadata, data or legacy")
-		}
-	}
-	if err == nil && j.WindowMinutes > 7*24*60 {
-		err = errors.New("start window must be at most 7 days")
-	}
-	if err == nil && (j.LockDays < 0 || j.LockDays > maxLockDays) {
-		err = fmt.Errorf("lock period must be between 0 and %d days", maxLockDays)
-	}
+// handleSaveMember changes a member job's overrides.
+func (s *Server) handleSaveMember(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
 	if err != nil {
 		httpError(w, 400, err)
 		return
 	}
-	if j.Encrypt {
-		if err := s.ensureClientKey(ctx, c); err != nil {
-			httpError(w, 500, fmt.Errorf("create encryption key: %w", err))
-			return
-		}
-	}
-	if err := s.store.SaveJob(ctx, &j); err != nil {
-		httpError(w, 500, err)
+	var req memberReq
+	if err := decodeJSON(r, &req); err != nil {
+		httpError(w, 400, err)
 		return
 	}
-	s.wakeClient(j.ClientID) // push the new configuration right away
+	ctx := r.Context()
+	j, err := s.store.Job(ctx, id)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	if err := s.store.SetMemberOverrides(ctx, id, req.Enabled, cleanList(req.ExtraExcludes)); err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	s.wakeClient(j.ClientID)
+	j, err = s.store.Job(ctx, id)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
 	writeJSON(w, j)
 }
 
@@ -761,21 +713,34 @@ func cleanList(in []string) []string {
 	return out
 }
 
+// handleDeleteJob detaches a client from the job's group. Clients selected by
+// one of the group's tags can only be disabled, not detached.
 func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
 		httpError(w, 400, err)
 		return
 	}
-	j, err := s.store.Job(r.Context(), id)
-	if err == nil {
-		err = s.store.DeleteJob(r.Context(), id)
-	}
+	ctx := r.Context()
+	j, err := s.store.Job(ctx, id)
 	if err != nil {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	if j.GroupID == 0 {
+		err = s.store.DeleteJob(ctx, id)
+	} else {
+		_, err = s.store.RemoveGroupClient(ctx, j.GroupID, j.ClientID)
+	}
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
 	s.wakeClient(j.ClientID)
+	if _, err := s.store.Job(ctx, id); err == nil {
+		httpError(w, http.StatusConflict, errors.New("the client is selected by a tag of this group job: disable it here, or change its tags"))
+		return
+	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

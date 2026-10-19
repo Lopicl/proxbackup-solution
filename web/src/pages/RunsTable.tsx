@@ -37,7 +37,7 @@ export function RunsTable({ runs, showClient, progress }: { runs: Run[]; showCli
                 </td>
               )}
               <td>
-                {r.job_name || r.kind}
+                {r.group_id ? <Link to={`/jobs/${r.group_id}`}>{r.job_name}</Link> : r.job_name || r.kind}
                 {r.trigger === 'schedule' && (
                   <span className="tag" title={r.scheduled_for ? `scheduled for ${new Date(r.scheduled_for * 1000).toLocaleString()}` : ''}>
                     sched

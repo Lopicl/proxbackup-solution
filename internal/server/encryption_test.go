@@ -49,8 +49,9 @@ func TestClientEncryptionKey(t *testing.T) {
 		t.Fatalf("key changed or missing: %q vs %q", fp, c.EncryptionFingerprint)
 	}
 
-	j := &Job{ClientID: c.ID, Name: "files", Kind: "files", BackupID: "pc-1", Sources: []string{`C:\Users`}, Enabled: true, Encrypt: true, ChangeDetection: "metadata"}
-	if err := s.store.SaveJob(ctx, j); err != nil {
+	g := &GroupJob{Name: "files", Kind: "files", Sources: []string{`C:\Users`}, Enabled: true, Encrypt: true, ChangeDetection: "metadata",
+		Clients: []int64{c.ID}}
+	if _, err := s.store.SaveGroupJob(ctx, g); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := s.agentConfig(ctx, c)

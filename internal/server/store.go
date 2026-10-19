@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS snapshot_locks (
   id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, target_id INTEGER NOT NULL, namespace TEXT NOT NULL,
   backup_type TEXT NOT NULL, backup_id TEXT NOT NULL, backup_time INTEGER NOT NULL, lock_days INTEGER NOT NULL,
   UNIQUE(target_id, namespace, backup_type, backup_id, backup_time));
+CREATE TABLE IF NOT EXISTS group_jobs (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, backup_id TEXT NOT NULL DEFAULT '',
+  sources TEXT NOT NULL DEFAULT '[]', excludes TEXT NOT NULL DEFAULT '[]', volumes TEXT NOT NULL DEFAULT '[]',
+  use_vss INTEGER NOT NULL DEFAULT 1, schedule TEXT NOT NULL DEFAULT '', window_minutes INTEGER NOT NULL DEFAULT 60,
+  catch_up INTEGER NOT NULL DEFAULT 1, retention TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
+  change_detection TEXT NOT NULL DEFAULT 'metadata', encrypt INTEGER NOT NULL DEFAULT 0, lock_days INTEGER NOT NULL DEFAULT 0,
+  spread_minutes INTEGER NOT NULL DEFAULT 0, member_tags TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS group_job_clients (
+  group_id INTEGER NOT NULL REFERENCES group_jobs(id) ON DELETE CASCADE,
+  client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE, PRIMARY KEY(group_id, client_id));
 `
 
 // Store wraps the SQLite database.
@@ -108,6 +118,12 @@ func (s *Store) migrate() error {
 		// Namespaces a client used before its target's root namespace changed;
 		// their snapshots stay listed and restorable.
 		{"clients", "old_namespaces", "TEXT NOT NULL DEFAULT '[]'"},
+		// Group jobs: a jobs row is now one client's membership in a group job,
+		// which holds the definition. Its own definition columns are only
+		// read for rows without a group (jobs of clients revoked before).
+		{"jobs", "group_id", "INTEGER NOT NULL DEFAULT 0"},
+		{"jobs", "extra_excludes", "TEXT NOT NULL DEFAULT '[]'"},
+		{"clients", "tags", "TEXT NOT NULL DEFAULT '[]'"},
 	}
 	for _, c := range cols {
 		var n int
@@ -126,8 +142,13 @@ func (s *Store) migrate() error {
 			}
 		}
 	}
-	_, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS runs_uuid ON runs(client_id, uuid) WHERE uuid<>''`)
-	return err
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS runs_uuid ON runs(client_id, uuid) WHERE uuid<>''`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS jobs_group ON jobs(group_id)`); err != nil {
+		return err
+	}
+	return s.migrateGroupJobs()
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -163,9 +184,11 @@ type Client struct {
 	// OldNamespaces hold the client's snapshots from before a root namespace change.
 	OldNamespaces []string `json:"old_namespaces"`
 	TokenID       string   `json:"token_id"`
-	LastSeen      int64    `json:"last_seen"`
-	Revoked       bool     `json:"revoked"`
-	CreatedAt     int64    `json:"created_at"`
+	// Tags put the client into client groups; group jobs can target them.
+	Tags      []string `json:"tags"`
+	LastSeen  int64    `json:"last_seen"`
+	Revoked   bool     `json:"revoked"`
+	CreatedAt int64    `json:"created_at"`
 	// Derived for the UI.
 	Online      bool   `json:"online"`
 	LastRun     *Run   `json:"last_run,omitempty"`
@@ -188,9 +211,12 @@ type Client struct {
 	cryptKeyEnc    []byte
 }
 
+// Job is one client's membership in a group job: the group's definition with
+// the member's own backup group and overrides applied.
 type Job struct {
 	ID            int64           `json:"id"`
 	ClientID      int64           `json:"client_id"`
+	GroupID       int64           `json:"group_id"`
 	Name          string          `json:"name"`
 	Kind          string          `json:"kind"`
 	BackupID      string          `json:"backup_id"`
@@ -202,8 +228,17 @@ type Job struct {
 	WindowMinutes int             `json:"window_minutes"`
 	CatchUp       bool            `json:"catch_up"`
 	Retention     pbs.KeepOptions `json:"retention"`
-	Enabled       bool            `json:"enabled"`
-	CreatedAt     int64           `json:"created_at"`
+	// Enabled: the group job and this member are enabled.
+	Enabled       bool  `json:"enabled"`
+	GroupEnabled  bool  `json:"group_enabled"`
+	MemberEnabled bool  `json:"member_enabled"`
+	CreatedAt     int64 `json:"created_at"`
+	// ExtraExcludes are this member's patterns on top of the group's Excludes.
+	ExtraExcludes []string `json:"extra_excludes"`
+	// StartDelay (seconds) spreads the members' start times over the group's
+	// SpreadMinutes, so many PCs don't hit PBS in the same minute.
+	SpreadMinutes int `json:"spread_minutes"`
+	StartDelay    int `json:"start_delay"`
 	// File jobs: metadata, data or legacy (see api.JobSpec.ChangeDetection).
 	ChangeDetection string `json:"change_detection"`
 	// Encrypt client-side with the client key.
@@ -235,6 +270,7 @@ type Run struct {
 	Restore         *api.RestoreSpec `json:"restore,omitempty"`
 	JobName         string           `json:"job_name"`
 	ClientName      string           `json:"client_name"`
+	GroupID         int64            `json:"group_id"`
 }
 
 type LogLine struct {
@@ -389,14 +425,14 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 // ---- clients ----
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
-	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces`
+	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
-	var sched, oldNS string
+	var sched, oldNS, tags string
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
-		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS)
+		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -405,6 +441,8 @@ func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	if c.OldNamespaces == nil {
 		c.OldNamespaces = []string{}
 	}
+	json.Unmarshal([]byte(tags), &c.Tags)
+	c.Tags = nonNil(c.Tags)
 	c.Online = !c.Revoked && time.Since(time.Unix(c.LastSeen, 0)) < 2*time.Minute
 	return c, err
 }
@@ -663,31 +701,49 @@ func (s *Store) DeleteSetupToken(ctx context.Context, id int64) error {
 
 // ---- jobs ----
 
-const jobCols = `id, client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention, enabled, created_at, window_minutes, catch_up, change_detection, encrypt, lock_days`
+// jobCols reads a member row with its group's definition. Rows without a
+// group (jobs of clients revoked before group jobs existed) keep their own.
+const jobCols = `j.id, j.client_id, j.group_id, COALESCE(g.name, j.name), COALESCE(g.kind, j.kind), j.backup_id,
+	COALESCE(g.sources, j.sources), COALESCE(g.excludes, j.excludes), j.extra_excludes, COALESCE(g.volumes, j.volumes),
+	COALESCE(g.use_vss, j.use_vss), COALESCE(g.schedule, j.schedule), COALESCE(g.retention, j.retention), j.enabled,
+	COALESCE(g.enabled, 1), j.created_at, COALESCE(g.window_minutes, j.window_minutes), COALESCE(g.catch_up, j.catch_up),
+	COALESCE(g.change_detection, j.change_detection), COALESCE(g.encrypt, j.encrypt), COALESCE(g.lock_days, j.lock_days),
+	COALESCE(g.spread_minutes, 0)`
+const jobFrom = ` FROM jobs j LEFT JOIN group_jobs g ON g.id=j.group_id`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	j := &Job{}
-	var src, exc, vol, ret string
-	err := sc.Scan(&j.ID, &j.ClientID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &vol, &j.UseVSS, &j.Schedule, &ret, &j.Enabled, &j.CreatedAt,
-		&j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.LockDays)
+	var src, exc, extra, vol, ret string
+	err := sc.Scan(&j.ID, &j.ClientID, &j.GroupID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &extra, &vol, &j.UseVSS, &j.Schedule, &ret,
+		&j.MemberEnabled, &j.GroupEnabled, &j.CreatedAt, &j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.LockDays,
+		&j.SpreadMinutes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
 	json.Unmarshal([]byte(src), &j.Sources)
 	json.Unmarshal([]byte(exc), &j.Excludes)
+	json.Unmarshal([]byte(extra), &j.ExtraExcludes)
 	json.Unmarshal([]byte(vol), &j.Volumes)
 	json.Unmarshal([]byte(ret), &j.Retention)
+	j.Sources, j.Excludes, j.ExtraExcludes, j.Volumes = nonNil(j.Sources), nonNil(j.Excludes), nonNil(j.ExtraExcludes), nonNil(j.Volumes)
+	j.Enabled = j.MemberEnabled && j.GroupEnabled
+	j.StartDelay = startDelay(j.GroupID, j.ClientID, j.SpreadMinutes)
 	return j, err
 }
 
-func (s *Store) Jobs(ctx context.Context, clientID int64) ([]*Job, error) {
-	q := `SELECT ` + jobCols + ` FROM jobs`
-	var args []any
-	if clientID > 0 {
-		q += ` WHERE client_id=?`
-		args = append(args, clientID)
+// AllExcludes are the group's exclude patterns plus the member's own.
+func (j *Job) AllExcludes() []string {
+	out := slices.Clone(j.Excludes)
+	for _, e := range j.ExtraExcludes {
+		if !slices.Contains(out, e) {
+			out = append(out, e)
+		}
 	}
-	rows, err := s.db.QueryContext(ctx, q+` ORDER BY client_id, name`, args...)
+	return out
+}
+
+func (s *Store) queryJobs(ctx context.Context, where string, args ...any) ([]*Job, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+jobCols+jobFrom+where+` ORDER BY j.client_id, 4`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -703,36 +759,39 @@ func (s *Store) Jobs(ctx context.Context, clientID int64) ([]*Job, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) Job(ctx context.Context, id int64) (*Job, error) {
-	return scanJob(s.db.QueryRowContext(ctx, `SELECT `+jobCols+` FROM jobs WHERE id=?`, id))
-}
-
-func (s *Store) SaveJob(ctx context.Context, j *Job) error {
-	src, _ := json.Marshal(nonNil(j.Sources))
-	exc, _ := json.Marshal(nonNil(j.Excludes))
-	vol, _ := json.Marshal(nonNil(j.Volumes))
-	ret, _ := json.Marshal(j.Retention)
-	if j.ID == 0 {
-		j.CreatedAt = now()
-		res, err := s.db.ExecContext(ctx, `INSERT INTO jobs(client_id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, retention,
-			enabled, created_at, window_minutes, catch_up, change_detection, encrypt, lock_days) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			j.ClientID, j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.CreatedAt, j.WindowMinutes, j.CatchUp,
-			j.ChangeDetection, j.Encrypt, j.LockDays)
-		if err != nil {
-			return err
-		}
-		j.ID, _ = res.LastInsertId()
-		return nil
+// Jobs lists the member jobs of a client (all clients for clientID 0).
+func (s *Store) Jobs(ctx context.Context, clientID int64) ([]*Job, error) {
+	if clientID > 0 {
+		return s.queryJobs(ctx, ` WHERE j.client_id=?`, clientID)
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?, schedule=?,
-		retention=?, enabled=?, window_minutes=?, catch_up=?, change_detection=?, encrypt=?, lock_days=? WHERE id=?`,
-		j.Name, j.Kind, j.BackupID, src, exc, vol, j.UseVSS, j.Schedule, ret, j.Enabled, j.WindowMinutes, j.CatchUp, j.ChangeDetection, j.Encrypt,
-		j.LockDays, j.ID)
-	return err
+	return s.queryJobs(ctx, "")
 }
 
+// GroupMembers lists the member jobs of a group job.
+func (s *Store) GroupMembers(ctx context.Context, groupID int64) ([]*Job, error) {
+	return s.queryJobs(ctx, ` WHERE j.group_id=?`, groupID)
+}
+
+func (s *Store) Job(ctx context.Context, id int64) (*Job, error) {
+	return scanJob(s.db.QueryRowContext(ctx, `SELECT `+jobCols+jobFrom+` WHERE j.id=?`, id))
+}
+
+// SetMemberOverrides changes a member's own settings.
+func (s *Store) SetMemberOverrides(ctx context.Context, id int64, enabled bool, extraExcludes []string) error {
+	b, _ := json.Marshal(nonNil(extraExcludes))
+	res, err := s.db.ExecContext(ctx, `UPDATE jobs SET enabled=?, extra_excludes=? WHERE id=?`, enabled, string(b), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	return nil
+}
+
+// DeleteJob removes a job without a group (see migrateGroupJobs).
 func (s *Store) DeleteJob(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id=?`, id)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id=? AND group_id=0`, id)
 	return err
 }
 
@@ -746,14 +805,14 @@ func nonNil(s []string) []string {
 // ---- runs ----
 
 const runCols = `r.id, r.job_id, r.client_id, r.kind, r.state, r.trigger, r.restore_spec, r.queued_at, r.started_at, r.finished_at,
-	r.last_event_at, r.progress, r.result, r.error, r.snapshot, r.cancel_requested, COALESCE(j.name,''), COALESCE(c.name,''), r.scheduled_for`
-const runFrom = ` FROM runs r LEFT JOIN jobs j ON j.id=r.job_id LEFT JOIN clients c ON c.id=r.client_id`
+	r.last_event_at, r.progress, r.result, r.error, r.snapshot, r.cancel_requested, COALESCE(g.name, j.name, ''), COALESCE(c.name,''), r.scheduled_for, COALESCE(j.group_id, 0)`
+const runFrom = ` FROM runs r LEFT JOIN jobs j ON j.id=r.job_id LEFT JOIN group_jobs g ON g.id=j.group_id LEFT JOIN clients c ON c.id=r.client_id`
 
 func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	r := &Run{}
 	var rs, prog, res string
 	err := sc.Scan(&r.ID, &r.JobID, &r.ClientID, &r.Kind, &r.State, &r.Trigger, &rs, &r.QueuedAt, &r.StartedAt, &r.FinishedAt,
-		&r.LastEventAt, &prog, &res, &r.Error, &r.Snapshot, &r.CancelRequested, &r.JobName, &r.ClientName, &r.ScheduledFor)
+		&r.LastEventAt, &prog, &res, &r.Error, &r.Snapshot, &r.CancelRequested, &r.JobName, &r.ClientName, &r.ScheduledFor, &r.GroupID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -767,9 +826,9 @@ func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 }
 
 type RunFilter struct {
-	ClientID, JobID int64
-	Active          bool
-	Limit           int
+	ClientID, JobID, GroupID int64
+	Active                   bool
+	Limit                    int
 }
 
 func (s *Store) Runs(ctx context.Context, f RunFilter) ([]*Run, error) {
@@ -782,6 +841,10 @@ func (s *Store) Runs(ctx context.Context, f RunFilter) ([]*Run, error) {
 	if f.JobID > 0 {
 		q += ` AND r.job_id=?`
 		args = append(args, f.JobID)
+	}
+	if f.GroupID > 0 {
+		q += ` AND j.group_id=?`
+		args = append(args, f.GroupID)
 	}
 	if f.Active {
 		q += ` AND r.state IN ('queued','dispatched','running')`

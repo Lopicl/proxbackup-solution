@@ -7,6 +7,7 @@ import { ErrorBox, Field, Modal } from './ui'
 import { Dashboard } from './pages/Dashboard'
 import { Clients } from './pages/Clients'
 import { ClientDetail } from './pages/ClientDetail'
+import { JobDetail, Jobs } from './pages/Jobs'
 import { RunDetail } from './pages/RunDetail'
 import { Targets } from './pages/Targets'
 import { Settings } from './pages/Settings'
@@ -117,6 +118,7 @@ function PasswordForm({ forced, onDone, onCancel }: { forced?: boolean; onDone: 
 const nav = [
   { to: '/', label: 'Dashboard' },
   { to: '/clients', label: 'Clients' },
+  { to: '/jobs', label: 'Jobs' },
   { to: '/targets', label: 'PBS servers' },
   { to: '/settings', label: 'Settings' },
 ]
@@ -151,6 +153,8 @@ function App() {
   let page
   if (parts[0] === 'clients' && parts[1]) page = <ClientDetail id={Number(parts[1])} tab={parts[2] ?? 'jobs'} />
   else if (parts[0] === 'clients') page = <Clients />
+  else if (parts[0] === 'jobs' && parts[1]) page = <JobDetail id={Number(parts[1])} />
+  else if (parts[0] === 'jobs') page = <Jobs />
   else if (parts[0] === 'runs' && parts[1]) page = <RunDetail id={Number(parts[1])} />
   else if (parts[0] === 'targets') page = <Targets />
   else if (parts[0] === 'settings') page = <Settings />

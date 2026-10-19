@@ -124,6 +124,9 @@ type JobConfig struct {
 	CatchUp bool `json:"catch_up"`
 	// Encrypt with the client key (AgentConfig.Crypt).
 	Encrypt bool `json:"encrypt,omitempty"`
+	// StartDelay (seconds) shifts every scheduled time of the job, spreading
+	// the members of a group job so they don't all hit PBS at once.
+	StartDelay int `json:"start_delay,omitempty"`
 }
 
 // AgentConfig is everything the agent needs to run scheduled backups on its

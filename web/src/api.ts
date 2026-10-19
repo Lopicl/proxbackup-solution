@@ -55,6 +55,7 @@ export interface Run {
   scheduled_for: number
   job_name: string
   client_name: string
+  group_id: number
 }
 
 export interface Client {
@@ -66,6 +67,7 @@ export interface Client {
   target_id: number
   namespace: string
   token_id: string
+  tags: string[] // client groups; group jobs can select clients by tag
   last_seen: number
   online: boolean
   last_run?: Run
@@ -88,12 +90,11 @@ export interface Keep {
   'keep-yearly'?: number
 }
 
-export interface Job {
-  id: number
-  client_id: number
+// The definition shared by the members of a group job.
+export interface JobDefinition {
   name: string
   kind: 'files' | 'image'
-  backup_id: string
+  backup_id: string // group job: '' = per client (<client> or <client>-image)
   sources: string[]
   excludes: string[]
   volumes: string[]
@@ -105,9 +106,43 @@ export interface Job {
   catch_up: boolean
   retention: Keep
   lock_days: number // snapshots stay protected on PBS this long (0 = off)
+  spread_minutes: number // members' start times are spread over this many minutes
   enabled: boolean
+}
+
+// One client's membership in a group job: the group's definition with the
+// member's backup group and overrides.
+export interface Job extends JobDefinition {
+  id: number
+  client_id: number
+  group_id: number
+  group_enabled: boolean
+  member_enabled: boolean
+  extra_excludes: string[]
+  start_delay: number // seconds after the scheduled time this member starts
   next_run?: number
   catch_up_pending?: boolean
+}
+
+export const ALL_CLIENTS = '*'
+
+export interface GroupJob extends JobDefinition {
+  id: number
+  clients: number[] // explicit members
+  tags: string[] // plus every client with one of these tags ('*' = all clients)
+  created_at: number
+}
+
+export interface GroupMember extends Job {
+  client_name: string
+  online: boolean
+  explicit: boolean
+  via_tags: string[]
+  last_run?: Run
+}
+
+export interface GroupJobView extends GroupJob {
+  members: GroupMember[]
 }
 
 export interface Target {
@@ -331,10 +366,20 @@ export const api = {
   // Saves the setup .exe for arch through the browser.
   downloadSetup: (id: number, arch: 'amd64' | 'arm64') => download(`/setup-tokens/${id}/download/${arch}`, `proxbackup-agent-setup-${arch}.exe`),
 
-  saveJob: (j: Partial<Job>) =>
-    j.id ? request<Job>('PUT', `/jobs/${j.id}`, strip(j, ['id', 'next_run', 'catch_up_pending', 'client_id', 'created_at'])) : request<Job>('POST', '/jobs', strip(j, ['next_run', 'catch_up_pending'])),
-  deleteJob: (id: number) => request('DELETE', `/jobs/${id}`),
+  // Member jobs: overrides, detach, run one member.
+  saveMember: (id: number, m: { enabled: boolean; extra_excludes: string[] }) => request<Job>('PUT', `/jobs/${id}`, m),
+  detachMember: (id: number) => request('DELETE', `/jobs/${id}`),
   runJob: (id: number) => request<{ run_id: number }>('POST', `/jobs/${id}/run`),
+
+  groupJobs: () => request<GroupJobView[]>('GET', '/group-jobs'),
+  groupJob: (id: number) => request<{ job: GroupJobView; runs: Run[] }>('GET', `/group-jobs/${id}`),
+  saveGroupJob: (g: Partial<GroupJob>) => {
+    const body = strip(g, ['id', 'created_at', 'members'])
+    return g.id ? request<GroupJob>('PUT', `/group-jobs/${g.id}`, body) : request<GroupJob>('POST', '/group-jobs', body)
+  },
+  deleteGroupJob: (id: number) => request('DELETE', `/group-jobs/${id}`),
+  runGroupJob: (id: number) => request<{ run_ids: number[]; skipped: number }>('POST', `/group-jobs/${id}/run`),
+  setClientTags: (id: number, tags: string[]) => request<{ tags: string[] }>('PUT', `/clients/${id}/tags`, { tags }),
 
   runs: (q: { client_id?: number; active?: boolean; limit?: number } = {}) => {
     const p = new URLSearchParams()

@@ -127,7 +127,7 @@ func (s *Scheduler) Update(c *api.AgentConfig) error {
 		if st == nil || st.Schedule != j.Schedule {
 			// New job or changed schedule: start counting from now, don't
 			// catch up on slots that belonged to a different schedule.
-			st = &jobState{Schedule: j.Schedule, LastSlot: now.Unix()}
+			st = &jobState{Schedule: j.Schedule, LastSlot: now.Add(-delay(j)).Unix()}
 		}
 		if !j.CatchUp {
 			st.CatchUpPending = false
@@ -141,6 +141,13 @@ func (s *Scheduler) Update(c *api.AgentConfig) error {
 func (s *Scheduler) saveLocked() error {
 	b, _ := json.MarshalIndent(s.state, "", "  ")
 	return writeSecret(filepath.Join(s.dir, scheduleStateFile), b)
+}
+
+// delay is the job's start offset: slots are evaluated on a clock that runs
+// this much behind, so a 21:00 schedule with a 10 minute delay starts at 21:10.
+// LastSlot keeps the unshifted schedule time.
+func delay(j api.JobConfig) time.Duration {
+	return time.Duration(max(j.StartDelay, 0)) * time.Second
 }
 
 func window(j api.JobConfig) time.Duration {
@@ -169,9 +176,10 @@ func (s *Scheduler) Tick() {
 		if err != nil {
 			continue
 		}
+		off := delay(j)
 		st := s.state[j.ID]
 		if st == nil {
-			st = &jobState{Schedule: j.Schedule, LastSlot: now.Unix()}
+			st = &jobState{Schedule: j.Schedule, LastSlot: now.Add(-off).Unix()}
 			s.state[j.ID] = st
 			changed = true
 		}
@@ -184,11 +192,12 @@ func (s *Scheduler) Tick() {
 			}
 		}
 
-		due := schedule.Check(sched, time.Unix(st.LastSlot, 0), now, window(j))
+		due := schedule.Check(sched, time.Unix(st.LastSlot, 0), now.Add(-off), window(j))
 		if due.Count == 0 {
 			continue
 		}
 		st.LastSlot, changed = due.Slot.Unix(), true
+		due.Slot = due.Slot.Add(off) // when this member's run is due
 		skipped := ""
 		if due.Count > 1 {
 			skipped = fmt.Sprintf(" (%d scheduled runs were missed)", due.Count)
@@ -233,7 +242,7 @@ func (s *Scheduler) States() []api.JobState {
 		}
 		if j.Schedule != "" {
 			if sched, err := schedule.Parse(j.Schedule); err == nil {
-				js.NextRun = sched.Next(now).Unix()
+				js.NextRun = sched.Next(now.Add(-delay(j))).Add(delay(j)).Unix()
 			}
 		}
 		out = append(out, js)

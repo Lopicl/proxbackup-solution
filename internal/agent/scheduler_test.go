@@ -152,3 +152,39 @@ func TestLateStart(t *testing.T) {
 		t.Fatal("late start with catch-up must become catch-up")
 	}
 }
+
+func TestSchedulerStartDelay(t *testing.T) {
+	j := daily(true)
+	j.StartDelay = 10 * 60
+	h := newHarness(t, j)
+	h.at(12, 21, 5)
+	h.s.Tick()
+	if len(h.started) != 0 {
+		t.Fatalf("started before its delay: %v", h.started)
+	}
+	if st := h.s.States(); st[0].NextRun != time.Date(2026, 10, 12, 21, 10, 0, 0, time.Local).Unix() {
+		t.Fatalf("next run %v", time.Unix(st[0].NextRun, 0))
+	}
+	h.at(12, 21, 10)
+	h.s.Tick()
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:10" {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+// A job pushed between the schedule time and its delayed start still runs.
+func TestSchedulerStartDelayNewJob(t *testing.T) {
+	j := daily(true)
+	j.StartDelay = 30 * 60
+	h := newHarness(t)
+	h.at(12, 21, 5)
+	if err := h.s.Update(&api.AgentConfig{Rev: "r2", Jobs: []api.JobConfig{j}}); err != nil {
+		t.Fatal(err)
+	}
+	h.at(12, 21, 30)
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:30" {
+		t.Fatalf("started %v", h.started)
+	}
+}
