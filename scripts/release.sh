@@ -57,6 +57,17 @@ check_tree() {
   [ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$branch" 2>/dev/null)" ] || die "HEAD is not pushed to origin/$branch; push first"
 }
 
+# release_notes lists the commits since the previous release tag, without the
+# version bump commits. Consoles show these notes under Settings -> Updates.
+release_notes() {
+  local prev range notes
+  prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ 2>/dev/null || true)
+  range=${prev:+$prev..}HEAD
+  notes=$(git log --no-merges --format='- %s (%h)' "$range" | grep -v '^- chore: release v' || true)
+  printf '%s\n' "${notes:-- No changes besides the version bump.}"
+  [ -z "$prev" ] || printf '\nChanges since %s.\n' "$prev"
+}
+
 publish() {
   git fetch -q origin alpha 2>/dev/null || true
   if [ "$("$root/scripts/prerelease.sh")" = 1 ]; then
@@ -72,7 +83,7 @@ publish() {
     if [[ " ${flags[*]-} " == *" --prerelease "* ]]; then gh release edit "$tag" --prerelease; fi
   else
     gh release create "$tag" "$dist"/* --target "$(git rev-parse HEAD)" \
-      --title "ProxBackup $version" --generate-notes ${flags[@]+"${flags[@]}"}
+      --title "ProxBackup $version" --notes "$(release_notes)" ${flags[@]+"${flags[@]}"}
   fi
   echo "published $tag"
 }

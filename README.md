@@ -134,7 +134,8 @@ with `make dist PRERELEASE=0`.
 
 Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it
 checks that the tag matches `VERSION`, runs the tests, builds `make dist` and publishes a GitHub
-release with these assets:
+release with these assets. The release description lists the commits since the previous
+release (version bump commits left out), which is also what consoles show as release notes:
 
 | Asset | Used by |
 | --- | --- |
