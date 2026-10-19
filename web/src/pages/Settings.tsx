@@ -16,7 +16,7 @@ export function Settings() {
   const set = (p: Partial<NotifySettings>) => setS({ ...s, ...p })
   return (
     <>
-      <h1>Settings</h1>
+      <h1>Console Settings</h1>
       <Card title="Notifications">
         <form
           onSubmit={async (e) => {

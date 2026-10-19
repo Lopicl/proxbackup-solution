@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { StrictMode, useEffect, useState } from 'react'
+import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { api, setUnauthorizedHandler, type Me } from './api'
 import { ErrorBox, Field, Modal } from './ui'
@@ -120,12 +120,68 @@ const nav = [
   { to: '/clients', label: 'Clients' },
   { to: '/jobs', label: 'Jobs' },
   { to: '/targets', label: 'PBS servers' },
-  { to: '/settings', label: 'Settings' },
 ]
+
+const UserIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="8" r="4" />
+    <path d="M4 21c0-4 3.6-7 8-7s8 3 8 7" />
+  </svg>
+)
+
+const GearIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+)
+
+/** The profile button in the top bar and its drop-down menu. */
+function ProfileMenu({ me, onSettings, onLogout }: { me: Me; onSettings: () => void; onLogout: () => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', close)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', close)
+    }
+  }, [open])
+  const pick = (fn: () => void) => () => {
+    setOpen(false)
+    fn()
+  }
+  return (
+    <div className="menu" ref={ref}>
+      <button className={'icon-btn profile' + (open ? ' open' : '')} onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open} title={me.username}>
+        <UserIcon />
+        <span className="name">{me.username}</span>
+      </button>
+      {open && (
+        <div className="menu-list" role="menu">
+          <div className="menu-head">
+            Signed in as <b>{me.username}</b>
+          </div>
+          <button role="menuitem" onClick={pick(onSettings)}>
+            Profile Settings
+          </button>
+          <button role="menuitem" onClick={pick(onLogout)}>
+            Logout
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
 
 function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined)
-  const [changingPw, setChangingPw] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   const route = useHashRoute()
   const loadMe = () => api.me().then(setMe, () => setMe(null))
   useEffect(() => {
@@ -146,7 +202,6 @@ function App() {
         </div>
       </div>
     )
-  const user = me.username
   const version = me.version
 
   const parts = route.split('/').filter(Boolean)
@@ -163,7 +218,7 @@ function App() {
   const active = '/' + (parts[0] ?? '')
   return (
     <div className="shell">
-      <aside>
+      <header className="topbar">
         <div className="brand">
           <span className="logo">▣</span> ProxBackup Console
         </div>
@@ -175,28 +230,29 @@ function App() {
           ))}
         </nav>
         {version && <div className="version">v{version}</div>}
-        <div className="user">
-          <span title={user}>{user}</span>
-          {me.local_account && (
-            <button className="ghost small" onClick={() => setChangingPw(true)}>
-              Password
-            </button>
-          )}
-          <button
-            className="ghost small"
-            onClick={async () => {
-              await api.logout()
-              setMe(null)
-            }}
-          >
-            Sign out
-          </button>
-        </div>
-      </aside>
+        <a href="#/settings" className={'icon-btn' + (active === '/settings' ? ' active' : '')} title="Console Settings" aria-label="Console Settings">
+          <GearIcon />
+        </a>
+        <ProfileMenu
+          me={me}
+          onSettings={() => setProfileOpen(true)}
+          onLogout={async () => {
+            await api.logout()
+            setMe(null)
+          }}
+        />
+      </header>
       <main>{page}</main>
-      {changingPw && (
-        <Modal title="Change password" onClose={() => setChangingPw(false)}>
-          <PasswordForm onDone={() => setChangingPw(false)} onCancel={() => setChangingPw(false)} />
+      {profileOpen && (
+        <Modal title="Profile Settings" onClose={() => setProfileOpen(false)}>
+          <h3>Change password</h3>
+          {me.local_account ? (
+            <PasswordForm onDone={() => setProfileOpen(false)} onCancel={() => setProfileOpen(false)} />
+          ) : (
+            <p className="muted-text">
+              <b>{me.username}</b> signs in through Proxmox Backup Server. Change its password on the PBS server.
+            </p>
+          )}
         </Modal>
       )}
     </div>

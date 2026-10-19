@@ -33,20 +33,26 @@ h1 { font-size: 22px; margin: 0 0 16px; display: flex; align-items: center; gap:
 h2 { font-size: 15px; margin: 0; }
 h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 20px 0 8px; }
 
-.shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
-aside { background: var(--side); color: #cfd5e1; display: flex; flex-direction: column; padding: 16px 0; }
-aside .brand { font-weight: 700; color: #fff; padding: 0 20px 20px; font-size: 15px; }
+.shell { min-height: 100vh; display: flex; flex-direction: column; }
+.topbar { background: var(--side); color: #cfd5e1; display: flex; align-items: center; gap: 4px; padding: 0 16px; height: 52px; position: sticky; top: 0; z-index: 5; }
+.topbar .brand { font-weight: 700; color: #fff; font-size: 15px; white-space: nowrap; margin-right: 18px; }
 .logo { color: var(--accent); }
-aside nav { display: flex; flex-direction: column; flex: 1; }
-aside nav a { color: #cfd5e1; padding: 9px 20px; border-left: 3px solid transparent; }
-aside nav a:hover { background: #ffffff10; text-decoration: none; }
-aside nav a.active { border-left-color: var(--accent); background: #ffffff14; color: #fff; }
-aside .version { padding: 0 20px 4px; font-size: 11px; color: #6b7385; font-family: ui-monospace, Menlo, monospace; }
-aside .user { padding: 12px 20px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; color: #9aa3b5; }
-aside .user { gap: 6px; }
-aside .user > :first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-aside .user button { white-space: nowrap; padding-left: 6px; padding-right: 6px; }
-main { padding: 24px 32px; max-width: 1400px; width: 100%; }
+.topbar nav { display: flex; align-self: stretch; flex: 1; min-width: 0; overflow-x: auto; }
+.topbar nav a { color: #cfd5e1; padding: 0 14px; display: flex; align-items: center; border-bottom: 3px solid transparent; border-top: 3px solid transparent; white-space: nowrap; }
+.topbar nav a:hover { background: #ffffff10; text-decoration: none; }
+.topbar nav a.active { border-bottom-color: var(--accent); background: #ffffff14; color: #fff; }
+.topbar .version { font-size: 11px; color: #6b7385; font-family: ui-monospace, Menlo, monospace; white-space: nowrap; margin: 0 12px; padding-right: 12px; border-right: 1px solid #ffffff1f; }
+.topbar .icon-btn { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 9px; border-radius: 6px; border: 1px solid transparent; background: transparent; color: #cfd5e1; }
+.topbar .icon-btn:hover, .topbar .icon-btn.open { background: #ffffff14; border-color: transparent; color: #fff; text-decoration: none; }
+.topbar .icon-btn.active { color: var(--accent); background: #ffffff14; }
+.topbar .profile .name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.menu { position: relative; }
+.menu-list { position: absolute; top: calc(100% + 6px); right: 0; min-width: 200px; background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 10px 30px #0004; padding: 4px; z-index: 20; display: flex; flex-direction: column; }
+.menu-head { padding: 8px 10px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-head b { color: var(--text); }
+.menu-list button { text-align: left; border: none; background: transparent; padding: 7px 10px; border-radius: 5px; }
+.menu-list button:hover { background: var(--bg); }
+main { padding: 24px 32px; max-width: 1400px; width: 100%; margin: 0 auto; }
 
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 18px; }
 .card > header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
@@ -161,11 +167,8 @@ pre.copy { background: var(--bg); padding: 12px; border-radius: 6px; white-space
 .login button { width: 100%; margin-top: 8px; padding: 9px; }
 
 @media (max-width: 800px) {
-  .shell { grid-template-columns: 1fr; }
-  aside { flex-direction: row; align-items: center; padding: 8px; overflow-x: auto; }
-  aside nav { flex-direction: row; }
-  aside .brand, aside .version { padding: 0 20px 4px; font-size: 11px; color: #6b7385; font-family: ui-monospace, Menlo, monospace; }
-aside .user { display: none; }
+  .topbar { padding: 0 8px; }
+  .topbar .brand, .topbar .version, .topbar .profile .name { display: none; }
   main { padding: 16px; }
   .grid2, .keep { grid-template-columns: 1fr 1fr; }
   .grid3 { grid-template-columns: 1fr; }
