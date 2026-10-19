@@ -188,3 +188,24 @@ func TestSchedulerStartDelayNewJob(t *testing.T) {
 		t.Fatalf("started %v", h.started)
 	}
 }
+
+func TestSchedulerPause(t *testing.T) {
+	h := newHarness(t, daily(true), api.JobConfig{ID: 2, Name: "img", Kind: api.KindImage, Schedule: "0 21 * * *", WindowMinutes: 60})
+	by := `PC\alice`
+	h.s.pausedBy = func() string { return by }
+	h.at(12, 21, 0)
+	h.s.Tick()
+	if len(h.started) != 0 || len(h.missed) != 1 || !strings.Contains(h.missed[0], `paused on the PC by PC\alice`) {
+		t.Fatalf("while paused: started %v missed %v", h.started, h.missed)
+	}
+	h.at(12, 21, 30)
+	h.s.Tick()
+	if len(h.started) != 0 {
+		t.Fatalf("catch-up started while paused: %v", h.started)
+	}
+	by = "" // resumed
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "catch-up@12 21:00" || len(h.missed) != 1 {
+		t.Fatalf("after resume: started %v missed %v", h.started, h.missed)
+	}
+}

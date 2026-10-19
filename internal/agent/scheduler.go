@@ -26,6 +26,8 @@ import (
 //     catch-up off: record the run as "missed"
 //   - same job still running (busy)   → catch-up on: start it once the current run ends
 //     catch-up off: record as "missed"
+//   - backups paused from the tray     → catch-up on: start it once the pause ends
+//     catch-up off: record as "missed"
 //
 // Several missed slots are coalesced into a single catch-up run.
 type Scheduler struct {
@@ -38,7 +40,9 @@ type Scheduler struct {
 	busy func(jobID int64) bool
 	// missed records a skipped scheduled run.
 	missed func(job api.JobConfig, slot time.Time, reason string)
-	logf   func(level, format string, args ...any)
+	// pausedBy reports who paused scheduled backups ("" = not paused).
+	pausedBy func() string
+	logf     func(level, format string, args ...any)
 
 	mu    sync.Mutex
 	cfg   *api.AgentConfig
@@ -168,6 +172,10 @@ func (s *Scheduler) Tick() {
 	jobs := s.cfg.Jobs
 	now := s.now()
 	changed := false
+	paused := ""
+	if s.pausedBy != nil {
+		paused = s.pausedBy()
+	}
 	for _, j := range jobs {
 		if j.Schedule == "" {
 			continue
@@ -185,7 +193,7 @@ func (s *Scheduler) Tick() {
 		}
 
 		// A catch-up deferred because the job was busy: start it once it's free.
-		if st.CatchUpPending && !s.busy(j.ID) {
+		if st.CatchUpPending && paused == "" && !s.busy(j.ID) {
 			if s.start(s.cfg.Spec(j), j, api.TriggerCatchUp, time.Unix(st.PendingSlot, 0)) {
 				s.logf("info", "%s: starting deferred catch-up run", j.Name)
 				st.CatchUpPending, changed = false, true
@@ -203,6 +211,13 @@ func (s *Scheduler) Tick() {
 			skipped = fmt.Sprintf(" (%d scheduled runs were missed)", due.Count)
 		}
 		switch {
+		case paused != "":
+			if j.CatchUp {
+				st.CatchUpPending, st.PendingSlot = true, due.Slot.Unix()
+				s.logf("info", "%s: backups are paused, will catch up when the pause ends", j.Name)
+			} else {
+				s.missed(j, due.Slot, "scheduled backups were paused on the PC by "+paused)
+			}
 		case s.busy(j.ID):
 			if j.CatchUp {
 				st.CatchUpPending, st.PendingSlot = true, due.Slot.Unix()

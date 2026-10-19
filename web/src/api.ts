@@ -79,6 +79,8 @@ export interface Client {
   agent_update_pushed: boolean
   encryption_fingerprint: string // '' until the first encrypted job is saved
   encryption_created: number
+  paused_until: number // scheduled backups paused from the tray app until then (unix s; compare with now)
+  paused_by: string
 }
 
 export interface Keep {
@@ -319,20 +321,21 @@ async function download(path: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 60000)
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
   const res = await fetch('/api' + path, {
     method,
     credentials: 'same-origin',
     headers: {
       'X-PROXBACKUP-Request': '1',
       ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...headers,
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   const text = await res.text()
   const data = text ? JSON.parse(text) : null
   if (!res.ok) {
-    if (res.status === 401 && path !== '/login') onUnauthorized()
+    if (res.status === 401 && path !== '/login' && !headers) onUnauthorized()
     throw new ApiError(res.status, data?.error ?? res.statusText)
   }
   return data as T
@@ -426,4 +429,46 @@ function strip<T extends object>(o: T, keys: string[]): Partial<T> {
   const c = { ...o } as Record<string, unknown>
   for (const k of keys) delete c[k]
   return c as Partial<T>
+}
+
+// ---- self-service restore (the page the tray app opens; no console login) ----
+
+/** A PC user's restore session, opened from the tray app. */
+export interface RestoreSession {
+  client_name: string
+  hostname: string
+  online: boolean
+  user: string // DOMAIN\name
+  admin: boolean // may restore everything
+  scope: string // the folder the user may restore ('' for administrators)
+  expires: number
+}
+
+/** A restore run requested on the self-service page. */
+export interface SelfRun {
+  id: number
+  state: string
+  archive: string
+  target_dir: string
+  paths: string[]
+  queued_at: number
+  finished_at: number
+  progress: Progress
+  result: Result
+  error: string
+}
+
+const snapQuery = (snap: Snapshot, path: string) =>
+  new URLSearchParams({ ns: snap.ns, backup_id: snap['backup-id'], backup_time: String(snap['backup-time']), path }).toString()
+
+/** The API of a restore session; token comes from the page URL (#/restore/<token>). */
+export function selfRestoreApi(token: string) {
+  const h = { 'X-Restore-Session': token }
+  return {
+    session: () => request<RestoreSession>('GET', '/self-restore/session', undefined, h),
+    snapshots: () => request<Snapshot[]>('GET', '/self-restore/snapshots', undefined, h),
+    catalog: (snap: Snapshot, path: string) => request<CatalogEntry[]>('GET', '/self-restore/catalog?' + snapQuery(snap, path), undefined, h),
+    restore: (spec: RestoreSpec) => request<{ run_id: number }>('POST', '/self-restore/restore', spec, h),
+    runs: () => request<SelfRun[]>('GET', '/self-restore/runs', undefined, h),
+  }
 }

@@ -73,6 +73,13 @@ type RestoreSpec struct {
 	// Namespace of the snapshot when it isn't the client's current one (it
 	// was taken before the client moved to another namespace).
 	Namespace string `json:"ns,omitempty"`
+	// Session is set for restores a PC user started with "Restore files…"
+	// in the tray app: the agent's reference to that user's restore session.
+	// The agent checks the paths against the user's scope and, for users who
+	// aren't administrators, writes the files as that user.
+	Session string `json:"session,omitempty"`
+	// RequestedBy is the Windows account of that user (for the run log).
+	RequestedBy string `json:"requested_by,omitempty"`
 }
 
 // JobSpec is sent from server to agent to start a run.
@@ -164,6 +171,10 @@ type PollRequest struct {
 	ConfigRev    string     `json:"config_rev"`
 	Schedule     []JobState `json:"schedule"`
 	TimeZone     string     `json:"time_zone"`
+	// PausedUntil (unix seconds, 0 = not paused): a PC user paused scheduled
+	// backups from the tray app until then; PausedBy is their account.
+	PausedUntil int64  `json:"paused_until,omitempty"`
+	PausedBy    string `json:"paused_by,omitempty"`
 }
 
 // PollResponse carries config updates, on-demand work and cancellations.
@@ -270,4 +281,25 @@ type EnrollmentToken struct {
 	Multi   bool   `json:"m,omitempty"`
 	Expires int64  `json:"e,omitempty"`
 	Host    string `json:"h,omitempty"`
+}
+
+// RestoreSessionRequest asks the console for a self-service restore page for
+// a PC user (POST /agent/v1/restore-sessions). The agent determines the user
+// from the tray app's named pipe connection, not from anything the tray sends.
+type RestoreSessionRequest struct {
+	Ref   string `json:"ref"`   // agent-side session reference, echoed in RestoreSpec.Session
+	User  string `json:"user"`  // DOMAIN\name
+	SID   string `json:"sid"`   // user SID
+	Admin bool   `json:"admin"` // member of the local Administrators group
+	// Scope is the folder the user may browse and restore (their profile
+	// folder); empty for administrators, who may restore everything.
+	Scope string `json:"scope"`
+	// TTL is how long the agent keeps the session (seconds).
+	TTL int64 `json:"ttl"`
+}
+
+// RestoreSessionResponse carries the page the tray app opens.
+type RestoreSessionResponse struct {
+	URL     string `json:"url"`
+	Expires int64  `json:"expires"`
 }

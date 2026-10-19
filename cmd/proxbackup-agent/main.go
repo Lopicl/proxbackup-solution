@@ -20,6 +20,7 @@ import (
 
 	"proxbackup/internal/agent"
 	"proxbackup/internal/api"
+	"proxbackup/internal/tray"
 )
 
 // version is set at build time from ./VERSION (see Makefile).
@@ -34,6 +35,7 @@ Usage:
   proxbackup-agent install | uninstall    install/remove the Windows service
   proxbackup-agent start | stop           start/stop the service
   proxbackup-agent run                    run in the foreground (what the service executes)
+  proxbackup-agent tray                   the notification-area icon (the service starts it in each user session)
   proxbackup-agent backup  [flags]        ad-hoc file backup straight to PBS (no server needed)
   proxbackup-agent image   [flags]        ad-hoc volume image backup
   proxbackup-agent restore [flags]        restore an archive from PBS
@@ -81,6 +83,10 @@ func main() {
 			fatalf("usage: proxbackup-agent setup <token>")
 		}
 		runSetup(*dataDir, fs.Arg(0))
+	case "tray":
+		replace := fs.Bool("replace", false, "take over from the tray of an older agent version")
+		fs.Parse(args)
+		os.Exit(tray.Run(version, *dataDir, *replace))
 	case "run", "install", "uninstall", "start", "stop":
 		fs.Parse(args)
 		err = serviceCommand(cmd, *dataDir, log)

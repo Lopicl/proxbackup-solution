@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { ALL_CLIENTS, api, type GroupJob, type GroupMember, type Snapshot } from '../api'
-import { RestoreBrowser } from './RestoreBrowser'
+import { adminBackend, RestoreBrowser } from './RestoreBrowser'
 import { RunsTable } from './RunsTable'
 import { GroupJobEditor, JobTags, keepText, MemberEditor, newGroupJob, ScheduleText } from './Jobs'
 import { ago, bytes, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
@@ -126,6 +126,14 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
             <b>off</b>
           )}
         </span>
+        {c.paused_until > Date.now() / 1000 && (
+          <span title="Paused from the ProxBackup tray icon on the PC. Scheduled runs with catch-up start when the pause ends; others are recorded as missed.">
+            Backups{' '}
+            <b className="warn-text">
+              paused by {c.paused_by} until {dateTime(c.paused_until)}
+            </b>
+          </span>
+        )}
         <span title="Schedules are evaluated by the agent on the PC's own clock">
           PC time zone <b>{c.time_zone || '—'}</b>
         </span>
@@ -324,6 +332,7 @@ function Snapshots({ clientId, online, onQueued }: { clientId: number; online: b
   const { data, error } = useLoad(() => api.snapshots(clientId), [clientId])
   const [restore, setRestore] = useState<{ snap: Snapshot; archive: string } | null>(null)
   const [browse, setBrowse] = useState<Snapshot | null>(null)
+  const backend = useMemo(() => adminBackend(clientId), [clientId])
   return (
     <Card title="Snapshots on PBS">
       <ErrorBox error={error} />
@@ -384,7 +393,7 @@ function Snapshots({ clientId, online, onQueued }: { clientId: number; online: b
         </table>
       )}
       {restore && <RestoreDialog clientId={clientId} {...restore} onClose={() => setRestore(null)} onQueued={(r) => onQueued([r])} />}
-      {browse && <RestoreBrowser clientId={clientId} snap={browse} online={online} onClose={() => setBrowse(null)} onQueued={onQueued} />}
+      {browse && <RestoreBrowser backend={backend} snap={browse} online={online} onClose={() => setBrowse(null)} onQueued={onQueued} />}
     </Card>
   )
 }

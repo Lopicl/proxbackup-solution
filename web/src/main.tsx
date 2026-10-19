@@ -11,6 +11,7 @@ import { JobDetail, Jobs } from './pages/Jobs'
 import { RunDetail } from './pages/RunDetail'
 import { Targets } from './pages/Targets'
 import { Settings } from './pages/Settings'
+import { SelfRestore } from './pages/SelfRestore'
 import './styles.css'
 
 function useHashRoute(): string {
@@ -184,10 +185,15 @@ function App() {
   const [profileOpen, setProfileOpen] = useState(false)
   const route = useHashRoute()
   const loadMe = () => api.me().then(setMe, () => setMe(null))
+  // A PC user's restore page from the tray icon: authenticated by its token, no login.
+  const selfRestore = route.startsWith('/restore/') ? route.slice('/restore/'.length) : ''
   useEffect(() => {
+    if (selfRestore) return
     setUnauthorizedHandler(() => setMe(null))
     loadMe()
-  }, [])
+  }, [selfRestore])
+
+  if (selfRestore) return <SelfRestore token={selfRestore} />
 
   if (me === undefined) return null
   if (me === null) return <Login onLogin={loadMe} />

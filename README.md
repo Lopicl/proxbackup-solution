@@ -6,7 +6,7 @@ ordinary PBS snapshots: deduplicated, verifiable, syncable, prunable.
 
 | Component | What it is |
 | --- | --- |
-| `proxbackup-agent` | **ProxBackup Agent**, a Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
+| `proxbackup-agent` | **ProxBackup Agent**, a Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores, and puts a tray icon in each user session: backup status, *Back up now*, pause, recent runs and *Restore files…* (a restore page in the browser; users who aren't administrators restore only their own profile folder). |
 | `proxbackup-server` | **ProxBackup Console**, the on-premises management server with an embedded web UI: enrollment, group jobs and schedules, run history and live logs, snapshot and file browser, restore, retention, snapshot locks, client-side encryption with key escrow, notifications, automatic updates. |
 | `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar archive format (v1, and v2 split archives). |
 
@@ -69,7 +69,10 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
    folders across the snapshot's archives, then restore them to their original location or to
    another folder on the PC. This works for file backups and for volume images (the agent reads
    NTFS straight from the image), encrypted or not. A whole volume image can also be restored
-   as a `.img` file.
+   as a `.img` file. On the PC itself, users choose *Restore files…* in the ProxBackup tray icon:
+   it opens the same file browser for that PC without a console login. Administrators of the
+   PC can restore anything; other users only files from their own profile folder, and the agent
+   writes those with the user's own Windows permissions.
 
 Ad-hoc use without a server (handy for testing):
 
@@ -168,9 +171,10 @@ repository.
 
 Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**. Done so far: group jobs,
 client-side encryption with key escrow, immutable lock window, tamper-resistant retention,
-file restore from volume images, the per-file restore browser in the web UI, and a top navigation bar with a profile
-menu (Profile Settings, Logout) and a Console Settings icon. Still open in phase 2: console user
-management with granular permissions, NTFS ACLs/ADS, tray app, bandwidth and
+file restore from volume images, the per-file restore browser in the web UI, a top navigation bar with a profile
+menu (Profile Settings, Logout) and a Console Settings icon, and the tray app with self-service
+restore. Still open in phase 2: console user
+management with granular permissions, NTFS ACLs/ADS, bandwidth and
 metered-network/battery limits and SMB/NFS share backups. The
 guided pull-sync to a second PBS (immutable off-host copy) moved to phase 5. See the roadmap
 in the architecture doc.
@@ -202,7 +206,6 @@ Known gaps (see the roadmap):
   key). Restore them from the console, or with `proxmox-backup-client --keyfile` and the key
   downloaded from the client's page
 - no NTFS ACLs or alternate data streams
-- no tray app
 - console sign-in is a local `admin` account or PBS administrator credentials; console users
   with roles and an audit log come later in phase 2
 - whole-volume image restore writes a `.img` file. Bare-metal recovery of Windows and Linux machines via a

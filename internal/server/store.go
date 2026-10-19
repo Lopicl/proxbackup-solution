@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS group_jobs (
   change_detection TEXT NOT NULL DEFAULT 'metadata', encrypt INTEGER NOT NULL DEFAULT 0, lock_days INTEGER NOT NULL DEFAULT 0,
   spread_minutes INTEGER NOT NULL DEFAULT 0, member_tags TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL,
   daily_cap INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS restore_sessions (
+  token_hash TEXT PRIMARY KEY, client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  user_name TEXT NOT NULL, user_sid TEXT NOT NULL, admin INTEGER NOT NULL, scope TEXT NOT NULL,
+  agent_ref TEXT NOT NULL, created_at INTEGER NOT NULL, max_expires INTEGER NOT NULL, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS group_job_clients (
   group_id INTEGER NOT NULL REFERENCES group_jobs(id) ON DELETE CASCADE,
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE, PRIMARY KEY(group_id, client_id));
@@ -127,6 +131,9 @@ func (s *Store) migrate() error {
 		{"clients", "tags", "TEXT NOT NULL DEFAULT '[]'"},
 		// Tamper-resistant retention: backups per job and day that count (0 = from the schedule).
 		{"group_jobs", "daily_cap", "INTEGER NOT NULL DEFAULT 0"},
+		// Scheduled backups paused by a PC user from the tray app.
+		{"clients", "paused_until", "INTEGER NOT NULL DEFAULT 0"},
+		{"clients", "paused_by", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, c := range cols {
 		var n int
@@ -202,6 +209,10 @@ type Client struct {
 	ScheduleState []api.JobState `json:"schedule_state"`
 	TimeZone      string         `json:"time_zone"`
 	ConfigSynced  bool           `json:"config_synced"`
+	// PausedUntil (unix seconds): a PC user paused scheduled backups from the
+	// tray app until then (as last reported; check against the time).
+	PausedUntil int64  `json:"paused_until"`
+	PausedBy    string `json:"paused_by"`
 	// AgentUpdate is the version the agent can be updated to (the console's), and
 	// AgentUpdatePushed whether an admin pushed it and the agent hasn't fetched it yet.
 	AgentUpdate       string `json:"agent_update,omitempty"`
@@ -431,14 +442,14 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 // ---- clients ----
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
-	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags`
+	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags, paused_until, paused_by`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
 	var sched, oldNS, tags string
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
-		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags)
+		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags, &c.PausedUntil, &c.PausedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -515,8 +526,9 @@ func (s *Store) MoveClientNamespace(ctx context.Context, c *Client, ns string) e
 
 func (s *Store) TouchClient(ctx context.Context, id int64, req api.PollRequest) {
 	sched, _ := json.Marshal(nonNilStates(req.Schedule))
-	s.db.ExecContext(ctx, `UPDATE clients SET last_seen=?, hostname=?, os=?, agent_version=?, config_rev=?, schedule_state=?, time_zone=?
-		WHERE id=?`, now(), req.Hostname, req.OS, req.AgentVersion, req.ConfigRev, sched, req.TimeZone, id)
+	s.db.ExecContext(ctx, `UPDATE clients SET last_seen=?, hostname=?, os=?, agent_version=?, config_rev=?, schedule_state=?, time_zone=?,
+		paused_until=?, paused_by=? WHERE id=?`, now(), req.Hostname, req.OS, req.AgentVersion, req.ConfigRev, sched, req.TimeZone,
+		req.PausedUntil, req.PausedBy, id)
 }
 
 // SetClientKey stores a new encryption key for a client that has none. It

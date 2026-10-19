@@ -206,6 +206,7 @@ func (s *Server) uiRoutes() http.Handler {
 		w.Header().Set("Content-Type", "application/x-pem-file")
 		w.Write(s.pki.CAPEM)
 	})
+	s.selfRestoreRoutes(mux) // authenticated by the restore session, not a login
 	mux.Handle("/api/", s.requireAdmin(admin))
 	mux.Handle("/", webHandler())
 	return mux
@@ -263,6 +264,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 				}
 			}
 		}
+		s.store.PruneRestoreSessions(ctx)
 		if time.Since(lastDaily) > 24*time.Hour {
 			lastDaily = time.Now()
 			s.store.PruneHistory(ctx, 180*24*time.Hour)

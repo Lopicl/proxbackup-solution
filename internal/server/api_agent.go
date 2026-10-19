@@ -34,6 +34,7 @@ func (s *Server) agentRoutes() http.Handler {
 	mux.Handle("POST /agent/v1/runs", s.requireAgent(s.handleRegisterRun))
 	mux.Handle("POST /agent/v1/runs/{id}/events", s.requireAgent(s.handleEvents))
 	mux.Handle("GET /agent/v1/update/{platform}", s.requireAgent(s.handleAgentBinary))
+	mux.Handle("POST /agent/v1/restore-sessions", s.requireAgent(s.handleCreateRestoreSession))
 	return mux
 }
 

@@ -1,8 +1,29 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api, type CatalogEntry, type RestoreSpec, type Snapshot } from '../api'
 import { bytes, dateTime, Empty, ErrorBox, Field, Link, Modal } from '../ui'
+
+/** Where the browser reads catalogs from and sends restores to. */
+export interface RestoreBackend {
+  catalog: (snap: Snapshot, path: string) => Promise<CatalogEntry[]>
+  restore: (spec: RestoreSpec) => Promise<{ run_id: number }>
+  /** Shown next to the buttons (where progress appears). */
+  footer?: ReactNode
+  /** Default for "Another folder on the PC"; stamp is the snapshot time as YYYY-MM-DD-HH-MM. */
+  defaultTarget?: (stamp: string) => string
+  /** Explains a restriction of what can be restored. */
+  note?: ReactNode
+}
+
+/** The console admin's backend for a client. */
+export function adminBackend(clientId: number): RestoreBackend {
+  return {
+    catalog: (snap, path) => api.catalog(clientId, snap, path),
+    restore: (spec) => api.restore(clientId, spec),
+    footer: <Link to={`/clients/${clientId}/runs`}>Restore progress appears in the client history.</Link>,
+  }
+}
 
 // Directories with more entries show only the first ones until filtered.
 const maxRows = 500
@@ -20,13 +41,13 @@ function covers(sel: string[], p: string) {
  * files and folders, one restore run per archive.
  */
 export function RestoreBrowser({
-  clientId,
+  backend,
   snap,
   online,
   onClose,
   onQueued,
 }: {
-  clientId: number
+  backend: RestoreBackend
   snap: Snapshot
   online: boolean
   onClose: () => void
@@ -40,7 +61,7 @@ export function RestoreBrowser({
   const [sel, setSel] = useState<string[]>([])
   const stamp = new Date(snap['backup-time'] * 1000).toISOString().slice(0, 16).replace(/[:T]/g, '-')
   const [dest, setDest] = useState<'original' | 'other'>('other')
-  const [target, setTarget] = useState(`C:\\Restore\\${stamp}`)
+  const [target, setTarget] = useState(backend.defaultTarget ? backend.defaultTarget(stamp) : `C:\\Restore\\${stamp}`)
   const [overwrite, setOverwrite] = useState<RestoreSpec['overwrite']>('skip')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -48,7 +69,7 @@ export function RestoreBrowser({
   useEffect(() => {
     let live = true
     setLoadError('')
-    api.catalog(clientId, snap, '/' + dir).then(
+    backend.catalog(snap, '/' + dir).then(
       (entries) => {
         if (!live) return
         setListing({ dir, entries })
@@ -59,7 +80,7 @@ export function RestoreBrowser({
     return () => {
       live = false
     }
-  }, [clientId, snap, dir])
+  }, [backend, snap, dir])
 
   const open = (d: string) => {
     setDir(d)
@@ -102,7 +123,7 @@ export function RestoreBrowser({
           // Several archives each get a subfolder, so their trees don't mix.
           if (runs.length > 1) dir += '\\' + archiveLabel(r.archive)
         }
-        const res = await api.restore(clientId, {
+        const res = await backend.restore({
           backup_id: snap['backup-id'],
           backup_time: snap['backup-time'],
           ns: snap.ns,
@@ -127,6 +148,7 @@ export function RestoreBrowser({
         {snap['backup-type']}/{snap['backup-id']}. Tick the files and folders to restore; the agent on the PC downloads and writes them
         {online ? '' : ' when the PC comes online'}.
       </p>
+      {backend.note && <p className="notice">{backend.note}</p>}
       <nav className="crumbs">
         <a onClick={() => open('')}>Archives</a>
         {crumbs.map((c, i) => (
@@ -269,9 +291,7 @@ export function RestoreBrowser({
         </Field>
         <ErrorBox error={error} />
         <div className="buttons">
-          <span className="left muted-text small">
-            <Link to={`/clients/${clientId}/runs`}>Restore progress appears in the client history.</Link>
-          </span>
+          <span className="left muted-text small">{backend.footer}</span>
           <button type="button" onClick={onClose}>
             Cancel
           </button>

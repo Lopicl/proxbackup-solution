@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -148,45 +149,48 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
-	q := r.URL.Query()
-	backupID, ns, dir := q.Get("backup_id"), q.Get("ns"), q.Get("path")
-	backupTime, _ := strconv.ParseInt(q.Get("backup_time"), 10, 64)
-	if backupID == "" || backupTime == 0 {
-		httpError(w, 400, errors.New("backup_id and backup_time are required"))
-		return
-	}
-	ctx := r.Context()
-	c, err := s.store.Client(ctx, id)
+	c, err := s.store.Client(r.Context(), id)
 	if err != nil {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	out, code, err := s.catalogDir(r.Context(), c, r.URL.Query())
+	if err != nil {
+		httpError(w, code, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+// catalogDir lists the directory q["path"] of the snapshot q identifies. On
+// error it also returns an HTTP status.
+func (s *Server) catalogDir(ctx context.Context, c *Client, q url.Values) ([]catalogEntry, int, error) {
+	backupID, ns, dir := q.Get("backup_id"), q.Get("ns"), q.Get("path")
+	backupTime, _ := strconv.ParseInt(q.Get("backup_time"), 10, 64)
+	if backupID == "" || backupTime == 0 {
+		return nil, 400, errors.New("backup_id and backup_time are required")
+	}
 	if ns == "" {
 		ns = c.Namespace
 	} else if ns != c.Namespace && !slices.Contains(c.OldNamespaces, ns) {
-		httpError(w, 400, errors.New("snapshot namespace does not belong to this client"))
-		return
+		return nil, 400, errors.New("snapshot namespace does not belong to this client")
 	}
 	t, err := s.store.Target(ctx, c.TargetID)
 	if err != nil {
-		httpError(w, 500, err)
-		return
+		return nil, 500, err
 	}
 	ref := pbs.SnapshotRef{Store: t.Datastore, NS: ns, Type: "host", ID: backupID, Time: backupTime}
 	key := fmt.Sprintf("%d|%s|%s|%s|%d", t.ID, t.Datastore, ns, backupID, backupTime)
 	cat, err := s.catalogs.get(ctx, key, func(ctx context.Context) (*os.File, error) { return s.downloadCatalog(ctx, t, c, ref) })
 	if errors.Is(err, errNoCatalog) {
-		httpError(w, 404, err)
-		return
+		return nil, 404, err
 	}
 	if err != nil {
-		httpError(w, 502, err)
-		return
+		return nil, 502, err
 	}
 	list, err := cat.ListDir(dir)
 	if err != nil {
-		httpError(w, 404, err)
-		return
+		return nil, 404, err
 	}
 	var origins map[string]string
 	if strings.Trim(dir, "/") == "" {
@@ -207,7 +211,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, ce)
 	}
-	writeJSON(w, out)
+	return out, 0, nil
 }
 
 // downloadCatalog copies ref's catalog into a temp file.
@@ -289,11 +293,7 @@ func (s *Server) archiveOrigins(ctx context.Context, clientID int64, backupID st
 			}
 		case api.KindImage:
 			for _, v := range j.Volumes {
-				origin := strings.TrimRight(v, `\/`)
-				if strings.HasSuffix(origin, ":") {
-					origin += `\`
-				}
-				add(api.VolumeArchive(v), origin)
+				add(api.VolumeArchive(v), api.OriginPath(v, ""))
 			}
 		}
 	}

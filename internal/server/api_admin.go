@@ -14,7 +14,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -309,44 +308,52 @@ func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
-	ctx := r.Context()
-	c, err := s.store.Client(ctx, id)
+	c, err := s.store.Client(r.Context(), id)
 	if err != nil {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	snaps, code, err := s.clientSnapshots(r.Context(), c)
+	if err != nil {
+		httpError(w, code, err)
+		return
+	}
+	writeJSON(w, orEmpty(snaps))
+}
+
+type clientSnapshot struct {
+	pbs.SnapshotInfo
+	NS  string `json:"ns"`
+	Old bool   `json:"old,omitempty"` // in a namespace the client used before
+}
+
+// clientSnapshots lists the client's snapshots, newest first, including
+// those in namespaces it used before. On error it also returns an HTTP status.
+func (s *Server) clientSnapshots(ctx context.Context, c *Client) ([]clientSnapshot, int, error) {
 	t, err := s.store.Target(ctx, c.TargetID)
 	if err != nil {
-		httpError(w, 500, err)
-		return
+		return nil, 500, err
 	}
 	pc, err := s.adminClient(t)
 	if err != nil {
-		httpError(w, 500, err)
-		return
+		return nil, 500, err
 	}
-	type snapshot struct {
-		pbs.SnapshotInfo
-		NS  string `json:"ns"`
-		Old bool   `json:"old,omitempty"` // in a namespace the client used before
-	}
-	var snaps []snapshot
+	var snaps []clientSnapshot
 	for i, ns := range append([]string{c.Namespace}, c.OldNamespaces...) {
 		list, err := pc.ListSnapshots(ctx, t.Datastore, ns, "", "")
 		if err != nil {
 			if i == 0 {
-				httpError(w, 502, err)
-				return
+				return nil, 502, err
 			}
 			s.log.Warn("list snapshots in old namespace", "client", c.Name, "ns", ns, "err", err)
 			continue
 		}
 		for _, sn := range list {
-			snaps = append(snaps, snapshot{sn, ns, i > 0})
+			snaps = append(snaps, clientSnapshot{sn, ns, i > 0})
 		}
 	}
 	sort.Slice(snaps, func(i, j int) bool { return snaps[i].BackupTime > snaps[j].BackupTime })
-	writeJSON(w, orEmpty(snaps))
+	return snaps, 0, nil
 }
 
 func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
@@ -360,33 +367,14 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
-	if req.BackupID == "" || req.BackupTime == 0 || req.Archive == "" || req.TargetDir == "" {
-		httpError(w, 400, errors.New("backup_id, backup_time, archive and target_dir are required"))
-		return
-	}
-	if !pbs.ValidArchiveName(req.Archive) || strings.HasSuffix(req.Archive, ".blob") {
-		httpError(w, 400, errors.New("archive must be a .pxar.didx, .mpxar.didx or .img.fidx archive"))
-		return
-	}
-	switch req.Overwrite {
-	case "":
-		req.Overwrite = "skip"
-	case "skip", "overwrite", "if-newer":
-	default:
-		httpError(w, 400, errors.New("overwrite must be skip, overwrite or if-newer"))
-		return
-	}
 	ctx := r.Context()
 	c, err := s.store.Client(ctx, id)
 	if err != nil {
 		httpError(w, statusFor(err), err)
 		return
 	}
-	switch {
-	case req.Namespace == c.Namespace:
-		req.Namespace = ""
-	case req.Namespace != "" && !slices.Contains(c.OldNamespaces, req.Namespace):
-		httpError(w, 400, errors.New("snapshot namespace does not belong to this client"))
+	if err := validateRestore(&req, c); err != nil {
+		httpError(w, 400, err)
 		return
 	}
 	runID, err := s.store.QueueRun(ctx, 0, id, api.KindRestore, "manual", &req)

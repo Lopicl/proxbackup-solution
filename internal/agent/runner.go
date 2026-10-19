@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"proxbackup/internal/api"
+	"proxbackup/internal/ipc"
 )
 
 // Runner connects the agent to the management server and executes jobs.
@@ -36,6 +37,8 @@ type Runner struct {
 	updating       bool // self-update in progress (selfupdate.go)
 	updateFailed   string
 	updateFailedAt time.Time
+
+	local localState // tray app view (local.go)
 }
 
 // task is one unit of work for the worker.
@@ -45,6 +48,7 @@ type task struct {
 	local   bool // started by the agent's scheduler
 	trigger string
 	slot    time.Time
+	by      string // user who started it from the tray
 }
 
 // NewRunner creates a runner from an enrolled configuration.
@@ -67,6 +71,8 @@ func NewRunner(cfg *Config, version string, log *slog.Logger) (*Runner, error) {
 	r.sched.start = r.startLocal
 	r.sched.busy = r.busy
 	r.sched.missed = r.reportMissed
+	r.sched.pausedBy = r.pausedBy
+	r.loadLocal()
 	r.sched.logf = func(level, format string, args ...any) { r.log.Info(fmt.Sprintf(format, args...), "level", level) }
 	return r, nil
 }
@@ -84,6 +90,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	cancel()
 	go r.scheduleLoop(ctx)
 	go r.spoolLoop(ctx)
+	go r.serveLocal(ctx)
+	go launchTrays(ctx, r.log)
 	r.pollLoop(ctx)
 	return ctx.Err()
 }
@@ -127,6 +135,7 @@ func (r *Runner) pollLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				break
 			}
+			r.setOnline(false)
 			if online {
 				r.log.Warn("server unreachable; scheduled backups continue from the cached configuration", "err", err)
 				online = false
@@ -155,10 +164,12 @@ func (r *Runner) pollOnce(ctx context.Context, wait int) error {
 		Hostname: hostname, OS: osDescription(), AgentVersion: r.version, RunningRuns: r.runningIDs(),
 		ConfigRev: r.sched.Rev(), Schedule: r.sched.States(), TimeZone: time.Now().Format("MST -07:00"),
 	}
+	req.PausedUntil, req.PausedBy = r.pauseInfo()
 	var resp api.PollResponse
 	if err := postJSON(ctx, r.hc, fmt.Sprintf("%s/agent/v1/poll?wait=%d", r.cfg.ServerURL, wait), req, &resp); err != nil {
 		return err
 	}
+	r.setOnline(true)
 	if resp.Config != nil {
 		if err := r.sched.Update(resp.Config); err != nil {
 			r.log.Error("rejecting configuration", "err", err)
@@ -209,15 +220,20 @@ func (r *Runner) busy(jobID int64) bool {
 
 // startLocal queues a scheduled or catch-up run (called by the Scheduler).
 func (r *Runner) startLocal(spec api.JobSpec, job api.JobConfig, trigger string, slot time.Time) bool {
+	return r.queueLocal(task{spec: spec, job: job, local: true, trigger: trigger, slot: slot})
+}
+
+// queueLocal queues a run the agent starts itself, unless its job is queued or running.
+func (r *Runner) queueLocal(t task) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.inflight[job.ID] {
+	if r.inflight[t.job.ID] {
 		return false
 	}
 	select {
-	case r.queue <- task{spec: spec, job: job, local: true, trigger: trigger, slot: slot}:
-		r.inflight[job.ID] = true
-		r.log.Info("scheduled job queued", "job", job.Name, "trigger", trigger, "slot", slot.Format(time.RFC3339))
+	case r.queue <- t:
+		r.inflight[t.job.ID] = true
+		r.log.Info("job queued", "job", t.job.Name, "trigger", t.trigger, "slot", t.slot.Format(time.RFC3339))
 		return true
 	default:
 		return false
@@ -231,6 +247,8 @@ func (r *Runner) reportMissed(job api.JobConfig, slot time.Time, reason string) 
 		UUID: newUUID(), JobID: job.ID, Kind: job.Kind, Trigger: api.TriggerSchedule, State: api.RunMissed,
 		ScheduledFor: slot.Unix(), StartedAt: time.Now().Unix(), Message: reason,
 	}})
+	r.recordRun(ipc.RunInfo{JobID: job.ID, JobName: job.Name, Kind: job.Kind, Trigger: api.TriggerSchedule, State: api.RunMissed,
+		Error: reason, Finished: time.Now().Unix()})
 	go r.spool.drain(context.Background(), r)
 }
 
@@ -269,8 +287,12 @@ func (r *Runner) execute(parent context.Context, t task) {
 			r.running[id] = cancel
 			r.mu.Unlock()
 		})
-		rep.Log("info", fmt.Sprintf("%s run of job %q started by the agent (scheduled for %s, agent %s)",
-			t.trigger, t.job.Name, t.slot.Format("2006-01-02 15:04 MST"), r.version))
+		if t.by != "" {
+			rep.Log("info", fmt.Sprintf("run of job %q started from the tray app by %s (agent %s)", t.job.Name, t.by, r.version))
+		} else {
+			rep.Log("info", fmt.Sprintf("%s run of job %q started by the agent (scheduled for %s, agent %s)",
+				t.trigger, t.job.Name, t.slot.Format("2006-01-02 15:04 MST"), r.version))
+		}
 	} else {
 		r.mu.Lock()
 		r.running[t.spec.RunID] = cancel
@@ -278,9 +300,20 @@ func (r *Runner) execute(parent context.Context, t task) {
 		rep = newReporter(r, nil, t.spec.RunID, nil)
 		rep.Log("info", fmt.Sprintf("starting %s job requested from the server (agent %s)", t.spec.Kind, r.version))
 	}
-	res := Run(ctx, t.spec, rep)
+	name := r.jobName(t.spec.JobID, t.spec.Kind)
+	r.runStarted(name, t.spec.Kind, t.trigger)
+	started := time.Now()
+	var res api.Result
+	if rs := t.spec.Restore; rs != nil && rs.Session != "" {
+		res = r.restoreAs(ctx, t.spec, tapReporter{rep, r})
+	} else {
+		res = Run(ctx, t.spec, tapReporter{rep, r})
+	}
+	r.runEnded()
 	r.log.Info("run finished", "job", t.spec.JobID, "trigger", t.trigger, "state", res.State, "err", res.Error)
 	rep.finish(res)
+	r.recordRun(ipc.RunInfo{JobID: t.spec.JobID, JobName: name, Kind: t.spec.Kind, Trigger: t.trigger, State: res.State, Error: res.Error,
+		Started: started.Unix(), Finished: time.Now().Unix(), Files: res.Files, Bytes: res.BytesTotal})
 
 	r.mu.Lock()
 	delete(r.running, rep.runID)

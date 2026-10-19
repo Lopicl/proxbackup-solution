@@ -27,7 +27,7 @@ VMs/containers and the PVE nodes themselves are managed and restored in one plac
 ```mermaid
 flowchart LR
   subgraph PC["Windows PC (many)"]
-    TRAY["proxbackup-tray<br/>(user session, phase 2)"] -. named pipe .-> AGENT
+    TRAY["tray app<br/>(proxbackup-agent tray, per user session)"] -. named pipe .-> AGENT
     AGENT["proxbackup-agent<br/>Windows service (LocalSystem)"]
     VSS[(VSS snapshot)]
     AGENT --- VSS
@@ -250,9 +250,17 @@ read on every run.
   console over mTLS, checks size, hash and the version the binary reports, swaps it in next to
   the running executable and exits; the service manager restarts it. A failed update is
   retried after an hour.
-* **Local IPC** *(phase 2, with the tray app).* A named pipe `\\.\pipe\proxbackup-agent` will
-  serve the tray app (status, "Back up now", recent runs), with a pipe ACL that allows only
-  interactive users plus SYSTEM.
+* **Local IPC** *(phase 2, implemented)*. The service serves the tray app on the named pipe
+  `\\.\pipe\proxbackup-agent` (`internal/ipc`; one JSON request and response per connection):
+  status, "Back up now", pause/resume, and restore links. The pipe ACL gives SYSTEM full
+  control and interactive users (console and RDP logons) read/write of data only: not
+  `FILE_CREATE_PIPE_INSTANCE`, so no user can serve instances of the pipe. Network logons are
+  denied. The agent identifies the caller by impersonating the pipe client (it takes the token,
+  user, profile folder and whether the user is in the local Administrators group, elevated or
+  not); nothing the tray sends is trusted for that. The tray checks before sending anything that
+  the pipe is served from session 0, so a user process can't pose as the agent and impersonate
+  the tray's user. Outside Windows the same protocol runs on a Unix socket in the data
+  directory (development and tests).
 
 ### 4. `proxbackup-server`: ProxBackup Console
 
@@ -332,11 +340,49 @@ read on every run.
   `make release` (`v<VERSION>`), and published by the GitHub Actions workflow
   `.github/workflows/release.yml`.
 
-### 5. `proxbackup-tray`: user tray app *(phase 2)*
+### 5. Tray app *(phase 2, implemented)*
 
-A small systray process started at login. It shows last backup time and status, offers
-"Back up now" and "Restore files…" (opens the web UI deep link or a local picker), and can
-pause backups while the user is on battery or a metered network.
+`proxbackup-agent tray` (`internal/tray`, notification-area icon via `fyne.io/systray`). It is
+the agent executable itself, so self-update keeps both in step and setup has nothing extra to
+install. The service starts it in every active user session (`WTSEnumerateSessions`,
+`WTSQueryUserToken`, `CreateProcessAsUser` on `winsta0\default` with `CREATE_NO_WINDOW`), every
+10 s checks it is still there, and starts it again after a crash. A user who chooses *Quit*
+keeps it hidden until their next logon. A per-session mutex prevents duplicates. When the agent
+was updated, the running tray starts the new executable and exits.
+
+* **Icon and tooltip:** green (last runs succeeded), blue (running, with progress), amber
+  (warnings, never backed up), red (a job's last run failed), grey (paused, no jobs, or the
+  agent service isn't running). The menu shows the last backup, the next scheduled one, and
+  the last 10 runs, including missed ones.
+* **Back up now** queues every backup job of the PC (trigger `manual`, logged as started from
+  the tray by the user). Pausing doesn't block it.
+* **Pause scheduled backups** for 1, 4 or 24 hours (no indefinite pause). While paused, due slots
+  of jobs with catch-up wait and start when the pause ends; others are recorded as `missed`
+  ("paused on the PC by DOMAIN\user"). The pause is kept across restarts (`pause.json`) and
+  reported in the poll, and the client page in the console shows it.
+* **Restore files…** opens a restore page for this PC in the browser (below).
+
+**Self-service restore page.** On *Restore files…* the agent registers a restore session with
+the console (`POST /agent/v1/restore-sessions` over mTLS: the user, their SID, admin flag, and
+scope = their profile folder, or none for administrators). The console returns
+`https://<console>/#/restore/<token>` and the tray opens it. The page needs no console login.
+The token sits in the URL fragment, so it never reaches a request line or log, and the page
+sends it in an `X-Restore-Session` header. It opens nothing of the admin API. A session expires
+after an hour without use, and 8 hours after it was opened at the latest. The page lists the
+PC's snapshots and reuses the console's file browser:
+
+* *Administrators of the PC* see and restore everything, written as SYSTEM like console restores.
+* *Other users* see only what leads to or lies inside their profile folder (archives whose
+  source is unknown are hidden). They restore only paths inside it, either back to the original
+  location or to a folder inside it (default `<profile>\Restored\<snapshot time>`). Raw volume
+  images are excluded. The console enforces this (`api.RestoreAllowed`), and the agent checks it
+  again against its own job configuration. The agent then runs the restore on a thread that
+  impersonates the user (the token kept from the pipe connection), so Windows applies the
+  user's own permissions to every file it writes, junctions included. A restore arriving after
+  an agent restart (token gone) fails and asks the user to open the page again.
+
+Restores from the page are ordinary restore runs in the client history, recorded with the
+requesting user.
 
 ## Client-side scheduling
 
@@ -512,12 +558,14 @@ sequenceDiagram
 
 ```
 cmd/proxbackup-server/  ProxBackup Console entrypoint (also `apply-update` for the root helper)
-cmd/proxbackup-agent/   ProxBackup Agent entrypoint (service + CLI: enroll, backup, image, restore)
+cmd/proxbackup-agent/   ProxBackup Agent entrypoint (service + CLI: enroll, backup, image, restore, tray)
 pkg/pbs/                PBS protocol: blob, chunker, catalog, backup & reader sessions, admin API
 pkg/pxar/               pxar encoder/decoder (v1 and v2 split archives)
 pkg/ntfs/               read-only NTFS reader (file restore from volume images)
 internal/agent/         scheduler, job runner, VSS, file walker, image reader, catalog,
-                        run reporter/spool, self-update
+                        run reporter/spool, self-update, tray launcher and local control
+internal/ipc/           agent ↔ tray protocol over the named pipe (ACL, peer identity, impersonation)
+internal/tray/          the tray app (notification-area icon and menu)
 internal/server/        HTTP API, auth, store (SQLite), PKI, config push, PBS provisioning,
                         local-PBS integration, notify, updater
 internal/schedule/      cron parsing and "is a slot due?" logic shared by agent and server
@@ -536,7 +584,7 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, pxar v2 split archives with metadata change detection (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)), buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
-| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (✅ lock window via the PBS `protected` flag, ✅ tamper-resistant retention; see [Security model](#security-model)), decide whether pxar v2 file backups still need `catalog.pcat1.didx` |
+| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, ✅ tray app (status, back up now, pause, recent runs, self-service restore page scoped to the user's profile for non-admins), ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (✅ lock window via the PBS `protected` flag, ✅ tamper-resistant retention; see [Security model](#security-model)), decide whether pxar v2 file backups still need `catalog.pcat1.didx` |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness, immutable off-host copy (guided pull-sync to a second PBS; see [Security model](#security-model)) |

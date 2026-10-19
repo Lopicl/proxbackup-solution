@@ -3,6 +3,8 @@ module proxbackup
 go 1.26.0
 
 require (
+	fyne.io/systray v1.12.2
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/dchest/siphash v1.2.3
 	github.com/kardianos/service v1.3.0
 	github.com/klauspost/compress v1.20.1
@@ -17,6 +19,7 @@ require (
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
