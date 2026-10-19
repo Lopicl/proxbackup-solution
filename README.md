@@ -166,8 +166,9 @@ Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**. Done so far:
 client-side encryption with key escrow, immutable lock window, file restore from volume
 images, and the per-file restore browser in the web UI. Still open in phase 2: console user
 management with granular permissions, NTFS ACLs/ADS, tray app, bandwidth and
-metered-network/battery limits, SMB/NFS share backups, tamper-resistant retention and a guided
-pull-sync to a second PBS. See the roadmap in the architecture doc.
+metered-network/battery limits, SMB/NFS share backups and tamper-resistant retention. The
+guided pull-sync to a second PBS (immutable off-host copy) moved to phase 5. See the roadmap
+in the architecture doc.
 
 The MVP has been verified end to end against **PBS 4.2** (Docker), with the agent running on macOS:
 

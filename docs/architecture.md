@@ -144,7 +144,8 @@ read on every run.
   sends `legacy` to agents of older servers.
 * **Catalog.** File backups still upload `catalog.pcat1.didx`, listing the `.mpxar` as the
   archive. The PBS GUI can browse split archives through the `.mpxar` alone; whether the
-  catalog can be dropped for v2 is still open.
+  catalog can be dropped for v2 is an open phase 2 decision. The console's restore browser
+  reads the catalog too, so dropping it means the browser has to read the `.mpxar` instead.
 * **Validation.** Unit tests round-trip v2 archives and run the reuse path over 10
   generations of edits. The E2E suite builds a v2 snapshot from injected chunks on PBS 4.2,
   restores it, extracts a reused and a new file through PBS's own `pxar-file-download`, and
@@ -471,11 +472,11 @@ sequenceDiagram
     (quickly with `keep-last`, over days with calendar buckets). Retention moves to a server
     schedule, backups per job and day are capped, and the oldest successful snapshot inside
     the lock window is always kept.
-  * *Off-host copy:* the console's Admin token can still unprotect and delete, so a
+  * *Off-host copy (phase 5):* the console's Admin token can still unprotect and delete, so a
     compromised console or PBS host defeats the two layers above. The real immutable copy is
     a second PBS that **pulls** from the primary with a read-only token and its own admins,
     with *remove vanished* off; the primary holds no credentials for it. The console guides
-    this setup and checks it (sync freshness surfaces with phase 5 sync-job awareness). Tape
+    this setup and checks it, with sync freshness from sync-job awareness (both phase 5). Tape
     via PBS tape backup is the offline alternative.
 * **Admin UI:** session cookie plus a custom request header (`X-PROXBACKUP-Request`) against
   CSRF. Local admin accounts (argon2id, forced change of the generated initial password), PBS
@@ -515,10 +516,10 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, pxar v2 split archives with metadata change detection (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)), buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
-| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, ✅ per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (✅ lock window via the PBS `protected` flag, tamper-resistant retention, guided pull-sync to a second PBS; see [Security model](#security-model)) |
+| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, ✅ per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (✅ lock window via the PBS `protected` flag, tamper-resistant retention; see [Security model](#security-model)), decide whether pxar v2 file backups still need `catalog.pcat1.didx` |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
-| 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
+| 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness, immutable off-host copy (guided pull-sync to a second PBS; see [Security model](#security-model)) |
 | 6 — MSP cloud console | Cloud-hosted, multi-tenant **ProxBackup Cloud** console for managed service providers: one pane of glass over all customers' sites, cross-customer alerting, policy templates, technician RBAC scoped per customer, reporting and usage metering for billing, PSA/RMM integrations, optional hosted management servers. See [MSP cloud console](#msp-cloud-console) |
 | 7 — Proxmox VE backups | Proxmox VE clusters managed from the console with their own **Proxmox VE** section in the web UI: cluster connection with a scoped PVE API token, guest inventory with protection coverage, `vzdump` backup jobs on PVE's own scheduler, run history from PVE tasks, console-side retention, and restores of whole VMs/containers (new or replacing, optional live-restore) and of single files. **PVE host backups**: the Linux agent (phase 3) on each node backs up its configuration (`/etc/pve` database, network, storage, keys, package set, disk/ZFS/LVM layout), with single-file restore and diff in the console and a one-command **node rebuild** onto a fresh PVE install. See [Proxmox VE backups](#proxmox-ve-backups) |
 
@@ -919,7 +920,7 @@ name.
 | Long paths / odd names | `\\?\` prefixed paths throughout; files that can't be read or encoded are skipped with a warning in the run log |
 | A bad release breaks every console and agent | Updates install only in the admin's window, refuse downgrades, and verify `SHA256SUMS`; agents update only when idle and back off for an hour after a failure. Prereleases are opt-in |
 | Locked files without VSS | VSS is the default; without it, files are skipped and warned about, never silently dropped |
-| Compromised console or PBS host deletes all backups (it holds an Admin token) | Phase 2: lock window via `protected`, plus a pull-synced second PBS or tape that the primary can't reach |
+| Compromised console or PBS host deletes all backups (it holds an Admin token) | Lock window via `protected` (phase 2, implemented), plus a pull-synced second PBS (guided in phase 5) or tape that the primary can't reach |
 | A compromised PVE host deletes or overwrites guest backups *(phase 7)* | Its PBS token has `DatastoreBackup` only and retention runs on the console; whole-guest restores over an existing VMID need explicit confirmation in the console |
 | Share credentials leak from the console *(phase 2)* | Sealed with the master key, used only by the console process, never sent to agents or the browser; admins use a dedicated read-only account. Write credentials for restores are never stored |
 | Share backups overload the PBS host *(phase 2)* | Low CPU/I/O priority for share jobs, a cap on parallel share jobs, per-job bandwidth limits, and share jobs kept out of verify/GC windows |
