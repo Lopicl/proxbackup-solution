@@ -56,6 +56,7 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 		if err != nil {
 			return res, err
 		}
+		// Named like api.SourceArchives, which the console uses to find the source again.
 		label := ArchiveLabel(src)
 		if n := seen[label]; n > 0 {
 			label = fmt.Sprintf("%s-%d", label, n+1)

@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { ALL_CLIENTS, api, type GroupJob, type GroupMember, type Snapshot } from '../api'
+import { RestoreBrowser } from './RestoreBrowser'
 import { RunsTable } from './RunsTable'
 import { GroupJobEditor, JobTags, keepText, MemberEditor, newGroupJob, ScheduleText } from './Jobs'
 import { ago, bytes, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
@@ -244,7 +245,13 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         </Card>
       )}
 
-      {tab === 'snapshots' && <Snapshots clientId={id} onQueued={(r) => (location.hash = `/runs/${r}`)} />}
+      {tab === 'snapshots' && (
+        <Snapshots
+          clientId={id}
+          online={c.online}
+          onQueued={(runs) => (location.hash = runs.length === 1 ? `/runs/${runs[0]}` : `/clients/${id}/runs`)}
+        />
+      )}
 
       {editing && (
         <GroupJobEditor
@@ -313,9 +320,10 @@ function TagsEditor({ clientId, tags, onClose }: { clientId: number; tags: strin
   )
 }
 
-function Snapshots({ clientId, onQueued }: { clientId: number; onQueued: (runId: number) => void }) {
+function Snapshots({ clientId, online, onQueued }: { clientId: number; online: boolean; onQueued: (runIds: number[]) => void }) {
   const { data, error } = useLoad(() => api.snapshots(clientId), [clientId])
   const [restore, setRestore] = useState<{ snap: Snapshot; archive: string } | null>(null)
+  const [browse, setBrowse] = useState<Snapshot | null>(null)
   return (
     <Card title="Snapshots on PBS">
       <ErrorBox error={error} />
@@ -350,6 +358,11 @@ function Snapshots({ clientId, onQueued }: { clientId: number; onQueued: (runId:
                 <td className="num">{bytes(s.size)}</td>
                 <td>{s.verification ? <span className={`badge ${s.verification.state === 'ok' ? 'ok' : 'bad'}`}>{s.verification.state}</span> : '—'}</td>
                 <td className="archives">
+                  {s.files.some((f) => f.filename === 'catalog.pcat1.didx') && (
+                    <button className="small primary" title="Browse the files in this snapshot and restore some of them" onClick={() => setBrowse(s)}>
+                      Browse files
+                    </button>
+                  )}
                   {s.files
                     // A split archive (.mpxar + .ppxar) is restored as one; the catalog isn't restorable.
                     .filter((f) => /\.(pxar|mpxar)\.didx$|\.img\.fidx$/.test(f.filename))
@@ -370,7 +383,8 @@ function Snapshots({ clientId, onQueued }: { clientId: number; onQueued: (runId:
           </tbody>
         </table>
       )}
-      {restore && <RestoreDialog clientId={clientId} {...restore} onClose={() => setRestore(null)} onQueued={onQueued} />}
+      {restore && <RestoreDialog clientId={clientId} {...restore} onClose={() => setRestore(null)} onQueued={(r) => onQueued([r])} />}
+      {browse && <RestoreBrowser clientId={clientId} snap={browse} online={online} onClose={() => setBrowse(null)} onQueued={onQueued} />}
     </Card>
   )
 }

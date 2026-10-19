@@ -106,6 +106,18 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 	return res, err
 }
 
+// withinDir reports whether the cleaned path target is root or below it. A
+// drive root like `C:\` already ends in a separator.
+func withinDir(root, target string) bool {
+	if target == root {
+		return true
+	}
+	if !strings.HasSuffix(root, string(filepath.Separator)) {
+		root += string(filepath.Separator)
+	}
+	return strings.HasPrefix(target, root)
+}
+
 type dirMeta struct {
 	path string
 	md   pxar.Metadata
@@ -140,7 +152,7 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 			continue
 		}
 		target := filepath.Join(spec.TargetDir, filepath.FromSlash(e.Path))
-		if !strings.HasPrefix(target, filepath.Clean(spec.TargetDir)) {
+		if !withinDir(filepath.Clean(spec.TargetDir), target) {
 			return fmt.Errorf("refusing to restore outside target: %q", e.Path)
 		}
 		switch e.Kind {

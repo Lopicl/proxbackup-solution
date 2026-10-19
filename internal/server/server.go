@@ -55,6 +55,7 @@ type Server struct {
 	wake   map[int64]chan struct{} // per-client long-poll wakeups
 
 	versions pbsVersions
+	catalogs catalogCache // snapshot catalogs open in the restore browser
 }
 
 // New opens the data directory and prepares the server.
@@ -161,6 +162,7 @@ func (s *Server) uiRoutes() http.Handler {
 	admin.HandleFunc("DELETE /api/clients/{id}", s.handleRevokeClient)
 	admin.HandleFunc("POST /api/clients/{id}/agent-update", s.handlePushAgentUpdate)
 	admin.HandleFunc("GET /api/clients/{id}/snapshots", s.handleSnapshots)
+	admin.HandleFunc("GET /api/clients/{id}/catalog", s.handleCatalog)
 	admin.HandleFunc("POST /api/clients/{id}/restore", s.handleRestore)
 	admin.HandleFunc("GET /api/clients/{id}/encryption-key", s.handleClientKey)
 	admin.HandleFunc("POST /api/password", s.handleChangePassword)

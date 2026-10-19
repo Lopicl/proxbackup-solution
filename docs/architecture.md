@@ -218,6 +218,15 @@ read on every run.
 * **Restore.** The agent opens a reader session, downloads the index, fetches chunks on
   demand, decodes pxar, and writes files to the original or an alternate path. The overwrite
   policy (`skip`, `overwrite` or `if-newer`) is chosen per restore.
+* **Restore browser** *(phase 2, implemented)*. The web UI browses a snapshot's
+  `catalog.pcat1.didx` and restores the ticked files and folders, one restore run per archive.
+  The console reads the catalog itself (`GET /api/clients/{id}/catalog`) with the target's
+  admin token and, for encrypted snapshots, the escrowed client key. It downloads the catalog
+  once into a temp file and keeps it while it is browsed (10 minutes idle, at most 8 open).
+  "Original location" maps each archive back to its source through the client's current
+  jobs (same naming as the agent: `api.SourceArchives`, `api.VolumeArchive`), so an archive
+  whose source was removed from the job can only go to another folder. Snapshots without a
+  catalog keep the per-archive restore dialog with typed paths.
 * **File restore from images** *(phase 2, implemented)*. Restoring an `.img.fidx` archive with
   paths selected reads the NTFS file system inside the image instead of writing the whole
   volume. `pkg/ntfs` is a read-only NTFS reader over an `io.ReaderAt`; `pkg/pbs`

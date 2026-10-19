@@ -41,7 +41,7 @@ func (j *job) runImage(ctx context.Context) (api.Result, error) {
 		if err != nil {
 			return res, fmt.Errorf("volume %s: %w", v, err)
 		}
-		vols = append(vols, vol{name: v, archive: "drive-" + ArchiveLabel(v) + ".img.fidx", dev: dev, r: r, size: size})
+		vols = append(vols, vol{name: v, archive: api.VolumeArchive(v), dev: dev, r: r, size: size})
 		j.bytesTotal.Add(size)
 		j.logf("info", "volume %s: %d bytes via %s", v, size, dev)
 	}

@@ -117,6 +117,20 @@ input:focus, select:focus, textarea:focus { outline: 2px solid #e5700055; border
 .notice { background: #2b6cb014; border: 1px solid #2b6cb033; padding: 8px 12px; border-radius: 6px; margin: 8px 0 16px; }
 .empty { color: var(--muted); padding: 24px; text-align: center; }
 
+.crumbs { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; margin-bottom: 8px; font-weight: 600; }
+.crumbs a { cursor: pointer; }
+.crumbs .filter { margin-left: auto; width: 220px; padding: 4px 8px; font-weight: normal; }
+.browser { max-height: 46vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 14px; }
+.browser table th { position: sticky; top: 0; background: var(--panel); }
+.browser td, .browser th { padding: 5px 10px; }
+.browser .check { width: 28px; }
+.browser .check input { width: auto; }
+.browser td.name a { cursor: pointer; }
+.browser .icon { display: inline-block; width: 22px; }
+.chip.tag { margin-left: 0; }
+.chip a { cursor: pointer; color: var(--muted); }
+.checks label .small { margin-left: 4px; }
+
 .title-row { display: flex; justify-content: space-between; align-items: center; }
 .facts { display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--muted); margin: -6px 0 16px; }
 .facts b, .facts code { color: var(--text); }

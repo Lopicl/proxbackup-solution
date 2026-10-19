@@ -6,6 +6,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+
+	"proxbackup/internal/api"
 )
 
 // DefaultExcludes are always applied to Windows file backups unless disabled.
@@ -103,23 +105,5 @@ func globToRegexp(p string) string {
 	return b.String()
 }
 
-var archiveUnsafe = regexp.MustCompile(`[^A-Za-z0-9_.-]+`)
-
-// ArchiveLabel turns a source path into an archive base name:
-// `C:\Users\Alice` → "c-users-alice", `C:\` → "c".
-func ArchiveLabel(src string) string {
-	s := strings.ToLower(strings.ReplaceAll(src, `\`, "/"))
-	s = strings.ReplaceAll(s, ":", "")
-	s = archiveUnsafe.ReplaceAllString(strings.Trim(s, "/"), "-")
-	s = strings.Trim(strings.ReplaceAll(s, "/", "-"), "-.")
-	if s == "" {
-		s = "root"
-	}
-	if c := s[0]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
-		s = "x" + s
-	}
-	if len(s) > 100 {
-		s = s[:100]
-	}
-	return s
-}
+// ArchiveLabel turns a source path into an archive base name.
+func ArchiveLabel(src string) string { return api.ArchiveLabel(src) }

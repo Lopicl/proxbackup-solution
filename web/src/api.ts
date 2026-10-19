@@ -169,6 +169,15 @@ export interface Snapshot {
   old?: boolean // in a namespace the client used before
 }
 
+/** One row of a snapshot's file catalog. */
+export interface CatalogEntry {
+  name: string
+  type: 'dir' | 'file' | 'symlink' | 'other'
+  size?: number
+  mtime?: number
+  origin?: string // archives (catalog root): the path on the PC they were backed up from
+}
+
 export interface LogLine {
   id: number
   ts: number
@@ -348,6 +357,13 @@ export const api = {
   revokeClient: (id: number) => request('DELETE', `/clients/${id}`),
   pushAgentUpdate: (id: number) => request<{ version: string }>('POST', `/clients/${id}/agent-update`),
   snapshots: (id: number) => request<Snapshot[]>('GET', `/clients/${id}/snapshots`),
+  // Lists a directory of a snapshot's catalog: "/" lists the archives, "/<archive>/<dir>" their contents.
+  catalog: (id: number, snap: Snapshot, path: string) =>
+    request<CatalogEntry[]>(
+      'GET',
+      `/clients/${id}/catalog?` +
+        new URLSearchParams({ ns: snap.ns, backup_id: snap['backup-id'], backup_time: String(snap['backup-time']), path }).toString(),
+    ),
   restore: (id: number, spec: RestoreSpec) => request<{ run_id: number }>('POST', `/clients/${id}/restore`, spec),
   // The client's encryption key as a PBS key file (proxmox-backup-client --keyfile).
   downloadClientKey: (c: Client) => download(`/clients/${c.id}/encryption-key`, `${c.name}-encryption-key.json`),

@@ -84,7 +84,7 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 		}
 		err := j.walkImage(ctx, vol, s.f, s.rel, true, func(f *ntfs.File, rel string) error {
 			target := filepath.Join(root, filepath.FromSlash(rel))
-			if target != root && !strings.HasPrefix(target, root+string(filepath.Separator)) {
+			if !withinDir(root, target) {
 				return fmt.Errorf("refusing to restore outside target: %q", rel)
 			}
 			if why := imageSkipReason(f); why != "" {
