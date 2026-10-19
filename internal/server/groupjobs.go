@@ -49,6 +49,7 @@ type GroupJob struct {
 	Encrypt         bool            `json:"encrypt"`
 	LockDays        int             `json:"lock_days"`
 	SpreadMinutes   int             `json:"spread_minutes"`
+	DailyCap        int             `json:"daily_cap"`
 	// Members: these clients, plus every client with one of Tags.
 	Clients   []int64  `json:"clients"`
 	Tags      []string `json:"tags"`
@@ -77,13 +78,13 @@ func startDelay(groupID, clientID int64, spreadMinutes int) int {
 }
 
 const groupCols = `id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, window_minutes, catch_up, retention,
-	enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at`
+	enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at, daily_cap`
 
 func scanGroupJob(sc interface{ Scan(...any) error }) (*GroupJob, error) {
 	g := &GroupJob{}
 	var src, exc, vol, ret, tags string
 	err := sc.Scan(&g.ID, &g.Name, &g.Kind, &g.BackupID, &src, &exc, &vol, &g.UseVSS, &g.Schedule, &g.WindowMinutes, &g.CatchUp, &ret,
-		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.SpreadMinutes, &tags, &g.CreatedAt)
+		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.SpreadMinutes, &tags, &g.CreatedAt, &g.DailyCap)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -170,10 +171,10 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 			g.CreatedAt = now()
 		}
 		res, err := db.ExecContext(ctx, `INSERT INTO group_jobs(name, kind, backup_id, sources, excludes, volumes, use_vss, schedule,
-			window_minutes, catch_up, retention, enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			window_minutes, catch_up, retention, enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at,
+			daily_cap) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
-			g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.CreatedAt)
+			g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.CreatedAt, g.DailyCap)
 		if err != nil {
 			return err
 		}
@@ -182,9 +183,9 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 	}
 	_, err := db.ExecContext(ctx, `UPDATE group_jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?,
 		schedule=?, window_minutes=?, catch_up=?, retention=?, enabled=?, change_detection=?, encrypt=?, lock_days=?, spread_minutes=?,
-		member_tags=? WHERE id=?`,
+		member_tags=?, daily_cap=? WHERE id=?`,
 		g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
-		g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.ID)
+		g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.DailyCap, g.ID)
 	return err
 }
 

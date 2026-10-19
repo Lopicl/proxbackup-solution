@@ -62,7 +62,9 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
    disabled or get extra excludes, and an optional start spread staggers the PCs' start times.
    Per job you can also turn on **client-side encryption** (the console escrows the key) and set
    a **lock period** (default 14 days) during which new snapshots are protected on PBS against
-   prune and deletion.
+   prune and deletion. Retention runs on the console once a day, not after each run, and only
+   a capped number of backups per job and day count, so a compromised PC can't flood its group
+   to push the good snapshots out.
 5. **Restore:** on the client page, open *Snapshots* and click *Browse files* to tick files and
    folders across the snapshot's archives, then restore them to their original location or to
    another folder on the PC. This works for file backups and for volume images (the agent reads
@@ -165,11 +167,11 @@ repository.
 ## Status
 
 Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**. Done so far: group jobs,
-client-side encryption with key escrow, immutable lock window, file restore from volume
-images, the per-file restore browser in the web UI, and a top navigation bar with a profile
+client-side encryption with key escrow, immutable lock window, tamper-resistant retention,
+file restore from volume images, the per-file restore browser in the web UI, and a top navigation bar with a profile
 menu (Profile Settings, Logout) and a Console Settings icon. Still open in phase 2: console user
 management with granular permissions, NTFS ACLs/ADS, tray app, bandwidth and
-metered-network/battery limits, SMB/NFS share backups and tamper-resistant retention. The
+metered-network/battery limits and SMB/NFS share backups. The
 guided pull-sync to a second PBS (immutable off-host copy) moved to phase 5. See the roadmap
 in the architecture doc.
 

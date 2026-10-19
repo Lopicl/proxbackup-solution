@@ -302,12 +302,14 @@ read on every run.
   pushes them, and shows what the agents report: next run, pending catch-up, config sync
   state, and the PC's time zone. Share jobs (phase 2) are scheduled and run by the console
   itself; see [Network share backups](#network-share-backups).
-* **Retention.** After each successful run, the server calls PBS `prune` for the backup group
-  with the job's keep-last/hourly/daily/weekly/monthly/yearly policy, using the admin token.
-  Garbage collection is left to PBS's own schedule.
+* **Retention.** Once a day (housekeeping, right after expired locks are released) the server
+  applies each job's keep-last/hourly/daily/weekly/monthly/yearly policy to every member's
+  backup group, using the admin token. It never prunes because a run was reported; see
+  *Tamper-resistant retention* under [Security model](#security-model) for how it selects
+  snapshots. Garbage collection is left to PBS's own schedule.
 * **Notifications.** SMTP and generic webhooks (JSON). Triggers: run failed or missed, run
-  succeeded (optional), last successful backup older than N days (checked daily), console
-  update installed or failed.
+  succeeded (optional), last successful backup older than N days (checked daily), a job over
+  its daily backup cap, console update installed or failed.
 * **Automatic updates.** The console checks GitHub releases every 6 hours and installs the
   newest one in a weekday/time window set under Console Settings → Updates (default Sunday 03:00,
   60 min), or immediately with "Install now". The Updates card lists the release notes of
@@ -387,7 +389,7 @@ erDiagram
 
   TARGET { int id string name string host string fingerprint string datastore string root_ns string admin_auth_id blob admin_secret_enc string pbs_user }
   CLIENT { int id string name string hostname string os string agent_version string cert_serial int target_id string namespace string token_id blob token_secret_enc datetime last_seen bool revoked string config_rev string schedule_state string time_zone blob crypt_key_enc string crypt_fingerprint datetime crypt_created string tags }
-  GROUP_JOB { int id string name string kind string backup_id string sources string excludes string volumes bool use_vss string schedule int window_minutes bool catch_up string retention bool enabled string change_detection bool encrypt int lock_days int spread_minutes string member_tags }
+  GROUP_JOB { int id string name string kind string backup_id string sources string excludes string volumes bool use_vss string schedule int window_minutes bool catch_up string retention bool enabled string change_detection bool encrypt int lock_days int spread_minutes string member_tags int daily_cap }
   GROUP_JOB_CLIENT { int group_id int client_id }
   JOB { int id int client_id int group_id string backup_id bool enabled string extra_excludes }
   RUN { int id string uuid int job_id int client_id string kind string state string trigger string restore_spec datetime scheduled_for datetime queued_at datetime started_at datetime finished_at string progress string result string error string snapshot bool cancel_requested }
@@ -473,11 +475,23 @@ sequenceDiagram
     period recorded at lock time). Snapshots protected by hand are never touched. PBS refuses
     to prune or forget protected snapshots, and prune keeps them *on top of* the keep-* counts,
     which also guards against operator mistakes.
-  * *Tamper-resistant retention:* today the console prunes after every reported run, so a
-    compromised PC that floods the group with junk backups can push the good snapshots out
-    (quickly with `keep-last`, over days with calendar buckets). Retention moves to a server
-    schedule, backups per job and day are capped, and the oldest successful snapshot inside
-    the lock window is always kept.
+  * *Tamper-resistant retention (implemented):* a compromised PC can upload as many snapshots
+    as it likes with its token (and report runs for them), which would push the good snapshots
+    out of the keep-* buckets (quickly with `keep-last`, over days with calendar buckets). So:
+    * retention runs on the console's daily schedule only, never after a run;
+    * each job has a **daily cap** (`daily_cap`; 0 = automatic: the busiest day of the schedule
+      in the coming week plus 3 for manual runs and catch-ups, at most 100). A successful run
+      past the cap of its day (console time) is not locked. At retention time, only the first
+      *cap* finished snapshots of each day count for the buckets; later ones are forgotten
+      (unless protected);
+    * the oldest snapshot of a successful run inside the lock window is always kept;
+    * hitting the cap is logged and notified (`job.daily_cap`, once per job and day, whatever
+      the success/failure switches), since it is a ransomware signal.
+
+    The console computes the selection itself, mirroring PBS prune (same buckets in local
+    time, protected snapshots kept on top, the newest unfinished snapshot kept and older
+    unfinished ones removed), and forgets the rest one by one
+    (`DELETE admin/datastore/{store}/snapshots`).
   * *Off-host copy (phase 5):* the console's Admin token can still unprotect and delete, so a
     compromised console or PBS host defeats the two layers above. The real immutable copy is
     a second PBS that **pulls** from the primary with a read-only token and its own admins,
@@ -522,7 +536,7 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, pxar v2 split archives with metadata change detection (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)), buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
-| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (✅ lock window via the PBS `protected` flag, tamper-resistant retention; see [Security model](#security-model)), decide whether pxar v2 file backups still need `catalog.pcat1.didx` |
+| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (✅ lock window via the PBS `protected` flag, ✅ tamper-resistant retention; see [Security model](#security-model)), decide whether pxar v2 file backups still need `catalog.pcat1.didx` |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness, immutable off-host copy (guided pull-sync to a second PBS; see [Security model](#security-model)) |
@@ -931,4 +945,4 @@ name.
 | Share credentials leak from the console *(phase 2)* | Sealed with the master key, used only by the console process, never sent to agents or the browser; admins use a dedicated read-only account. Write credentials for restores are never stored |
 | Share backups overload the PBS host *(phase 2)* | Low CPU/I/O priority for share jobs, a cap on parallel share jobs, per-job bandwidth limits, and share jobs kept out of verify/GC windows |
 | Share backups read inconsistent data (no VSS on a remote share) *(phase 2)* | Server-side snapshots by default (`server_snapshot = prefer`), `require` for strict jobs; live reads log every changed or skipped file |
-| Compromised PC floods its group so retention prunes the good snapshots | Phase 2: scheduled retention, per-day run cap, oldest good snapshot in the lock window always kept |
+| Compromised PC floods its group so retention prunes the good snapshots | Daily retention on the console only, per-day backup cap (extra snapshots aren't locked, don't count and are removed, with an alert), oldest good snapshot in the lock window always kept (phase 2, implemented) |

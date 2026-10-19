@@ -644,6 +644,15 @@ func TestE2EProtected(t *testing.T) {
 	if err != nil || len(snaps) != 2 {
 		t.Fatalf("snapshots after prune: %+v, %v", snaps, err)
 	}
+	for _, s := range snaps {
+		if !s.Finished() {
+			t.Fatalf("finished snapshot without manifest in the list: %+v", s)
+		}
+	}
+	// Console retention forgets snapshots one by one; PBS refuses protected ones.
+	if err := c.ForgetSnapshot(ctx, store, ns, "host", id, t0); err == nil {
+		t.Fatal("forgot a protected snapshot")
+	}
 	if err := c.SetProtected(ctx, store, ns, "host", id, t0, false); err != nil {
 		t.Fatal(err)
 	}
@@ -657,6 +666,12 @@ func TestE2EProtected(t *testing.T) {
 		if p.BackupTime == t0 && p.Keep {
 			t.Fatalf("unprotected snapshot still kept: %+v", p)
 		}
+	}
+	if err := c.ForgetSnapshot(ctx, store, ns, "host", id, t0+2); err != nil {
+		t.Fatal(err)
+	}
+	if snaps, err = c.ListSnapshots(ctx, store, ns, "host", id); err != nil || len(snaps) != 0 {
+		t.Fatalf("snapshots after forget: %+v, %v", snaps, err)
 	}
 	c.Call(ctx, http.MethodDelete, "admin/datastore/"+store+"/groups", map[string]any{"ns": ns, "backup-type": "host", "backup-id": id}, nil)
 }

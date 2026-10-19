@@ -51,7 +51,7 @@ func (n *Notifier) settings(ctx context.Context) NotifySettings {
 
 // Message is the payload sent to webhooks.
 type Message struct {
-	Event    string `json:"event"` // "run.finished" | "client.stale" | "test"
+	Event    string `json:"event"` // "run.finished" | "client.stale" | "job.daily_cap" | "test"
 	Severity string `json:"severity"`
 	Subject  string `json:"subject"`
 	Text     string `json:"text"`
@@ -123,6 +123,19 @@ func (n *Notifier) CheckStale(ctx context.Context) {
 				Text:    fmt.Sprintf("Client %s: last successful backup %s. Last seen %s.\n", c.Name, when, time.Unix(c.LastSeen, 0).Format(time.RFC1123))})
 		}
 	}
+}
+
+// DailyCap warns that a job had more backups in a day than its cap: a PC
+// flooding its backup group to push good snapshots out (ransomware) looks
+// like this. Sent regardless of the failure/success switches.
+func (n *Notifier) DailyCap(ctx context.Context, c *Client, j *Job, day string, limit int, what string) {
+	ns := n.settings(ctx)
+	n.send(ctx, ns, Message{Event: "job.daily_cap", Severity: "warning", Client: c.Name,
+		Subject: fmt.Sprintf("[ProxBackup] too many backups: %s on %s", j.Name, c.Name),
+		Text: fmt.Sprintf("Client %s, job %s: more than %d backups on %s; %s.\n\n"+
+			"Backups past the daily cap are not locked and don't count for retention. A PC uploading many backups "+
+			"can be a sign of ransomware or a compromised agent trying to push good snapshots out; check the PC "+
+			"and its run history.\n", c.Name, j.Name, limit, day, what)})
 }
 
 // Update reports an installed (or failed) console update.

@@ -147,6 +147,8 @@ func validateGroupJob(g *GroupJob) error {
 		return errors.New("start window must be at most 7 days")
 	case g.LockDays < 0 || g.LockDays > maxLockDays:
 		return fmt.Errorf("lock period must be between 0 and %d days", maxLockDays)
+	case g.DailyCap < 0 || g.DailyCap > maxDailyCap:
+		return fmt.Errorf("backups per day must be between 0 and %d", maxDailyCap)
 	case g.SpreadMinutes < 0 || g.SpreadMinutes > maxSpreadMinutes:
 		return fmt.Errorf("start spread must be between 0 and %d minutes", maxSpreadMinutes)
 	}

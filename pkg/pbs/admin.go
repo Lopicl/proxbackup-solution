@@ -65,6 +65,25 @@ func (c *Client) SetProtected(ctx context.Context, store, ns, btype, id string, 
 	return c.Call(ctx, http.MethodPut, "admin/datastore/"+url.PathEscape(store)+"/protected", params, nil)
 }
 
+// ForgetSnapshot deletes one snapshot. PBS refuses for protected snapshots.
+func (c *Client) ForgetSnapshot(ctx context.Context, store, ns, btype, id string, backupTime int64) error {
+	params := map[string]any{"backup-type": btype, "backup-id": id, "backup-time": backupTime}
+	if ns != "" {
+		params["ns"] = ns
+	}
+	return c.Call(ctx, http.MethodDelete, "admin/datastore/"+url.PathEscape(store)+"/snapshots", params, nil)
+}
+
+// Finished reports whether the snapshot has its manifest (the backup completed).
+func (s SnapshotInfo) Finished() bool {
+	for _, f := range s.Files {
+		if f.Filename == "index.json.blob" {
+			return true
+		}
+	}
+	return false
+}
+
 // KeepOptions is a PBS retention policy. Zero values are omitted.
 type KeepOptions struct {
 	Last    int `json:"keep-last,omitempty"`

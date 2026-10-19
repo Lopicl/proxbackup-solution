@@ -79,7 +79,7 @@ export function Targets() {
           cannot delete, prune or read other clients' backups. Retention (prune) is run by this server.
         </p>
         <p className="muted-text">
-          The admin token needs permission to manage users, tokens, ACLs, namespaces and to prune — e.g. a token of <code>root@pam</code> without privilege separation, or a
+          The admin token needs permission to manage users, tokens, ACLs, namespaces and to prune and delete snapshots — e.g. a token of <code>root@pam</code> without privilege separation, or a
           dedicated user with the <b>Admin</b> role on <code>/</code>.
         </p>
       </Card>

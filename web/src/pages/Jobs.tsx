@@ -360,6 +360,7 @@ export function newGroupJob(clients: number[]): Partial<GroupJob> {
     catch_up: true,
     retention: { 'keep-last': 3, 'keep-daily': 14, 'keep-weekly': 8, 'keep-monthly': 12 },
     lock_days: 14,
+    daily_cap: 0,
     spread_minutes: 0,
     enabled: true,
     clients,
@@ -538,7 +539,7 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
         )}
         <Field
           label="Retention"
-          hint="Applied by the server to each member's backup group after each successful run (PBS prune). All zero keeps everything. Snapshots inside the lock period are always kept, on top of these counts."
+          hint="Applied by this console once a day to each member's backup group, never because a PC reported a run. All zero keeps everything. Snapshots inside the lock period, and the oldest successful one in it, are always kept on top of these counts."
         >
           <div className="keep">
             {keepKeys.map((k) => (
@@ -554,12 +555,20 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
             ))}
           </div>
         </Field>
-        <Field
-          label="Lock period (days)"
-          hint="Each new snapshot is marked protected on PBS and released after this many days: until then nothing can prune or delete it, not even the PC or an operator by mistake. 0 = off."
-        >
-          <input type="number" min={0} max={3650} value={j.lock_days ?? 0} onChange={(e) => set({ lock_days: Number(e.target.value) || 0 })} />
-        </Field>
+        <div className="grid2">
+          <Field
+            label="Lock period (days)"
+            hint="Each new snapshot is marked protected on PBS and released after this many days: until then nothing can prune or delete it, not even the PC or an operator by mistake. 0 = off."
+          >
+            <input type="number" min={0} max={3650} value={j.lock_days ?? 0} onChange={(e) => set({ lock_days: Number(e.target.value) || 0 })} />
+          </Field>
+          <Field
+            label="Backups per day"
+            hint="Only this many backups of a member per day are locked and count for retention; later ones are removed by retention and reported as a possible ransomware sign. 0 = automatic (the scheduled runs plus 3)."
+          >
+            <input type="number" min={0} max={100} value={j.daily_cap ?? 0} onChange={(e) => set({ daily_cap: Number(e.target.value) || 0 })} />
+          </Field>
+        </div>
         <div className="checks">
           {j.kind === 'files' && (
             <label>

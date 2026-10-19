@@ -41,11 +41,11 @@ type Config struct {
 
 // Server is the management server.
 type Server struct {
-	cfg    Config
-	store  *Store
-	pki    *PKI
-	sealer *Sealer
-	log    *slog.Logger
+	cfg     Config
+	store   *Store
+	pki     *PKI
+	sealer  *Sealer
+	log     *slog.Logger
 	notify  *Notifier
 	updater *updater
 
@@ -53,6 +53,9 @@ type Server struct {
 
 	wakeMu sync.Mutex
 	wake   map[int64]chan struct{} // per-client long-poll wakeups
+
+	capMu       sync.Mutex
+	capNotified map[string]bool // "<job>/<day>" daily cap alerts already sent
 
 	versions pbsVersions
 	catalogs catalogCache // snapshot catalogs open in the restore browser
@@ -240,8 +243,8 @@ func (s *Server) wakeChan(id int64) <-chan struct{} {
 	return ch
 }
 
-// housekeeping marks lost runs, trims history, checks for stale clients and
-// releases expired snapshot locks.
+// housekeeping marks lost runs, trims history, checks for stale clients,
+// releases expired snapshot locks and applies retention.
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
@@ -265,6 +268,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 			s.store.PruneHistory(ctx, 180*24*time.Hour)
 			s.notify.CheckStale(ctx)
 			s.releaseLocks(ctx)
+			s.applyRetention(ctx)
 		}
 	}
 }

@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS group_jobs (
   use_vss INTEGER NOT NULL DEFAULT 1, schedule TEXT NOT NULL DEFAULT '', window_minutes INTEGER NOT NULL DEFAULT 60,
   catch_up INTEGER NOT NULL DEFAULT 1, retention TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
   change_detection TEXT NOT NULL DEFAULT 'metadata', encrypt INTEGER NOT NULL DEFAULT 0, lock_days INTEGER NOT NULL DEFAULT 0,
-  spread_minutes INTEGER NOT NULL DEFAULT 0, member_tags TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL);
+  spread_minutes INTEGER NOT NULL DEFAULT 0, member_tags TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL,
+  daily_cap INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS group_job_clients (
   group_id INTEGER NOT NULL REFERENCES group_jobs(id) ON DELETE CASCADE,
   client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE, PRIMARY KEY(group_id, client_id));
@@ -124,6 +125,8 @@ func (s *Store) migrate() error {
 		{"jobs", "group_id", "INTEGER NOT NULL DEFAULT 0"},
 		{"jobs", "extra_excludes", "TEXT NOT NULL DEFAULT '[]'"},
 		{"clients", "tags", "TEXT NOT NULL DEFAULT '[]'"},
+		// Tamper-resistant retention: backups per job and day that count (0 = from the schedule).
+		{"group_jobs", "daily_cap", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		var n int
@@ -245,6 +248,9 @@ type Job struct {
 	Encrypt bool `json:"encrypt"`
 	// LockDays keeps each new snapshot protected on PBS for that many days (0 = off).
 	LockDays int `json:"lock_days"`
+	// DailyCap is the number of backups per day that are locked and count for
+	// retention (0 = derived from the schedule, see dailyCap).
+	DailyCap int `json:"daily_cap"`
 	// Reported by the agent (it owns the schedule).
 	NextRun        int64 `json:"next_run,omitempty"`
 	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
@@ -708,7 +714,7 @@ const jobCols = `j.id, j.client_id, j.group_id, COALESCE(g.name, j.name), COALES
 	COALESCE(g.use_vss, j.use_vss), COALESCE(g.schedule, j.schedule), COALESCE(g.retention, j.retention), j.enabled,
 	COALESCE(g.enabled, 1), j.created_at, COALESCE(g.window_minutes, j.window_minutes), COALESCE(g.catch_up, j.catch_up),
 	COALESCE(g.change_detection, j.change_detection), COALESCE(g.encrypt, j.encrypt), COALESCE(g.lock_days, j.lock_days),
-	COALESCE(g.spread_minutes, 0)`
+	COALESCE(g.spread_minutes, 0), COALESCE(g.daily_cap, 0)`
 const jobFrom = ` FROM jobs j LEFT JOIN group_jobs g ON g.id=j.group_id`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
@@ -716,7 +722,7 @@ func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	var src, exc, extra, vol, ret string
 	err := sc.Scan(&j.ID, &j.ClientID, &j.GroupID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &extra, &vol, &j.UseVSS, &j.Schedule, &ret,
 		&j.MemberEnabled, &j.GroupEnabled, &j.CreatedAt, &j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.LockDays,
-		&j.SpreadMinutes)
+		&j.SpreadMinutes, &j.DailyCap)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -1072,6 +1078,26 @@ func (s *Store) LastSuccess(ctx context.Context) map[int64]int64 {
 		out[id] = t
 	}
 	return out
+}
+
+// SuccessfulBackupTimes lists the snapshot times of a job's successful
+// backups taken at or after since, oldest first.
+func (s *Store) SuccessfulBackupTimes(ctx context.Context, jobID, since int64) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT bt FROM (SELECT CAST(json_extract(result, '$.backup_time') AS INTEGER) AS bt
+		FROM runs WHERE job_id=? AND state IN ('success','warning') AND kind<>'restore') WHERE bt>=? AND bt>0 ORDER BY bt`, jobID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var t int64
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) PruneHistory(ctx context.Context, keep time.Duration) {
