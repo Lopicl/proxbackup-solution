@@ -7,7 +7,7 @@ ordinary PBS snapshots: deduplicated, verifiable, syncable, prunable.
 | Component | What it is |
 | --- | --- |
 | `proxbackup-agent` | **ProxBackup Agent**, a Windows service. Runs its own schedule from the configuration the server pushes, including catch-up of missed runs, and keeps working while the server is offline. VSS snapshot → pxar archive or volume image → chunks uploaded straight to PBS. Also runs restores. |
-| `proxbackup-server` | **ProxBackup Console**, the on-premises management server with an embedded web UI: enrollment, jobs and schedules, run history and live logs, snapshot browser, restore, retention, notifications. |
+| `proxbackup-server` | **ProxBackup Console**, the on-premises management server with an embedded web UI: enrollment, group jobs and schedules, run history and live logs, snapshot and file browser, restore, retention, snapshot locks, client-side encryption with key escrow, notifications, automatic updates. |
 | `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar archive format (v1, and v2 split archives). |
 
 See [docs/architecture.md](docs/architecture.md) for the design, security model and roadmap.
@@ -36,7 +36,9 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
    `PROXBACKUP_ADMIN_PASSWORD`; change it with `proxbackup-server passwd`) and add the PBS under
    *PBS servers → Add*.
 2. **Target:** on the PBS host this is done for you. Check *PBS servers* and adjust the root
-   namespace (default `pcs`) if you like.
+   namespace (default `pcs`) if you like. Changing it creates the new namespace on PBS (with
+   the agent user's grant) and moves enrolled clients to `<root>/<client>`; snapshots in a
+   client's previous namespaces stay listed and restorable.
 3. **Client:** go to *Clients → Add client*. Copy the command it shows to the PC and run it in an
    elevated prompt:
 ```bat
@@ -58,6 +60,14 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
    from the server immediately. A job can cover many PCs: on the **Jobs** page, pick clients by
    name or by tag (or all clients). Each PC keeps its own backup group and history, can be
    disabled or get extra excludes, and an optional start spread staggers the PCs' start times.
+   Per job you can also turn on **client-side encryption** (the console escrows the key) and set
+   a **lock period** (default 14 days) during which new snapshots are protected on PBS against
+   prune and deletion.
+5. **Restore:** on the client page, open *Snapshots* and click *Browse files* to tick files and
+   folders across the snapshot's archives, then restore them to their original location or to
+   another folder on the PC. This works for file backups and for volume images (the agent reads
+   NTFS straight from the image), encrypted or not. A whole volume image can also be restored
+   as a `.img` file.
 
 Ad-hoc use without a server (handy for testing):
 
@@ -72,7 +82,7 @@ proxbackup-agent.exe restore ... -id <backup-id> -time <unix-time> -archive c-us
 Requires Go ≥ 1.26 and Node ≥ 20.
 
 ```sh
-make test          # unit tests (blob/chunker/index/pxar)
+make test          # go vet (host + windows) and all unit tests
 make e2e           # starts a PBS 4.x container and runs the protocol E2E test against it
 cd web && PROXBACKUP_DEV_API=https://127.0.0.1:8077 npm run dev   # UI dev server with API proxy
 ```
@@ -134,7 +144,8 @@ release with these assets:
 | `SHA256SUMS` | every download is checked against it |
 
 The console checks the releases every 6 hours. Under *Settings → Updates* you pick the weekdays,
-time and window length for automatic installs, or install right away with *Install now*:
+time and window length for automatic installs, or install right away with *Install now*. The
+card shows the release notes of every version between the installed and the latest one:
 
 * **.deb installs:** the console runs unprivileged, so it only writes a request. The root unit
   `proxbackup-server-update.service`, started by `proxbackup-server-update.path`, downloads the
@@ -151,6 +162,13 @@ repository.
 
 ## Status
 
+Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**. Done so far: group jobs,
+client-side encryption with key escrow, immutable lock window, file restore from volume
+images, and the per-file restore browser in the web UI. Still open in phase 2: console user
+management with granular permissions, NTFS ACLs/ADS, tray app, bandwidth and
+metered-network/battery limits, SMB/NFS share backups, tamper-resistant retention and a guided
+pull-sync to a second PBS. See the roadmap in the architecture doc.
+
 The MVP has been verified end to end against **PBS 4.2** (Docker), with the agent running on macOS:
 
 - backup sessions, dynamic and fixed indexes, incremental chunk reuse, manifest
@@ -164,7 +182,8 @@ The MVP has been verified end to end against **PBS 4.2** (Docker), with the agen
 
 **Verified on Windows 11 (ARM64 VM) against PBS 4.2:** VSS snapshots, file backup and restore
 (contents, attributes, timestamps, symlinks; junctions skipped), incremental reuse, volume
-images, browsing both in the PBS GUI, and single-file restore from volume images. The agent
+images, browsing both in the PBS GUI, single-file restore from volume images, and restores
+picked in the console's file browser. The agent
 runs as a Windows service, installed by the enrollment command or the agent setup `.exe`.
 
 Known gaps (see the roadmap):
@@ -178,6 +197,8 @@ Known gaps (see the roadmap):
   downloaded from the client's page
 - no NTFS ACLs or alternate data streams
 - no tray app
+- console sign-in is a local `admin` account or PBS administrator credentials; console users
+  with roles and an audit log come later in phase 2
 - whole-volume image restore writes a `.img` file. Bare-metal recovery of Windows and Linux machines via a
   Linux-based rescue boot image is planned (roadmap phase 4). Macs will get data restore onto a
   fresh macOS install instead.

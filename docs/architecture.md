@@ -285,6 +285,12 @@ read on every run.
   4. grants `DatastoreBackup` on `/datastore/<store>/<ns>` to that token.
 
   The agent only ever receives the scoped token.
+
+  **Changing the root namespace** of a target first creates the new namespace on PBS and
+  grants the agent user `DatastoreBackup` on it; if PBS refuses, the error is shown and the
+  change is not saved. Enrolled clients then move to `<new-root>/<client>`: their namespace is
+  created, their token is granted on it, and their agents get the new config right away.
+  Snapshots in a client's previous namespaces stay listed (marked as old) and restorable.
 * **No scheduler for PC jobs.** The server does not start PC backups. It validates schedules,
   pushes them, and shows what the agents report: next run, pending catch-up, config sync
   state, and the PC's time zone. Share jobs (phase 2) are scheduled and run by the console
@@ -297,7 +303,9 @@ read on every run.
   update installed or failed.
 * **Automatic updates.** The console checks GitHub releases every 6 hours and installs the
   newest one in a weekday/time window set under Settings → Updates (default Sunday 03:00,
-  60 min), or immediately with "Install now". Prereleases are opt-in, except in
+  60 min), or immediately with "Install now". The Updates card lists the release notes of
+  every release between the installed and the latest version, newest first (honouring the
+  pre-release setting). Prereleases are opt-in, except in
   builds from the `alpha` branch, which include them by default. How it installs depends
   on how the console was installed:
   * *.deb:* the unprivileged service only writes `/var/lib/proxbackup/updates/request`. A
@@ -507,7 +515,7 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, pxar v2 split archives with metadata change detection (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)), buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
-| 2 — alpha 0.2 | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), file restore from images (NTFS reader over the fixed index), client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (lock window via the PBS `protected` flag, tamper-resistant retention, guided pull-sync to a second PBS; see [Security model](#security-model)) |
+| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, tray app, ✅ per-file restore browser in the UI, bandwidth limits, metered-network/battery awareness, network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), immutable backups (✅ lock window via the PBS `protected` flag, tamper-resistant retention, guided pull-sync to a second PBS; see [Security model](#security-model)) |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness |
