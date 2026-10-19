@@ -113,7 +113,7 @@ scripts/version.sh major   # 0.2.3.22 -> 1.0.0.23
 ```
 
 `make` stamps the version into both binaries, and into the agent exe's Windows version
-resource (Properties → Details). The web UI shows it in the sidebar, and agents
+resource (Properties → Details). The web UI shows it in the top bar, and agents
 report theirs to the server.
 
 Development happens on the `alpha` branch, which is the default.
@@ -129,7 +129,7 @@ scripts/release.sh --local --prerelease   # pre-release from a branch other than
 Every release of a commit on `alpha` is published as a GitHub pre-release, so only consoles that
 opt in to pre-releases install it. Packages built from `alpha` (`make deb`, `make dist`, releases)
 are opted in already: their console has "Include pre-releases" on until the admin turns it off
-under Settings → Updates. `scripts/prerelease.sh` decides what counts as `alpha`; override it
+under Console Settings → Updates. `scripts/prerelease.sh` decides what counts as `alpha`; override it
 with `make dist PRERELEASE=0`.
 
 Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml): it
@@ -144,9 +144,10 @@ release (version bump commits left out), which is also what consoles show as rel
 | `proxbackup-agent-windows-{amd64,arm64}.exe` | agents (served to them by the console) |
 | `SHA256SUMS` | every download is checked against it |
 
-The console checks the releases every 6 hours. Under *Settings → Updates* you pick the weekdays,
-time and window length for automatic installs, or install right away with *Install now*. The
-card shows the release notes of every version between the installed and the latest one:
+The console checks the releases every 6 hours. Under *Console Settings → Updates* (the gear
+icon) you pick the weekdays, time and window length for automatic installs, or install right
+away with *Install now*. The card shows the release notes of every version between the
+installed and the latest one:
 
 * **.deb installs:** the console runs unprivileged, so it only writes a request. The root unit
   `proxbackup-server-update.service`, started by `proxbackup-server-update.path`, downloads the
@@ -165,7 +166,8 @@ repository.
 
 Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**. Done so far: group jobs,
 client-side encryption with key escrow, immutable lock window, file restore from volume
-images, and the per-file restore browser in the web UI. Still open in phase 2: console user
+images, the per-file restore browser in the web UI, and a top navigation bar with a profile
+menu (Profile Settings, Logout) and a Console Settings icon. Still open in phase 2: console user
 management with granular permissions, NTFS ACLs/ADS, tray app, bandwidth and
 metered-network/battery limits, SMB/NFS share backups and tamper-resistant retention. The
 guided pull-sync to a second PBS (immutable off-host copy) moved to phase 5. See the roadmap
