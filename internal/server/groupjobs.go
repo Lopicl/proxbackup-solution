@@ -234,6 +234,9 @@ func (s *Store) DeleteGroupJob(ctx context.Context, id int64) ([]int64, error) {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, errNotFound
 	}
+	if err := detachJobs(ctx, tx, `group_id=?`, id); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE group_id=?`, id); err != nil {
 		return nil, err
 	}
@@ -375,6 +378,9 @@ func syncGroup(ctx context.Context, tx *sql.Tx, groupID int64) ([]int64, error) 
 		}
 		affected = appendNew(affected, cid)
 		if !want[cid] {
+			if err := detachJobs(ctx, tx, `id=?`, jid); err != nil {
+				return nil, err
+			}
 			if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id=?`, jid); err != nil {
 				return nil, err
 			}

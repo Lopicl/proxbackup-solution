@@ -163,7 +163,41 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS jobs_group ON jobs(group_id)`); err != nil {
 		return err
 	}
-	return s.migrateGroupJobs()
+	if err := s.migrateGroupJobs(); err != nil {
+		return err
+	}
+	return s.repairJobRefs()
+}
+
+// repairJobRefs unlinks runs and snapshot locks left by jobs deleted before
+// detachJobs existed. SQLite hands a deleted row's id to the next insert, so
+// they show up under whichever job now has that id: a run belongs to it only
+// if it is for the same client and not older than the job (with a margin for
+// agent clock skew); a lock only if the job writes that backup group.
+func (s *Store) repairJobRefs() error {
+	if _, err := s.db.Exec(`UPDATE runs SET job_id=0 WHERE job_id>0 AND NOT EXISTS (SELECT 1 FROM jobs j
+		WHERE j.id=runs.job_id AND j.client_id=runs.client_id AND runs.queued_at>=j.created_at-600)`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE snapshot_locks SET job_id=0 WHERE job_id>0 AND NOT EXISTS (SELECT 1 FROM jobs j
+		WHERE j.id=snapshot_locks.job_id AND j.backup_id=snapshot_locks.backup_id)`)
+	return err
+}
+
+// detachJobs unlinks run history and snapshot locks from the jobs matching
+// where, ahead of their deletion, so a job that later gets one of their ids
+// doesn't inherit them. Runs the agent hasn't picked up yet are canceled.
+func detachJobs(ctx context.Context, db execer, where string, args ...any) error {
+	sel := `job_id IN (SELECT id FROM jobs WHERE ` + where + `)`
+	if _, err := db.ExecContext(ctx, `UPDATE runs SET state='canceled', finished_at=?, error='job deleted' WHERE state='queued' AND `+sel,
+		append([]any{now()}, args...)...); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE runs SET job_id=0 WHERE `+sel, args...); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `UPDATE snapshot_locks SET job_id=0 WHERE `+sel, args...)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -890,8 +924,18 @@ func (s *Store) SetMemberOverrides(ctx context.Context, id int64, enabled bool, 
 
 // DeleteJob removes a job without a group (see migrateGroupJobs).
 func (s *Store) DeleteJob(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM jobs WHERE id=? AND group_id=0`, id)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := detachJobs(ctx, tx, `id=? AND group_id=0`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id=? AND group_id=0`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func nonNil(s []string) []string {

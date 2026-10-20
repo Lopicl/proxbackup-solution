@@ -268,3 +268,70 @@ func jsonNum(id int64) string {
 	b, _ := json.Marshal(id)
 	return string(b)
 }
+
+// A job created after another was deleted can get its id back from SQLite; it
+// must not inherit the deleted job's runs.
+func TestDeletedJobRunsNotInherited(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	cs := groupTestClients(t, s, "pc-1", "pc-2")
+	save := func(name string, client int64) *GroupJob {
+		g := &GroupJob{Name: name, Kind: api.KindImage, Volumes: []string{"C:"}, Enabled: true, Clients: []int64{client}}
+		if _, err := s.store.SaveGroupJob(ctx, g); err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	old := save("Old", cs[0].ID)
+	oldJob := s.store.mustMember(t, old.ID)
+	done, err := s.store.QueueRun(ctx, oldJob, cs[0].ID, api.KindImage, "manual", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.store.db.ExecContext(ctx, `UPDATE runs SET state='success', finished_at=? WHERE id=?`, now(), done)
+	if _, err := s.store.QueueRun(ctx, oldJob, cs[0].ID, api.KindImage, "manual", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.DeleteGroupJob(ctx, old.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	nu := save("New", cs[1].ID)
+	if nu.ID != old.ID || s.store.mustMember(t, nu.ID) != oldJob {
+		t.Fatalf("ids not reused (group %d→%d), test proves nothing", old.ID, nu.ID)
+	}
+	if runs, _ := s.store.Runs(ctx, RunFilter{GroupID: nu.ID}); len(runs) != 0 {
+		t.Fatalf("new group shows %d runs of the deleted one", len(runs))
+	}
+	if last, _ := s.store.LastRuns(ctx); last[oldJob] != nil {
+		t.Fatalf("new member's last run = run %d of the deleted job", last[oldJob].ID)
+	}
+	// History of the client stays, and the never-started run was canceled.
+	runs, _ := s.store.Runs(ctx, RunFilter{ClientID: cs[0].ID})
+	if len(runs) != 2 || runs[0].State != api.RunCanceled || runs[1].State != api.RunSuccess {
+		t.Fatalf("client history = %+v", runs)
+	}
+
+	// Runs left attached by older consoles are repaired at startup.
+	s.store.db.ExecContext(ctx, `UPDATE runs SET job_id=? WHERE client_id=?`, oldJob, cs[0].ID)
+	if err := s.store.repairJobRefs(); err != nil {
+		t.Fatal(err)
+	}
+	if runs, _ := s.store.Runs(ctx, RunFilter{GroupID: nu.ID}); len(runs) != 0 {
+		t.Fatalf("after repair the new group still shows %d foreign runs", len(runs))
+	}
+	own, _ := s.store.QueueRun(ctx, oldJob, cs[1].ID, api.KindImage, "manual", nil)
+	s.store.repairJobRefs()
+	if runs, _ := s.store.Runs(ctx, RunFilter{GroupID: nu.ID}); len(runs) != 1 || runs[0].ID != own {
+		t.Fatalf("repair detached the job's own run: %+v", runs)
+	}
+}
+
+func (s *Store) mustMember(t *testing.T, groupID int64) int64 {
+	t.Helper()
+	jobs, err := s.GroupMembers(context.Background(), groupID)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("members of %d: %v %v", groupID, jobs, err)
+	}
+	return jobs[0].ID
+}
