@@ -4,8 +4,8 @@ A centrally managed backup system for Windows PCs that stores backups **natively
 Proxmox Backup Server (PBS). There is no Linux proxy and no official `proxmox-backup-client`
 in the data path: the Windows agent speaks the PBS backup protocol itself, so backups get the
 same chunk-level deduplication, verification, sync and prune behaviour as any other PBS client.
-Roadmap phase 7 brings Proxmox VE guest and host backups into the same console, so PCs,
-VMs/containers and the PVE nodes themselves are managed and restored in one place.
+Roadmap phase 7 brings Proxmox VE host backups into the same console, so PCs and the PVE
+nodes themselves are managed and restored in one place.
 
 ## Goals
 
@@ -19,7 +19,7 @@ VMs/containers and the PVE nodes themselves are managed and restored in one plac
 | The PC decides when to back up | The server only pushes configuration. Each agent runs its own scheduler on the PC's clock, catches up missed runs if the job allows it, and keeps backing up while the server is down |
 | Ransomware resilience | Agents get a PBS token with **DatastoreBackup** only — they can add backups, never delete or prune them |
 | Interoperability | Snapshots are standard PBS snapshots: visible in the PBS GUI, verifiable, syncable, restorable with `proxmox-backup-client` on Linux |
-| Proxmox VE in the same console *(phase 7)* | The console connects to PVE clusters, manages `vzdump` jobs that write to the same PBS, and restores VMs, containers and single files. A host agent on each node backs up the node's own configuration, and a guided rebuild restores a failed node. See [Proxmox VE backups](#proxmox-ve-backups) |
+| Proxmox VE hosts in the same console *(phase 7)* | A host agent on each PVE node backs up the node's own configuration to the same PBS, and a guided rebuild restores a failed node. See [Proxmox VE host backups](#proxmox-ve-host-backups) |
 | Hands-off updates | The console installs new GitHub releases in an admin-chosen maintenance window; Windows agents follow the console's version |
 
 ## System overview
@@ -598,7 +598,7 @@ docs/                   this document
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness, immutable off-host copy (guided pull-sync to a second PBS; see [Security model](#security-model)) |
 | 6 — MSP cloud console | Cloud-hosted, multi-tenant **ProxBackup Cloud** console for managed service providers: one pane of glass over all customers' sites, cross-customer alerting, policy templates, technician RBAC scoped per customer, reporting and usage metering for billing, PSA/RMM integrations, optional hosted management servers. See [MSP cloud console](#msp-cloud-console) |
-| 7 — Proxmox VE backups | Proxmox VE clusters managed from the console with their own **Proxmox VE** section in the web UI: cluster connection with a scoped PVE API token, guest inventory with protection coverage, `vzdump` backup jobs on PVE's own scheduler, run history from PVE tasks, console-side retention, and restores of whole VMs/containers (new or replacing, optional live-restore) and of single files. **PVE host backups**: the Linux agent (phase 3) on each node backs up its configuration (`/etc/pve` database, network, storage, keys, package set, disk/ZFS/LVM layout), with single-file restore and diff in the console and a one-command **node rebuild** onto a fresh PVE install. See [Proxmox VE backups](#proxmox-ve-backups) |
+| 7 — Proxmox VE host backups | Proxmox VE clusters connected to the console with their own **Proxmox VE** section in the web UI (scoped PVE API token for nodes, membership and removing a dead node). The Linux agent (phase 3) on each node backs up its configuration (`/etc/pve` database, network, storage, keys, package set, disk/ZFS/LVM layout), with single-file restore and diff in the console and a one-command **node rebuild** onto a fresh PVE install. VM and container backups stay with PVE's own `vzdump`. See [Proxmox VE host backups](#proxmox-ve-host-backups) |
 
 ## Platform support
 
@@ -856,82 +856,42 @@ the console belongs to exactly one customer, and every query is scoped by tenant
   per-customer PBS namespaces/datastores, and per-site connector certificates that can be
   revoked from either side.
 
-## Proxmox VE backups
+## Proxmox VE host backups
 
-*Roadmap phase 7.* Many sites that run PBS also run Proxmox VE. The console manages their
-VM and container backups next to the PC agents, in its own **Proxmox VE** section of the web
-UI, and restores them. PVE keeps doing the actual backup work (`vzdump` straight to PBS), so
-there is no new agent and backup data still never passes through the console.
+*Roadmap phase 7.* Many sites that run PBS also run Proxmox VE. VM and container backups are
+already covered by PVE itself (`vzdump` straight to PBS), so the console doesn't manage them.
+What PVE doesn't protect is the node itself: its network setup, storage definitions, cluster
+and Ceph config, certificates and SSH keys, and the packages installed on top of PVE. PVE has
+no built-in host backup, so the console adds one, using the phase 3 Linux agent on each node,
+in its own **Proxmox VE** section of the web UI.
 
 ```mermaid
 flowchart LR
   subgraph PVE["Proxmox VE cluster"]
-    VZ["vzdump / qmrestore / pct restore<br/>(PVE scheduler, PBS storage)"]
+    AG["proxbackup-agent (Linux, phase 3)<br/>on each node"]
   end
   CON["ProxBackup Console"]
   PBS[("PBS")]
 
-  CON -- "PVE API (token, pinned TLS): inventory,<br/>backup jobs, tasks/logs, restore, file-restore" --> VZ
-  VZ == "backup / restore data<br/>(PBS storage, DatastoreBackup token)" ==> PBS
+  CON -- "PVE API (scoped token, pinned TLS):<br/>nodes, versions, cluster membership" --> PVE
+  AG -- "jobs, status, runs<br/>(same as PC agents)" --> CON
+  AG == "host backup / restore data<br/>(DatastoreBackup token)" ==> PBS
   CON -- "admin API: namespace, token, snapshots, prune" --> PBS
 ```
 
-**Connecting a cluster:**
-
-- The admin adds a cluster with its API URL, a PVE API token and the pinned certificate
-  fingerprint. The UI shows the one-line `pveum` commands that create a dedicated user, a
-  custom role with only the privileges the console needs (audit, `VM.Backup`, plus allocation
-  privileges for restores), and the token.
-- The console provisions the PBS side like it does for a PC: namespace
-  `<root-ns>/pve/<cluster>`, an API token with `DatastoreBackup` on it, and a PBS storage
-  entry on the cluster (`type: pbs`, namespace, fingerprint) that uses that token. A
-  compromised PVE host can therefore add backups but not delete or prune them.
-- When the console runs on the PBS host (`-local-pbs`), the PBS host, datastore and
-  fingerprint for the PVE storage entry are filled in automatically.
-
-**Web UI: Proxmox VE section**
-
-- **Clusters:** connection health, PVE version, nodes, the PBS storage in use.
-- **Guests:** every VM and container from `/cluster/resources`, with node, status, last
-  successful backup, snapshot count and the jobs covering it. Guests not covered by any job are
-  flagged as *unprotected*, and so are guests whose last good backup is too old.
-- **Jobs:** create and edit PVE backup jobs (`/cluster/backup`): selection by guest IDs, pool
-  or "all except", mode (snapshot/suspend/stop), schedule (PVE calendar events), compression
-  and notes template. PVE runs the schedule, matching the "the machine decides when" model of
-  the PC agents; the console only writes the job definition. "Back up now" starts a `vzdump`
-  task for one guest or a whole job.
-- **Runs:** history built from PVE `vzdump` task status and logs, per guest, with the same
-  run detail and log view as PC runs.
-- **Restore:** see below.
-
-**Retention:** jobs carry the same keep-last/hourly/daily/... policy as PC jobs, but it is
-applied by the console with its PBS admin token, never by PVE's `prune-backups` (the PVE token
-can't prune). Phase 2's tamper-resistant retention and lock window apply to PVE groups too.
-
-**Restore:**
-
-- **Whole guest:** pick a guest → snapshot → target node and storage. Restore as a new VMID
-  (default) or over the existing guest after an explicit confirmation (it must be stopped).
-  VMs can use PVE's *live-restore* to start before all data is back. Uses
-  `POST /nodes/{node}/qemu` with `archive=<pbs-storage>:backup/vm/<id>/<time>` and
-  `POST /nodes/{node}/lxc` with `restore=1` for containers.
-- **Single files:** browse a snapshot through PVE's file-restore API (containers are pxar,
-  VM disks are opened by PVE's file-restore VM) and download files or folders as a zip.
-- Restores are runs in the history like PC restores, with progress from the PVE task.
-
-### PVE host backups
-
-Guest backups don't protect the node itself: its network setup, storage definitions,
-cluster and Ceph config, certificates and SSH keys, and the packages installed on top of
-PVE. PVE has no built-in host backup, so the console adds one, using the phase 3 Linux
-agent on each node.
+**Connecting a cluster:** the admin adds a cluster with its API URL, a PVE API token and the
+pinned certificate fingerprint. The UI shows the one-line `pveum` commands that create a
+dedicated user, a custom role with only the privileges the console needs (`Sys.Audit`, plus
+`Sys.Modify` for removing a dead node during a rebuild), and the token. The console creates
+the namespace `<root-ns>/pve/<cluster>` for the cluster's host backups.
 
 **Setup:** the cluster page lists its nodes with a *host backup* column. "Protect nodes" shows
 one enrollment command (same mechanism as for PCs) to paste into each node's shell; the
 agent installs as a `.deb` with a systemd service. A default **host job** is created per
 node: daily, backup type `host`, backup ID `pve-<node>` in the cluster's namespace, with the
-same `DatastoreBackup`-only token model. The PVE API has no way to run commands on a node,
-so enrollment is the one manual step.
+same `DatastoreBackup`-only token model as PCs, so a compromised node can add backups but not
+delete or prune them. The PVE API has no way to run commands on a node, so enrollment is the
+one manual step.
 
 **What a host backup contains** (small: typically well under 1 GiB, so a daily run is cheap):
 
@@ -943,7 +903,8 @@ so enrollment is the one manual step.
 
 The console shows a host backup like any file backup (browse, download), plus a **diff** view
 between two host snapshots or between a snapshot and the live node. That answers "what changed
-in `storage.cfg` or `interfaces` since last week?".
+in `storage.cfg` or `interfaces` since last week?". Retention, the lock window and
+tamper-resistant retention work as for PC jobs.
 
 **Restore, from easiest to most complete:**
 
@@ -967,8 +928,8 @@ in `storage.cfg` or `interfaces` since last week?".
       nodes, so the wizard first removes the dead node from the cluster (`pvecm delnode`,
       from a healthy node via the API), then the rebuilt node rejoins with `pvecm add`, and
       only node-local files are restored.
-   5. Reboot. If guest disks were lost with the node, the console offers **"Restore this
-      node's guests"**: one bulk restore of the latest backup of every guest that ran there.
+   5. Reboot. If guest disks were lost with the node, restore the guests from their own
+      `vzdump` backups in PVE.
 3. **Bare metal:** sites that want a byte-for-byte copy of the boot disk can add a whole-disk
    image job and restore it with ProxBackup Rescue (phase 4). The node rebuild is still the
    recommended path, because it works on different hardware.
@@ -978,13 +939,12 @@ SSH host keys, the PVE CA, API token secrets in `/etc/pve/priv`). They should us
 encryption (phase 2), and the recovery code for a rebuild is single-use, short-lived and bound
 to one node.
 
-**Notifications:** failed or missed `vzdump` tasks and host backups, unprotected guests and
-nodes, and guests or nodes without a recent successful backup use the same channels and settings as PC alerts.
+**Notifications:** failed or missed host backups, unprotected nodes, and nodes without a
+recent successful backup use the same channels and settings as PC alerts.
 
-**Data model additions:** `PVE_CLUSTER` (URL, fingerprint, token, PBS target, namespace),
-`PVE_JOB` (mirror of the PVE job plus retention), and runs that reference a cluster and guest
-ID instead of a client. Node host agents are regular `CLIENT`s linked to their cluster and node
-name.
+**Data model additions:** `PVE_CLUSTER` (URL, fingerprint, token, namespace). Node host agents
+are regular `CLIENT`s linked to their cluster and node name; their jobs and runs are regular
+`JOB`s and runs.
 
 ## Risks and mitigations
 
@@ -998,7 +958,7 @@ name.
 | A bad release breaks every console and agent | Updates install only in the admin's window, refuse downgrades, and verify `SHA256SUMS`; agents update only when idle and back off for an hour after a failure. Prereleases are opt-in |
 | Locked files without VSS | VSS is the default; without it, files are skipped and warned about, never silently dropped |
 | Compromised console or PBS host deletes all backups (it holds an Admin token) | Lock window via `protected` (phase 2, implemented), plus a pull-synced second PBS (guided in phase 5) or tape that the primary can't reach |
-| A compromised PVE host deletes or overwrites guest backups *(phase 7)* | Its PBS token has `DatastoreBackup` only and retention runs on the console; whole-guest restores over an existing VMID need explicit confirmation in the console |
+| A compromised PVE host deletes its own host backups *(phase 7)* | Its agent's PBS token has `DatastoreBackup` only, retention runs on the console, and the lock window applies to host backups too |
 | Share credentials leak from the console *(phase 2)* | Sealed with the master key, used only by the console process, never sent to agents or the browser; admins use a dedicated read-only account. Write credentials for restores are never stored |
 | Share backups overload the PBS host *(phase 2)* | Low CPU/I/O priority for share jobs, a cap on parallel share jobs, per-job bandwidth limits, and share jobs kept out of verify/GC windows |
 | Share backups read inconsistent data (no VSS on a remote share) *(phase 2)* | Server-side snapshots by default (`server_snapshot = prefer`), `require` for strict jobs; live reads log every changed or skipped file |
