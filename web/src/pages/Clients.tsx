@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState } from 'react'
-import { api, type Enrollment, type SetupToken, type Target } from '../api'
+import { api, clientName, type Enrollment, type SetupToken, type Target } from '../api'
 import { ago, Card, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
 
 export function Clients() {
   const { data, error, reload } = useLoad(api.clients, [], 10000)
   const enrollments = useLoad(api.enrollments, [], 10000)
   const setups = useLoad(api.setupTokens, [], 10000)
+  const revoked = useLoad(api.revokedClients, [], 10000)
   const targets = useLoad(api.targets, [])
   const [adding, setAdding] = useState(false)
   const [creatingSetup, setCreatingSetup] = useState(false)
@@ -19,12 +20,13 @@ export function Clients() {
     reload()
     enrollments.reload()
     setups.reload()
+    revoked.reload()
   }
   const activeSetups = (setups.data ?? []).filter((t) => t.expires > Date.now() / 1000)
   return (
     <>
       <h1>Clients</h1>
-      <ErrorBox error={error || enrollments.error || setups.error || actionError} />
+      <ErrorBox error={error || enrollments.error || setups.error || revoked.error || actionError} />
       <Card
         title={`${data?.length ?? 0} clients` + (pending.length ? `, ${pending.length} waiting to enroll` : '')}
         actions={
@@ -159,6 +161,55 @@ export function Clients() {
                     >
                       Revoke
                     </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+      {(revoked.data?.length ?? 0) > 0 && (
+        <Card title="Recently revoked">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Hostname</th>
+                <th>Revoked</th>
+                <th>Last seen</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {revoked.data!.map((c) => (
+                <tr key={c.id}>
+                  <td>
+                    <Link to={`/clients/${c.id}`}>{clientName(c)}</Link>
+                  </td>
+                  <td>{c.hostname}</td>
+                  <td>{ago(c.revoked_at)}</td>
+                  <td>{ago(c.last_seen)}</td>
+                  <td className="row-actions">
+                    {c.restorable ? (
+                      <button
+                        className="small"
+                        title="Reactivate the client: its agent reconnects with a new PBS token and its jobs are re-enabled"
+                        onClick={async () => {
+                          if (!confirm(`Un-revoke ${clientName(c)}? Its agent reconnects and the jobs enabled before the revocation run again.`)) return
+                          try {
+                            setActionError('')
+                            await api.unrevokeClient(c.id)
+                            reloadAll()
+                          } catch (err) {
+                            setActionError((err as Error).message)
+                          }
+                        }}
+                      >
+                        Un-revoke
+                      </button>
+                    ) : (
+                      <span className="muted-text">enroll the PC again</span>
+                    )}
                   </td>
                 </tr>
               ))}

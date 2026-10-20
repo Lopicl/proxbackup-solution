@@ -134,6 +134,11 @@ func (s *Store) migrate() error {
 		// Scheduled backups paused by a PC user from the tray app.
 		{"clients", "paused_until", "INTEGER NOT NULL DEFAULT 0"},
 		{"clients", "paused_by", "TEXT NOT NULL DEFAULT ''"},
+		// Revoked clients can be restored: when, the certificate serial the agent
+		// still holds, and the jobs that were enabled.
+		{"clients", "revoked_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"clients", "revoked_serial", "TEXT NOT NULL DEFAULT ''"},
+		{"clients", "revoked_jobs", "TEXT NOT NULL DEFAULT '[]'"},
 	}
 	for _, c := range cols {
 		var n int
@@ -198,7 +203,10 @@ type Client struct {
 	Tags      []string `json:"tags"`
 	LastSeen  int64    `json:"last_seen"`
 	Revoked   bool     `json:"revoked"`
-	CreatedAt int64    `json:"created_at"`
+	RevokedAt int64    `json:"revoked_at"`
+	// Restorable: revoked with its certificate serial kept (see UnrevokeClient).
+	Restorable bool  `json:"restorable"`
+	CreatedAt  int64 `json:"created_at"`
 	// Derived for the UI.
 	Online      bool   `json:"online"`
 	LastRun     *Run   `json:"last_run,omitempty"`
@@ -223,6 +231,8 @@ type Client struct {
 
 	tokenSecretEnc []byte
 	cryptKeyEnc    []byte
+	revokedSerial  string
+	revokedJobs    []int64
 }
 
 // Job is one client's membership in a group job: the group's definition with
@@ -442,14 +452,16 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 // ---- clients ----
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
-	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags, paused_until, paused_by`
+	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags, paused_until, paused_by,
+	revoked_at, revoked_serial, revoked_jobs`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
-	var sched, oldNS, tags string
+	var sched, oldNS, tags, revJobs string
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
-		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags, &c.PausedUntil, &c.PausedBy)
+		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags, &c.PausedUntil, &c.PausedBy,
+		&c.RevokedAt, &c.revokedSerial, &revJobs)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -460,6 +472,8 @@ func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	}
 	json.Unmarshal([]byte(tags), &c.Tags)
 	c.Tags = nonNil(c.Tags)
+	json.Unmarshal([]byte(revJobs), &c.revokedJobs)
+	c.Restorable = c.Revoked && c.revokedSerial != ""
 	c.Online = !c.Revoked && time.Since(time.Unix(c.LastSeen, 0)) < 2*time.Minute
 	return c, err
 }
@@ -550,12 +564,79 @@ func nonNilStates(s []api.JobState) []api.JobState {
 	return s
 }
 
+// RevokeClient disables a client, renaming it "<name>#revoked-<id>" so its
+// name can be reused. The certificate serial and the enabled jobs are kept for
+// UnrevokeClient. Revoking a revoked client is errNotFound.
 func (s *Store) RevokeClient(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE clients SET revoked=1, cert_serial=NULL, token_secret_enc=NULL, name=name||'#revoked-'||id WHERE id=?`, id)
-	if err == nil {
-		s.db.ExecContext(ctx, `UPDATE jobs SET enabled=0 WHERE client_id=?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return err
+	defer tx.Rollback()
+	enabled, err := queryIDs(ctx, tx, `SELECT id FROM jobs WHERE client_id=? AND enabled=1`, id)
+	if err != nil {
+		return err
+	}
+	if enabled == nil {
+		enabled = []int64{}
+	}
+	b, _ := json.Marshal(enabled)
+	res, err := tx.ExecContext(ctx, `UPDATE clients SET revoked=1, revoked_at=?, revoked_serial=COALESCE(cert_serial,''), revoked_jobs=?,
+		cert_serial=NULL, token_secret_enc=NULL, name=name||'#revoked-'||id WHERE id=? AND revoked=0`, now(), string(b), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET enabled=0 WHERE client_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RevokedClients lists the clients revoked since the given time, newest first.
+func (s *Store) RevokedClients(ctx context.Context, since int64) ([]*Client, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+clientCols+` FROM clients WHERE revoked=1 AND revoked_at>=? ORDER BY revoked_at DESC`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Client
+	for rows.Next() {
+		c, err := scanClient(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// UnrevokeClient reactivates a revoked client under name with a new PBS token:
+// its agent's certificate is accepted again and the jobs enabled at the
+// revocation are re-enabled.
+func (s *Store) UnrevokeClient(ctx context.Context, c *Client, name, tokenID string, tokenSecretEnc []byte) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE clients SET revoked=0, revoked_at=0, revoked_serial='', revoked_jobs='[]',
+		cert_serial=revoked_serial, name=?, token_id=?, token_secret_enc=? WHERE id=? AND revoked=1 AND revoked_serial<>''`,
+		name, tokenID, tokenSecretEnc, c.ID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	for _, j := range c.revokedJobs {
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs SET enabled=1 WHERE id=? AND client_id=?`, j, c.ID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ---- enrollments ----

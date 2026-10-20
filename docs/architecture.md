@@ -496,6 +496,11 @@ sequenceDiagram
   default, up to 30 days) and can be revoked under Clients; anyone holding one can enroll PCs
   until then. Revoking a client in the UI marks it revoked, so its
   certificate is no longer accepted, and deletes its PBS token. Existing snapshots stay.
+  Clients revoked in the last 30 days are listed under Clients and can be un-revoked: the
+  console remembers the certificate serial and which jobs were enabled, creates a new PBS
+  token, and the agent (which keeps polling with its certificate) reconnects with its
+  history, key and jobs. Clients revoked by older consoles (no serial kept) can't be restored
+  this way and must be enrolled again.
 * **Agent ↔ PBS:** the PBS certificate fingerprint is pinned. The scoped token has
   `DatastoreBackup` only, so a compromised PC cannot read other PCs' backups or delete its
   own history.

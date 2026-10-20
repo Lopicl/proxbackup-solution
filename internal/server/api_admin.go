@@ -284,6 +284,10 @@ func (s *Server) handleRevokeClient(w http.ResponseWriter, r *http.Request) {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	if c.Revoked {
+		httpError(w, http.StatusConflict, errors.New("client is already revoked"))
+		return
+	}
 	// Remove the PBS token so the agent can no longer write; existing snapshots stay.
 	if t, err := s.store.Target(ctx, c.TargetID); err == nil {
 		if pc, err := s.adminClient(t); err == nil {
@@ -295,9 +299,96 @@ func (s *Server) handleRevokeClient(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.store.RevokeClient(ctx, id); err != nil {
+		if errors.Is(err, errNotFound) {
+			httpError(w, http.StatusConflict, errors.New("client is already revoked"))
+			return
+		}
 		httpError(w, 500, err)
 		return
 	}
+	s.wakeClient(id)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// revokedListDays is how long revoked clients are listed (and can be
+// un-revoked from the list; their detail page keeps the button).
+const revokedListDays = 30
+
+func (s *Server) handleRevokedClients(w http.ResponseWriter, r *http.Request) {
+	cs, err := s.store.RevokedClients(r.Context(), now()-revokedListDays*86400)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	writeJSON(w, orEmpty(cs))
+}
+
+// handleUnrevokeClient reactivates a revoked client under its old name: a new
+// PBS token is created and its agent, which still holds its certificate,
+// reconnects with its jobs and history.
+func (s *Server) handleUnrevokeClient(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	ctx := r.Context()
+	c, err := s.store.Client(ctx, id)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	if !c.Revoked {
+		httpError(w, http.StatusConflict, errors.New("client is not revoked"))
+		return
+	}
+	if !c.Restorable {
+		httpError(w, http.StatusConflict, errors.New("this client was revoked by an older console version and cannot be restored; enroll the PC again"))
+		return
+	}
+	name := strings.TrimSuffix(c.Name, fmt.Sprintf("#revoked-%d", c.ID))
+	// Hold the name like an enrollment does until the client row has it.
+	s.enrollMu.Lock()
+	defer s.enrollMu.Unlock()
+	if s.store.ClientNameTaken(ctx, name) {
+		httpError(w, http.StatusConflict, fmt.Errorf("%w: %q is used by another client meanwhile", errClientNameTaken, name))
+		return
+	}
+	t, err := s.store.Target(ctx, c.TargetID)
+	if err != nil {
+		httpError(w, statusFor(err), fmt.Errorf("target: %w", err))
+		return
+	}
+	pc, err := s.adminClient(t)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	pc.DeleteToken(ctx, t.PBSUser, name) // stale token of the same name
+	tokenID, secret, err := pc.CreateToken(ctx, t.PBSUser, name, "proxbackup agent "+name)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, fmt.Errorf("PBS token: %w", err))
+		return
+	}
+	for _, ns := range append([]string{c.Namespace}, c.OldNamespaces...) {
+		if err := prepareClientNamespace(ctx, pc, t, ns, tokenID); err != nil {
+			pc.DeleteToken(ctx, t.PBSUser, name)
+			httpError(w, http.StatusBadGateway, err)
+			return
+		}
+	}
+	if err := s.store.UnrevokeClient(ctx, c, name, tokenID, s.sealer.Seal(secret)); err != nil {
+		pc.DeleteToken(ctx, t.PBSUser, name)
+		httpError(w, statusFor(err), err)
+		return
+	}
+	// Group jobs selecting it by tag (or all clients) pick it up again.
+	if affected, err := s.store.SyncAllGroups(ctx); err != nil {
+		s.log.Error("attach group jobs", "client", name, "err", err)
+	} else if err := s.membersChanged(ctx, affected); err != nil {
+		s.log.Error("attach group jobs", "client", name, "err", err)
+	}
+	s.log.Info("client un-revoked", "client", name, "id", c.ID)
 	s.wakeClient(id)
 	writeJSON(w, map[string]bool{"ok": true})
 }

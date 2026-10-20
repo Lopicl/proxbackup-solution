@@ -81,7 +81,13 @@ export interface Client {
   encryption_created: number
   paused_until: number // scheduled backups paused from the tray app until then (unix s; compare with now)
   paused_by: string
+  revoked: boolean
+  revoked_at: number
+  restorable: boolean // revoked and can be un-revoked (its agent reconnects)
 }
+
+// A revoked client is renamed "<name>#revoked-<id>"; this is its name before.
+export const clientName = (c: Client) => (c.revoked ? c.name.replace(/#revoked-\d+$/, '') : c.name)
 
 export interface Keep {
   'keep-last'?: number
@@ -359,6 +365,8 @@ export const api = {
   clients: () => request<Client[]>('GET', '/clients'),
   client: (id: number) => request<{ client: Client; jobs: Job[]; runs: Run[] }>('GET', `/clients/${id}`),
   revokeClient: (id: number) => request('DELETE', `/clients/${id}`),
+  revokedClients: () => request<Client[]>('GET', '/clients/revoked'),
+  unrevokeClient: (id: number) => request('POST', `/clients/${id}/unrevoke`),
   pushAgentUpdate: (id: number) => request<{ version: string }>('POST', `/clients/${id}/agent-update`),
   snapshots: (id: number) => request<Snapshot[]>('GET', `/clients/${id}/snapshots`),
   // Lists a directory of a snapshot's catalog: "/" lists the archives, "/<archive>/<dir>" their contents.
