@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,11 +21,6 @@ import (
 )
 
 var ioEOF = io.EOF
-
-type readCloser interface {
-	io.Reader
-	io.Closer
-}
 
 // Reporter receives logs and progress for a running job.
 type Reporter interface {
@@ -123,11 +119,16 @@ func (j *job) snapshotRef(t int64) pbs.SnapshotRef {
 	return pbs.SnapshotRef{Store: j.spec.Target.Datastore, NS: j.spec.Target.Namespace, Type: "host", ID: j.spec.BackupID, Time: t}
 }
 
+// chunkWorkers is how many chunks are hashed, compressed, encrypted and
+// uploaded at once: one per CPU, at least 4 (uploads also wait on the
+// network) and at most 8 (each holds a few 4 MiB buffers).
+func chunkWorkers() int { return min(max(runtime.NumCPU(), 4), 8) }
+
 // startSession opens a backup session, making sure backup-time is newer than
 // the group's last snapshot (PBS rejects equal or older times).
 func (j *job) startSession(ctx context.Context, c *pbs.Client) (*pbs.BackupSession, error) {
 	t := time.Now().Unix()
-	s, err := c.StartBackup(ctx, j.snapshotRef(t), pbs.BackupOptions{Crypt: j.backupCrypt(), Compress: true, Concurrency: 4,
+	s, err := c.StartBackup(ctx, j.snapshotRef(t), pbs.BackupOptions{Crypt: j.backupCrypt(), Compress: true, Concurrency: chunkWorkers(),
 		OnUpload: func(n int) { j.uploaded.Add(uint64(n)) }})
 	if err != nil {
 		return nil, fmt.Errorf("start backup session: %w", err)

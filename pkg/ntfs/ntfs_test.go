@@ -22,6 +22,15 @@ import (
 // non-ASCII names. manifest.json holds what Windows reported for every file.
 func openTestVolume(t *testing.T) *Volume {
 	t.Helper()
+	v, err := Open(bytes.NewReader(loadTestImage(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func loadTestImage(t *testing.T) []byte {
+	t.Helper()
 	f, err := os.Open("testdata/volume.img.gz")
 	if err != nil {
 		t.Fatal(err)
@@ -35,11 +44,7 @@ func openTestVolume(t *testing.T) *Volume {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v, err := Open(bytes.NewReader(img))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return v
+	return img
 }
 
 type manifestEntry struct {
@@ -51,7 +56,12 @@ type manifestEntry struct {
 }
 
 func TestFilesMatchWindows(t *testing.T) {
-	v := openTestVolume(t)
+	checkManifest(t, openTestVolume(t))
+}
+
+// checkManifest compares every file on v with what Windows reported.
+func checkManifest(t *testing.T, v *Volume) {
+	t.Helper()
 	raw, err := os.ReadFile("testdata/manifest.json")
 	if err != nil {
 		t.Fatal(err)

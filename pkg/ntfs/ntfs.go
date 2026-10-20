@@ -69,6 +69,7 @@ type Volume struct {
 	clusterSize int64
 	recordSize  int64
 	indexSize   int64 // default index record size from the boot sector
+	clusters    int64 // clusters in the file system (from the boot sector)
 	mft         *Stream
 }
 
@@ -90,6 +91,7 @@ func Open(r io.ReaderAt) (*Volume, error) {
 	if bps < 256 || bps&(bps-1) != 0 || v.clusterSize == 0 || v.clusterSize > 2<<20 {
 		return nil, errors.New("ntfs: invalid geometry")
 	}
+	v.clusters = int64(binary.LittleEndian.Uint64(bs[0x28:])) / spc
 	sizeOf := func(b byte) int64 {
 		if n := int8(b); n < 0 {
 			return 1 << -n

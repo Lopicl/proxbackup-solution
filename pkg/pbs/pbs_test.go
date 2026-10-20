@@ -246,3 +246,27 @@ func TestIndexReaderAt(t *testing.T) {
 		t.Errorf("sequential read fetched %d chunks, want %d", n, len(idx.Entries))
 	}
 }
+
+func TestZeroChunkDigestCache(t *testing.T) {
+	crypt, err := NewCryptConfig([32]byte{1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*CryptConfig{nil, crypt} {
+		b := &BackupSession{opts: BackupOptions{Crypt: c}, zeroDigests: map[int][32]byte{}}
+		for _, n := range []int{FixedChunkSize, FixedChunkSize, 12345} {
+			zero := make([]byte, n)
+			if b.digest(zero) != c.ComputeDigest(zero) {
+				t.Errorf("zero chunk of %d bytes: wrong digest", n)
+			}
+		}
+		data := make([]byte, FixedChunkSize)
+		data[len(data)-1] = 1
+		if b.digest(data) != c.ComputeDigest(data) {
+			t.Error("non-zero chunk: wrong digest")
+		}
+		if len(b.zeroDigests) != 2 {
+			t.Errorf("cached %d sizes, want 2", len(b.zeroDigests))
+		}
+	}
+}

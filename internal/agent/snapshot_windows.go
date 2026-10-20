@@ -123,19 +123,30 @@ func openVolume(dev string) (*windows.Handle, uint64, error) {
 
 type volumeReader struct{ h windows.Handle }
 
-func (v *volumeReader) Read(p []byte) (int, error) {
-	var n uint32
-	err := windows.ReadFile(v.h, p, &n, nil)
-	if err == nil && n == 0 {
-		return 0, ioEOF
+// ReadAt reads at an absolute offset. Offset and length must be multiples of
+// the sector size, as for any raw volume read.
+func (v *volumeReader) ReadAt(p []byte, off int64) (int, error) {
+	total := 0
+	for len(p) > 0 {
+		ov := windows.Overlapped{Offset: uint32(off), OffsetHigh: uint32(off >> 32)}
+		var n uint32
+		err := windows.ReadFile(v.h, p, &n, &ov)
+		if err == windows.ERROR_HANDLE_EOF || (err == nil && n == 0) {
+			return total, ioEOF
+		}
+		if err != nil {
+			return total, err
+		}
+		total += int(n)
+		p, off = p[n:], off+int64(n)
 	}
-	return int(n), err
+	return total, nil
 }
 
 func (v *volumeReader) Close() error { return windows.CloseHandle(v.h) }
 
 // openImageSource opens vol (e.g. "C:") for an image backup.
-func (s *snapshotSet) openImageSource(vol string) (readCloser, uint64, string, error) {
+func (s *snapshotSet) openImageSource(vol string) (imageSource, uint64, string, error) {
 	dev, err := s.VolumeDevice(vol)
 	if err != nil {
 		return nil, 0, "", err

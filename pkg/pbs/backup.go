@@ -3,6 +3,7 @@
 package pbs
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -78,6 +79,9 @@ type Stats struct {
 	ReusedChunks  int
 	UploadedBytes uint64 // encoded bytes sent over the wire
 	Duration      time.Duration
+	// Time the workers spent on each step, summed over all of them (so it
+	// can exceed Duration): hashing, compressing+encrypting, and sending.
+	HashTime, EncodeTime, UploadTime time.Duration
 }
 
 // BackupSession is an open PBS backup writer session.
@@ -89,7 +93,10 @@ type BackupSession struct {
 	files []FileInfo
 	// known holds digests the server already has (from previous indexes or uploaded this session).
 	known map[[32]byte]struct{}
-	done  bool
+	// zeroDigests caches the digest of an all-zero chunk by size: free disk
+	// space makes up much of a volume image and need not be hashed each time.
+	zeroDigests map[int][32]byte
+	done        bool
 }
 
 // StartBackup opens a backup session for ref. ref.Time must be newer than the
@@ -106,7 +113,7 @@ func (c *Client) StartBackup(ctx context.Context, ref SnapshotRef, opts BackupOp
 	if err != nil {
 		return nil, err
 	}
-	return &BackupSession{sess: s, ref: ref, opts: opts, known: map[[32]byte]struct{}{}}, nil
+	return &BackupSession{sess: s, ref: ref, opts: opts, known: map[[32]byte]struct{}{}, zeroDigests: map[int][32]byte{}}, nil
 }
 
 // Ref returns the snapshot this session writes.
@@ -263,6 +270,8 @@ type ArchiveWriter struct {
 	csum  *IndexCsum
 	stats Stats
 	start time.Time
+
+	hashNS, encodeNS, uploadNS atomic.Int64
 }
 
 type chunkJob struct {
@@ -471,7 +480,9 @@ func (w *ArchiveWriter) ctxErr() error {
 
 func (w *ArchiveWriter) process(job *chunkJob) error {
 	b := w.b
-	job.digest = b.opts.Crypt.ComputeDigest(job.data)
+	t := time.Now()
+	job.digest = b.digest(job.data)
+	t = w.since(&w.hashNS, t)
 	b.mu.Lock()
 	_, known := b.known[job.digest]
 	if !known {
@@ -485,6 +496,7 @@ func (w *ArchiveWriter) process(job *chunkJob) error {
 	if err != nil {
 		return err
 	}
+	t = w.since(&w.encodeNS, t)
 	prefix := "dynamic"
 	if !w.dynamic {
 		prefix = "fixed"
@@ -495,7 +507,9 @@ func (w *ArchiveWriter) process(job *chunkJob) error {
 		"size":         len(job.data),
 		"encoded-size": len(raw),
 	}
-	if err := b.sess.call(w.ctx, http.MethodPost, prefix+"_chunk", params, raw, "application/octet-stream", nil); err != nil {
+	err = b.sess.call(w.ctx, http.MethodPost, prefix+"_chunk", params, raw, "application/octet-stream", nil)
+	w.since(&w.uploadNS, t)
+	if err != nil {
 		b.mu.Lock()
 		delete(b.known, job.digest)
 		b.mu.Unlock()
@@ -506,6 +520,43 @@ func (w *ArchiveWriter) process(job *chunkJob) error {
 		b.opts.OnUpload(len(raw))
 	}
 	return nil
+}
+
+// since adds the time elapsed from t to *acc and returns now.
+func (w *ArchiveWriter) since(acc *atomic.Int64, t time.Time) time.Time {
+	now := time.Now()
+	acc.Add(int64(now.Sub(t)))
+	return now
+}
+
+// digest is ComputeDigest, answered from a cache for all-zero chunks.
+func (b *BackupSession) digest(data []byte) [32]byte {
+	if !allZero(data) {
+		return b.opts.Crypt.ComputeDigest(data)
+	}
+	b.mu.Lock()
+	d, ok := b.zeroDigests[len(data)]
+	b.mu.Unlock()
+	if !ok {
+		d = b.opts.Crypt.ComputeDigest(data)
+		b.mu.Lock()
+		b.zeroDigests[len(data)] = d
+		b.mu.Unlock()
+	}
+	return d
+}
+
+var zeroBlock [64 << 10]byte
+
+func allZero(p []byte) bool {
+	for len(p) > 0 {
+		n := min(len(p), len(zeroBlock))
+		if !bytes.Equal(p[:n], zeroBlock[:n]) {
+			return false
+		}
+		p = p[n:]
+	}
+	return true
 }
 
 // appendLoop registers uploaded chunks with the index in stream order.
@@ -597,6 +648,9 @@ func (w *ArchiveWriter) Close() (Stats, error) {
 		return w.stats, err
 	}
 	w.stats.Duration = time.Since(w.start)
+	w.stats.HashTime = time.Duration(w.hashNS.Load())
+	w.stats.EncodeTime = time.Duration(w.encodeNS.Load())
+	w.stats.UploadTime = time.Duration(w.uploadNS.Load())
 	w.b.addFile(FileInfo{Filename: w.name, CryptMode: w.b.cryptMode(), Size: w.stats.Size, Csum: hex.EncodeToString(csum[:])})
 	return w.stats, nil
 }

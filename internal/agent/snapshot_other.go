@@ -32,15 +32,12 @@ func (s *snapshotSet) Close() {}
 func (s *snapshotSet) imageFSRoot(vol string) (string, bool) { return "", false }
 
 // openImageSource opens a file or block device path for an image backup.
-func (s *snapshotSet) openImageSource(vol string) (readCloser, uint64, string, error) {
+func (s *snapshotSet) openImageSource(vol string) (imageSource, uint64, string, error) {
 	f, err := os.Open(vol)
 	if err != nil {
 		return nil, 0, "", err
 	}
 	size, err := f.Seek(0, 2)
-	if err == nil {
-		_, err = f.Seek(0, 0)
-	}
 	if err != nil {
 		f.Close()
 		return nil, 0, "", err
