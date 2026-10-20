@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { api, type EncryptionSettings, type NotifySettings } from '../api'
+import { generateMasterKeyPair } from '../masterkey'
 import { Card, ErrorBox, Field } from '../ui'
 import { UpdatesCard } from './Updates'
 
@@ -116,6 +117,7 @@ function EncryptionCard() {
   const [s, setS] = useState<EncryptionSettings | null>(null)
   const [error, setError] = useState('')
   const [msg, setMsg] = useState('')
+  const [generating, setGenerating] = useState(false)
   useEffect(() => {
     api.encryptionSettings().then(setS, (e: Error) => setError(e.message))
   }, [])
@@ -145,8 +147,8 @@ function EncryptionCard() {
           hint={
             <>
               With a master key, every encrypted snapshot also holds its key encrypted with it (<code>rsa-encrypted.key.blob</code>), recoverable without this
-              console: <code>proxmox-backup-client key import-with-master-key</code>. Create one with <code>proxmox-backup-client key create-master-key</code>{' '}
-              and paste <code>master-public.pem</code>; keep the private key offline.
+              console: <code>proxmox-backup-client key import-with-master-key</code>. Generate a key pair here, or create one with{' '}
+              <code>proxmox-backup-client key create-master-key</code> and paste <code>master-public.pem</code>. Keep the private key offline.
             </>
           }
         >
@@ -166,9 +168,111 @@ function EncryptionCard() {
         {msg && <div className="notice">{msg}</div>}
         <ErrorBox error={error} />
         <div className="buttons">
+          {!generating && (
+            <button type="button" onClick={() => setGenerating(true)}>
+              Generate key pair…
+            </button>
+          )}
           <button className="primary">Save</button>
         </div>
       </form>
+      {generating && (
+        <MasterKeyGenerator
+          replacing={!!s.master_fingerprint}
+          onGenerated={(pub) => {
+            setS({ ...s, master_pubkey: pub, master_bits: undefined, master_fingerprint: undefined })
+            setMsg('')
+          }}
+          onClose={() => setGenerating(false)}
+        />
+      )}
     </Card>
+  )
+}
+
+// MasterKeyGenerator creates the RSA master key pair in the browser: the
+// private key is only offered as a download, the console gets the public key.
+function MasterKeyGenerator({ replacing, onGenerated, onClose }: { replacing: boolean; onGenerated: (publicPem: string) => void; onClose: () => void }) {
+  const [pass, setPass] = useState('')
+  const [pass2, setPass2] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [privatePem, setPrivatePem] = useState('')
+  const download = (pem: string) => {
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(new Blob([pem], { type: 'application/x-pem-file' }))
+    a.download = 'master-private.pem'
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+  }
+  if (privatePem) {
+    return (
+      <>
+        <h3>Key pair generated</h3>
+        <div className="notice">
+          Your browser downloaded <code>master-private.pem</code>, encrypted with your passphrase. This console never had it: store it offline with the passphrase (password
+          manager, safe), because it is the only way to recover snapshot keys without the console. The public key is filled in above; click <b>Save</b> to use it.
+        </div>
+        <div className="buttons">
+          <button type="button" onClick={() => download(privatePem)}>
+            Download private key again
+          </button>
+          <button type="button" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </>
+    )
+  }
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault()
+        setError('')
+        if (pass.length < 8) return setError('Use a passphrase of at least 8 characters.')
+        if (pass !== pass2) return setError('The passphrases do not match.')
+        setBusy(true)
+        try {
+          const k = await generateMasterKeyPair(pass)
+          download(k.privatePem)
+          setPrivatePem(k.privatePem)
+          setPass('')
+          setPass2('')
+          onGenerated(k.publicPem)
+        } catch (err) {
+          setError((err as Error).message)
+        } finally {
+          setBusy(false)
+        }
+      }}
+    >
+      <h3>Generate a master key pair</h3>
+      <p className="muted-text">
+        Your browser creates an RSA 4096-bit key pair. The private key is downloaded as <code>master-private.pem</code>, protected by the passphrase below, and never sent to
+        this console. <code>proxmox-backup-client key import-with-master-key</code> asks for that passphrase.
+      </p>
+      {replacing && (
+        <p className="warn-text">
+          A master key is already set. Snapshots made so far stay recoverable only with its private key, so keep that one too.
+        </p>
+      )}
+      <div className="grid2">
+        <Field label="Passphrase">
+          <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} autoComplete="new-password" />
+        </Field>
+        <Field label="Repeat passphrase">
+          <input type="password" value={pass2} onChange={(e) => setPass2(e.target.value)} autoComplete="new-password" />
+        </Field>
+      </div>
+      <ErrorBox error={error} />
+      <div className="buttons">
+        <button type="button" onClick={onClose} disabled={busy}>
+          Cancel
+        </button>
+        <button className="primary" disabled={busy}>
+          {busy ? 'Generating…' : 'Generate and download'}
+        </button>
+      </div>
+    </form>
   )
 }

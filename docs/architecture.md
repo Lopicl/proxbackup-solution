@@ -514,7 +514,11 @@ sequenceDiagram
   Escrow/recovery: restores from the console always get the client key; admins can download
   it as a PBS key file on the client page (logged); and with an RSA master public key in
   Console Settings, every encrypted snapshot also carries `rsa-encrypted.key.blob`, recoverable with
-  `proxmox-backup-client key import-with-master-key` even without the console. Turning
+  `proxmox-backup-client key import-with-master-key` even without the console. *Generate
+  key pair* in Console Settings creates that RSA-4096 pair in the browser (Web Crypto,
+  `web/src/masterkey.ts`): the private key is downloaded as `master-private.pem`, a
+  passphrase-encrypted PKCS#8 key (PBES2, PBKDF2-HMAC-SHA256, AES-256-CBC) like
+  `key create-master-key` writes, and only the public key reaches the console. Turning
   encryption on or off makes the next run read and upload everything (chunks of differently
   keyed snapshots are never reused, the agent checks the previous manifest's key fingerprint).
 * **Immutable backups (phase 2):** PBS has no WORM mode, so immutability is layered:
