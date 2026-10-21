@@ -32,6 +32,8 @@ const (
 type localState struct {
 	mu       sync.Mutex
 	online   bool
+	since    time.Time // when the connection to the server was (re)established
+	drops    int       // how often the connection to the server was lost
 	current  *ipc.RunningRun
 	history  []ipc.RunInfo // newest first
 	pause    pauseState
@@ -88,8 +90,24 @@ func (r *Runner) setPause(p pauseState) error {
 
 func (r *Runner) setOnline(v bool) {
 	r.local.mu.Lock()
+	switch {
+	case v && !r.local.online:
+		r.local.since = time.Now()
+	case !v && r.local.online:
+		r.local.drops++
+	}
 	r.local.online = v
 	r.local.mu.Unlock()
+}
+
+// connection is the Scheduler's connectivity hook.
+func (r *Runner) connection() (onlineSince time.Time, drops int) {
+	r.local.mu.Lock()
+	defer r.local.mu.Unlock()
+	if !r.local.online {
+		return time.Time{}, r.local.drops
+	}
+	return r.local.since, r.local.drops
 }
 
 // runStarted and runFinished track the run in progress and the history.

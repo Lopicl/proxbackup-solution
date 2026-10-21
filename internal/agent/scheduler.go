@@ -29,6 +29,11 @@ import (
 //   - backups paused from the tray     → catch-up on: start it once the pause ends
 //     catch-up off: record as "missed"
 //
+// With catch-up on, a scheduled run that fails because the agent went offline
+// meanwhile (lost contact with the server, or the agent stopped mid-run: PC
+// shut down, power loss) is caught up once the agent has been back online
+// for offlineRetryDelay.
+//
 // Several missed slots are coalesced into a single catch-up run.
 type Scheduler struct {
 	dir string
@@ -42,11 +47,24 @@ type Scheduler struct {
 	missed func(job api.JobConfig, slot time.Time, reason string)
 	// pausedBy reports who paused scheduled backups ("" = not paused).
 	pausedBy func() string
-	logf     func(level, format string, args ...any)
+	// conn reports since when the agent has been connected to the server (zero
+	// while offline) and how often it lost the connection so far.
+	conn func() (onlineSince time.Time, drops int)
+	logf func(level, format string, args ...any)
 
-	mu    sync.Mutex
-	cfg   *api.AgentConfig
-	state map[int64]*jobState
+	mu     sync.Mutex
+	cfg    *api.AgentConfig
+	state  map[int64]*jobState
+	drops  map[int64]int       // connection drops when a job's run started
+	failed map[int64]failedRun // failed runs that may have been cut off by going offline
+}
+
+// failedRun is a failed scheduled run waiting to see whether the agent went
+// offline during it (the connection loss may be noticed after the run failed).
+type failedRun struct {
+	slot  time.Time
+	drops int
+	at    time.Time
 }
 
 type jobState struct {
@@ -54,17 +72,28 @@ type jobState struct {
 	LastSlot       int64  `json:"last_slot"` // newest slot already handled (unix seconds)
 	CatchUpPending bool   `json:"catch_up_pending"`
 	PendingSlot    int64  `json:"pending_slot,omitempty"`
+	// The pending catch-up repeats a run cut off by the agent going offline:
+	// it waits until the agent has been online for offlineRetryDelay after RetryFrom.
+	RetryOnline bool  `json:"retry_online,omitempty"`
+	RetryFrom   int64 `json:"retry_from,omitempty"`
+	Running     int64 `json:"running,omitempty"` // slot of the scheduled run in progress
 }
 
 const (
 	configFile        = "jobs.json"     // pushed config incl. PBS token: written 0600
 	scheduleStateFile = "schedule.json" // per-job scheduling state
 	defaultWindow     = 60 * time.Minute
+	// offlineRetryDelay: a run cut off by the agent going offline is repeated
+	// once the agent has been back online this long.
+	offlineRetryDelay = 30 * time.Minute
+	// offlineGrace: how long after a failed run a connection loss still counts
+	// as its cause (the poll notices a dead network only after its timeout).
+	offlineGrace = 5 * time.Minute
 )
 
 // NewScheduler loads the persisted configuration and state from dir.
 func NewScheduler(dir string) *Scheduler {
-	s := &Scheduler{dir: dir, now: time.Now, state: map[int64]*jobState{}}
+	s := &Scheduler{dir: dir, now: time.Now, state: map[int64]*jobState{}, drops: map[int64]int{}, failed: map[int64]failedRun{}}
 	if b, err := os.ReadFile(filepath.Join(dir, configFile)); err == nil {
 		var c api.AgentConfig
 		if json.Unmarshal(b, &c) == nil {
@@ -73,6 +102,18 @@ func NewScheduler(dir string) *Scheduler {
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, scheduleStateFile)); err == nil {
 		json.Unmarshal(b, &s.state)
+	}
+	// A run still marked as in progress was cut off by the agent stopping; it
+	// is repeated once this agent process has been online long enough.
+	for id, st := range s.state {
+		if st.Running == 0 {
+			continue
+		}
+		if j, ok := s.jobLocked(id); ok && j.CatchUp {
+			st.CatchUpPending, st.PendingSlot = true, st.Running
+			st.RetryOnline, st.RetryFrom = true, 0
+		}
+		st.Running = 0
 	}
 	return s
 }
@@ -98,6 +139,10 @@ func (s *Scheduler) Config() *api.AgentConfig {
 func (s *Scheduler) Job(id int64) (api.JobConfig, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.jobLocked(id)
+}
+
+func (s *Scheduler) jobLocked(id int64) (api.JobConfig, bool) {
 	if s.cfg != nil {
 		for _, j := range s.cfg.Jobs {
 			if j.ID == id {
@@ -134,7 +179,7 @@ func (s *Scheduler) Update(c *api.AgentConfig) error {
 			st = &jobState{Schedule: j.Schedule, LastSlot: now.Add(-delay(j)).Unix()}
 		}
 		if !j.CatchUp {
-			st.CatchUpPending = false
+			st.CatchUpPending, st.RetryOnline = false, false
 		}
 		keep[j.ID] = st
 	}
@@ -192,11 +237,30 @@ func (s *Scheduler) Tick() {
 			changed = true
 		}
 
-		// A catch-up deferred because the job was busy: start it once it's free.
-		if st.CatchUpPending && paused == "" && !s.busy(j.ID) {
+		// A failed run turns out to have been cut off by the agent going offline.
+		if f, ok := s.failed[j.ID]; ok {
+			if _, drops := s.connection(); drops > f.drops && j.CatchUp {
+				s.logf("info", "%s: the run failed while the agent was offline, will catch up %s after it is back online",
+					j.Name, offlineRetryDelay)
+				st.CatchUpPending, st.PendingSlot = true, f.slot.Unix()
+				st.RetryOnline, st.RetryFrom = true, f.at.Unix()
+				changed = true
+				delete(s.failed, j.ID)
+			} else if !j.CatchUp || now.Sub(f.at) > offlineGrace {
+				delete(s.failed, j.ID)
+			}
+		}
+
+		// A catch-up deferred because the job was busy (or a run cut off by
+		// going offline): start it once it's free.
+		if st.CatchUpPending && paused == "" && !s.busy(j.ID) && s.retryDue(st, now) {
+			msg := "starting deferred catch-up run"
+			if st.RetryOnline {
+				msg = "starting catch-up of the run cut off by the agent going offline"
+			}
 			if s.start(s.cfg.Spec(j), j, api.TriggerCatchUp, time.Unix(st.PendingSlot, 0)) {
-				s.logf("info", "%s: starting deferred catch-up run", j.Name)
-				st.CatchUpPending, changed = false, true
+				s.logf("info", "%s: %s", j.Name, msg)
+				st.CatchUpPending, st.RetryOnline, changed = false, false, true
 			}
 		}
 
@@ -213,14 +277,14 @@ func (s *Scheduler) Tick() {
 		switch {
 		case paused != "":
 			if j.CatchUp {
-				st.CatchUpPending, st.PendingSlot = true, due.Slot.Unix()
+				st.CatchUpPending, st.PendingSlot, st.RetryOnline = true, due.Slot.Unix(), false
 				s.logf("info", "%s: backups are paused, will catch up when the pause ends", j.Name)
 			} else {
 				s.missed(j, due.Slot, "scheduled backups were paused on the PC by "+paused)
 			}
 		case s.busy(j.ID):
 			if j.CatchUp {
-				st.CatchUpPending, st.PendingSlot = true, due.Slot.Unix()
+				st.CatchUpPending, st.PendingSlot, st.RetryOnline = true, due.Slot.Unix(), false
 				s.logf("info", "%s: previous run still in progress, will catch up when it finishes", j.Name)
 			} else {
 				s.missed(j, due.Slot, "the previous run of this job was still in progress")
@@ -239,6 +303,65 @@ func (s *Scheduler) Tick() {
 			s.logf("warn", "saving schedule state: %v", err)
 		}
 	}
+}
+
+// connection reports the agent's connection to the server.
+func (s *Scheduler) connection() (time.Time, int) {
+	if s.conn == nil {
+		return time.Time{}, 0
+	}
+	return s.conn()
+}
+
+// retryDue reports whether a pending catch-up may start: a run cut off by
+// going offline waits until the agent has been online for offlineRetryDelay.
+func (s *Scheduler) retryDue(st *jobState, now time.Time) bool {
+	if !st.RetryOnline {
+		return true
+	}
+	since, _ := s.connection()
+	if since.IsZero() {
+		return false
+	}
+	if from := time.Unix(st.RetryFrom, 0); from.After(since) {
+		since = from
+	}
+	return !now.Before(since.Add(offlineRetryDelay))
+}
+
+// RunStarted marks a scheduled or catch-up run as in progress, so a run cut
+// off by the agent stopping is caught up after a restart. It replaces a
+// pending catch-up of a run cut off by going offline.
+func (s *Scheduler) RunStarted(jobID int64, slot time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state[jobID]
+	if st == nil {
+		return
+	}
+	_, s.drops[jobID] = s.connection()
+	delete(s.failed, jobID)
+	st.Running = slot.Unix()
+	if st.RetryOnline {
+		st.CatchUpPending, st.RetryOnline = false, false
+	}
+	s.saveLocked()
+}
+
+// RunEnded clears the in-progress mark. A failed run is caught up if the
+// agent turns out to have gone offline during it (checked by Tick).
+func (s *Scheduler) RunEnded(jobID int64, failed bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state[jobID]
+	if st == nil || st.Running == 0 {
+		return
+	}
+	if failed {
+		s.failed[jobID] = failedRun{slot: time.Unix(st.Running, 0), drops: s.drops[jobID], at: s.now()}
+	}
+	st.Running = 0
+	s.saveLocked()
 }
 
 // States reports the scheduling view of every job to the server.

@@ -75,6 +75,7 @@ func NewRunner(cfg *Config, version string, log *slog.Logger) (*Runner, error) {
 	r.sched.busy = r.busy
 	r.sched.missed = r.reportMissed
 	r.sched.pausedBy = r.pausedBy
+	r.sched.conn = r.connection
 	r.loadLocal()
 	r.sched.logf = func(level, format string, args ...any) { r.log.Info(fmt.Sprintf(format, args...), "level", level) }
 	return r, nil
@@ -350,6 +351,10 @@ func (r *Runner) execute(parent context.Context, t task) {
 		}
 	}
 	r.runStarted(name, t.spec.Kind, t.trigger)
+	scheduled := t.local && t.by == ""
+	if scheduled {
+		r.sched.RunStarted(t.job.ID, t.slot)
+	}
 	started := time.Now()
 	var res api.Result
 	if rs := t.spec.Restore; rs != nil && rs.Session != "" {
@@ -358,6 +363,9 @@ func (r *Runner) execute(parent context.Context, t task) {
 		res = Run(ctx, t.spec, tapReporter{rep, r})
 	}
 	r.runEnded()
+	if scheduled && parent.Err() == nil { // agent stopping: the restart catches it up
+		r.sched.RunEnded(t.job.ID, res.State == api.RunFailed)
+	}
 	r.log.Info("run finished", "job", t.spec.JobID, "trigger", t.trigger, "state", res.State, "err", res.Error)
 	rep.finish(res)
 	r.recordRun(ipc.RunInfo{JobID: t.spec.JobID, JobName: name, Kind: t.spec.Kind, Trigger: t.trigger, State: res.State, Error: res.Error,

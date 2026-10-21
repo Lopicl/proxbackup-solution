@@ -16,6 +16,8 @@ type schedHarness struct {
 	busy    map[int64]bool
 	started []string
 	missed  []string
+	since   time.Time // zero = offline
+	drops   int
 }
 
 func newHarness(t *testing.T, jobs ...api.JobConfig) *schedHarness {
@@ -34,6 +36,7 @@ func newHarness(t *testing.T, jobs ...api.JobConfig) *schedHarness {
 	h.s.missed = func(_ api.JobConfig, slot time.Time, reason string) {
 		h.missed = append(h.missed, slot.Format("02 15:04")+" "+reason)
 	}
+	h.s.conn = func() (time.Time, int) { return h.since, h.drops }
 	h.s.logf = func(string, string, ...any) {}
 	if err := h.s.Update(&api.AgentConfig{Rev: "r1", Jobs: jobs}); err != nil {
 		t.Fatal(err)
@@ -227,5 +230,127 @@ func TestSchedulerNextWake(t *testing.T) {
 	h2 := newHarness(t, noWake)
 	if got := h2.s.NextWake(from); !got.IsZero() {
 		t.Fatalf("NextWake without waking jobs = %v", got)
+	}
+}
+
+// finish ends the job's run (as the runner does after it executed).
+func (h *schedHarness) finish(failed bool) {
+	h.busy[1] = false
+	h.s.RunEnded(1, failed)
+}
+
+func TestSchedulerRetriesRunCutOffByGoingOffline(t *testing.T) {
+	h := newHarness(t, daily(true))
+	h.since = time.Date(2026, 10, 12, 8, 0, 0, 0, time.Local)
+	h.at(12, 21, 0)
+	h.s.Tick()
+	h.s.RunStarted(1, h.now)
+	h.at(12, 21, 20)
+	h.finish(true) // network gone: the run fails before the poll notices
+	h.s.Tick()
+	h.at(12, 21, 22)
+	h.since, h.drops = time.Time{}, 1 // now the agent is offline
+	h.s.Tick()
+	if st := h.s.States(); !st[0].CatchUpPending {
+		t.Fatal("catch-up should be pending")
+	}
+	h.at(12, 23, 0)
+	h.since = h.now // back online
+	h.s.Tick()
+	h.at(12, 23, 29)
+	h.s.Tick()
+	if len(h.started) != 1 {
+		t.Fatalf("catch-up must wait 30 minutes after coming back online: %v", h.started)
+	}
+	h.at(12, 23, 30)
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:00,catch-up@12 21:00" {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+func TestSchedulerFailureWhileOnlineIsNotRetried(t *testing.T) {
+	h := newHarness(t, daily(true))
+	h.since = time.Date(2026, 10, 12, 8, 0, 0, 0, time.Local)
+	h.at(12, 21, 0)
+	h.s.Tick()
+	h.s.RunStarted(1, h.now)
+	h.at(12, 21, 20)
+	h.finish(true)
+	h.at(12, 23, 0)
+	h.s.Tick()
+	h.drops = 1 // a later connection loss is unrelated
+	h.s.Tick()
+	if st := h.s.States(); st[0].CatchUpPending || len(h.started) != 1 {
+		t.Fatalf("plain failure must not be retried: %v", h.started)
+	}
+}
+
+func TestSchedulerNoRetryWithoutCatchUp(t *testing.T) {
+	h := newHarness(t, daily(false))
+	h.since = time.Date(2026, 10, 12, 8, 0, 0, 0, time.Local)
+	h.at(12, 21, 0)
+	h.s.Tick()
+	h.s.RunStarted(1, h.now)
+	h.drops = 1
+	h.finish(true)
+	h.at(13, 9, 0)
+	h.s.Tick()
+	if len(h.started) != 1 {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+func TestSchedulerRetriesRunCutOffByAgentStop(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, daily(true))
+	h.s.dir = dir
+	h.s.Update(&api.AgentConfig{Rev: "r1", Jobs: []api.JobConfig{daily(true)}})
+	h.at(12, 21, 0)
+	h.s.Tick()
+	h.s.RunStarted(1, h.now) // PC shuts down mid-run
+
+	h2 := &schedHarness{busy: map[int64]bool{}}
+	h2.at(13, 8, 0)
+	s := NewScheduler(dir)
+	s.now = func() time.Time { return h2.now }
+	s.start = func(_ api.JobSpec, j api.JobConfig, trigger string, slot time.Time) bool {
+		h2.started = append(h2.started, trigger+"@"+slot.Format("02 15:04"))
+		return true
+	}
+	s.busy = func(int64) bool { return false }
+	s.conn = func() (time.Time, int) { return h2.since, 0 }
+	s.logf = func(string, string, ...any) {}
+	s.Tick()
+	h2.since = h2.now.Add(time.Minute) // server reachable a minute after boot
+	h2.at(13, 8, 30)
+	s.Tick()
+	if len(h2.started) != 0 {
+		t.Fatalf("started too early: %v", h2.started)
+	}
+	h2.at(13, 8, 31)
+	s.Tick()
+	if strings.Join(h2.started, ",") != "catch-up@12 21:00" {
+		t.Fatalf("started %v", h2.started)
+	}
+}
+
+func TestSchedulerNewRunReplacesOfflineRetry(t *testing.T) {
+	h := newHarness(t, daily(true))
+	h.at(12, 21, 0)
+	h.s.Tick()
+	h.s.RunStarted(1, h.now)
+	h.drops = 1
+	h.finish(true)
+	h.s.Tick() // pending, offline
+	h.at(13, 21, 0)
+	h.since = h.now.Add(-time.Minute)
+	h.s.Tick() // next slot starts on time
+	h.s.RunStarted(1, h.now)
+	h.finish(false)
+	h.at(13, 23, 0)
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:00,schedule@13 21:00" {
+		t.Fatalf("started %v", h.started)
 	}
 }
