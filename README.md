@@ -118,8 +118,8 @@ Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**.
 
 | Phase 2 | Items |
 | --- | --- |
-| Done | Group jobs, client-side encryption with key escrow, immutable backups, tamper-resistant retention, file restore from volume images, per-file restore browser, new top bar (profile menu, Console Settings), tray app with self-service restore |
-| Open | Console user management with granular permissions, NTFS ACLs/ADS and bandwidth and metered-network/battery limits |
+| Done | Group jobs, client-side encryption with key escrow, immutable backups, tamper-resistant retention, file restore from volume images, per-file restore browser, new top bar (profile menu, Console Settings), tray app with self-service restore, NTFS ACLs and alternate data streams in file backups |
+| Open | Console user management with granular permissions, bandwidth and metered-network/battery limits |
 | Moved | Guided pull-sync to a second PBS (immutable off-host copy) and SMB/NFS share backups → phase 5 |
 
 ### Verified
@@ -147,7 +147,9 @@ and the agent as a Windows service installed by enrollment or the setup `.exe`.
   CompactOS-compressed files).
 - **Encrypted snapshots** can't be browsed in the PBS GUI. Restore from the console, or with
   `proxmox-backup-client --keyfile` using the key from the client's page.
-- **No NTFS ACLs or alternate data streams** yet.
+- **NTFS ACLs and alternate data streams** are kept by file backups (owner, group and DACL, no
+  auditing SACL; streams up to 64 KiB), not by file restores from volume images. Restoring with
+  `proxmox-backup-client` onto ext4 may need `--ignore-xattrs`.
 - **Console sign-in** is a local `admin` or PBS administrator; roles and an audit log come later in
   phase 2.
 - **Whole-volume restore** writes a `.img` file. Bare-metal recovery via a Linux rescue image is

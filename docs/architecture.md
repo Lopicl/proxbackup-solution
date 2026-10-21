@@ -98,9 +98,30 @@ restore`, and `pxar` FUSE mounts all work.
 | LastWriteTime | `mtime` (100 ns resolution → ns) |
 | Symlink reparse point | `SYMLINK` (no xattrs: Linux refuses `user.*` xattrs on symlinks; HIDDEN/SYSTEM stay in `flags`) |
 | Junctions / mount points | skipped (prevents loops and double-backup) |
-| Security descriptor (NTFS ACL) | xattr `user.proxbackup.ntsd` (self-relative binary SD) *(phase 2)* |
-| Alternate data streams | xattr `user.proxbackup.ads.<name>` for small streams *(phase 2)* |
+| Security descriptor (NTFS ACL) | xattr `user.proxbackup.ntsd` (self-relative binary SD: owner, group, DACL) |
+| Alternate data streams | xattr `user.proxbackup.ads.<name>` for streams up to 64 KiB |
 | UTF-16 names | UTF-8 |
+
+**NTFS ACLs and alternate data streams** *(phase 2, implemented).* The walker opens each file
+and folder once (`READ_CONTROL`, backup semantics) for its security descriptor, its named data
+streams (`FileStreamInfo`) and, in split archives, its change time.
+
+* The descriptor holds owner, group and DACL; the SACL (auditing) is left out, since reading it
+  needs `SeSecurityPrivilege`. Streams over 64 KiB (the largest xattr value Linux accepts) and
+  names that can't be an xattr (over 255 bytes with the prefix) are skipped with a warning.
+  Symlinks carry no xattrs, as before.
+* Both are xattrs, so they are part of the change detection comparison: a permission change
+  bumps `ChangeTime` anyway, and the first run after the upgrade reads every file once.
+* Restore writes streams first (writing one bumps the mtime), then timestamps and attributes,
+  then the descriptor via `SetFileSecurityW`, unchanged, inherited ACEs included, like
+  `robocopy /SEC`. Folder descriptors are set in the final deepest-first pass, so a restrictive
+  DACL can't block writing the files inside. The agent enables `SeRestorePrivilege` so any
+  owner can be set; without it the owner is left as is (logged) and group and DACL still
+  apply. The restore target folder (the archive root) keeps its own permissions and streams.
+  Stream names with `:`, `\`, `/` or NUL in a crafted archive are ignored.
+* `proxmox-backup-client restore` on Linux writes them as plain `user.*` xattrs. ext4 fits only
+  about 4 KiB of xattrs per file, so restores there may need `--ignore-xattrs`.
+* Not yet for file restores from volume images: their streams are logged, not restored.
 
 **pxar v2 split archives** *(phase 1).* File backups write format version 2, the
 split-archive format `proxmox-backup-client` uses since PBS 3.3, so unchanged files are not

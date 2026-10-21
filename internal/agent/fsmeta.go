@@ -3,9 +3,12 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io/fs"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"proxbackup/pkg/pxar"
 )
@@ -18,11 +21,22 @@ const (
 	// Only written with change detection; it catches edits that put the old
 	// LastWriteTime back. Not restored.
 	xattrChangeTime = "user.proxbackup.chtime"
+	// Self-relative security descriptor: owner, group and DACL.
+	xattrSD = "user.proxbackup.ntsd"
+	// Prefix of an alternate data stream's contents, followed by its name.
+	xattrADSPrefix = "user.proxbackup.ads."
 
 	// Names written before the rename to ProxBackup; still read on restore.
 	xattrAttrsLegacy = "user.pbspc.attrs"
 	xattrCtimeLegacy = "user.pbspc.ctime"
 )
+
+// Alternate data streams larger than this aren't backed up: it is the
+// largest value Linux accepts for an xattr, so stock pxar tools can restore it.
+const maxADSSize = 64 << 10
+
+// maxXattrName is the longest xattr name Linux accepts.
+const maxXattrName = 255
 
 // Windows file attribute bits we care about.
 const (
@@ -45,6 +59,26 @@ type winMeta struct {
 	// cloudPlaceholder is set for OneDrive/Files-On-Demand style placeholders
 	// whose content would be downloaded (or fail) on read.
 	cloudPlaceholder bool
+	nt               ntExtras
+}
+
+// ntExtras is NTFS metadata kept in xattrs: the security descriptor and the
+// alternate data streams.
+type ntExtras struct {
+	sd      []byte
+	streams []adsStream
+}
+
+type adsStream struct {
+	name string // without the leading ':' and the ':$DATA' type
+	data []byte
+}
+
+// validStreamName reports whether name can be stored and written back as
+// "file:name": no separators, colons or NULs, and short enough for an xattr.
+func validStreamName(name string) bool {
+	return name != "" && utf8.ValidString(name) && !strings.ContainsAny(name, ":\\/\x00") &&
+		len(xattrADSPrefix)+len(name) <= maxXattrName
 }
 
 func toPxarMeta(fi fs.FileInfo, m winMeta) pxar.Metadata {
@@ -92,7 +126,27 @@ func toPxarMeta(fi fs.FileInfo, m winMeta) pxar.Metadata {
 		binary.LittleEndian.PutUint64(b[:], uint64(m.chtime.UnixNano()))
 		md.Xattrs = append(md.Xattrs, pxar.Xattr{Name: []byte(xattrChangeTime), Value: b[:]})
 	}
+	if len(m.nt.sd) > 0 {
+		md.Xattrs = append(md.Xattrs, pxar.Xattr{Name: []byte(xattrSD), Value: m.nt.sd})
+	}
+	for _, s := range m.nt.streams {
+		md.Xattrs = append(md.Xattrs, pxar.Xattr{Name: []byte(xattrADSPrefix + s.name), Value: s.data})
+	}
 	return md
+}
+
+// ntFromPxar extracts the security descriptor and alternate data streams
+// stored by toPxarMeta. Stream names that couldn't be written back are dropped.
+func ntFromPxar(md pxar.Metadata) ntExtras {
+	var nt ntExtras
+	for _, x := range md.Xattrs {
+		if string(x.Name) == xattrSD {
+			nt.sd = x.Value
+		} else if name, ok := bytes.CutPrefix(x.Name, []byte(xattrADSPrefix)); ok && validStreamName(string(name)) {
+			nt.streams = append(nt.streams, adsStream{string(name), x.Value})
+		}
+	}
+	return nt
 }
 
 // fromPxarMeta extracts Windows attributes and creation time stored by toPxarMeta.

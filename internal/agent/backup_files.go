@@ -147,7 +147,9 @@ func (w *walker) encodeSource(src fileSource, fi fs.FileInfo, newEnc func(root p
 	var err error
 	w.cat.StartDirectory(src.archive)
 	if fi.IsDir() {
-		w.enc, err = newEnc(toPxarMeta(fi, statMeta(fi)))
+		meta := statMeta(fi)
+		w.readExtras(src.read, ".", &meta)
+		w.enc, err = newEnc(toPxarMeta(fi, meta))
 		if err == nil {
 			w.j.dirs.Add(1)
 			var entries []os.DirEntry
@@ -196,6 +198,14 @@ type walker struct {
 	split bool
 	prev  *prevTree
 	reuse *payloadReuse
+}
+
+// readExtras adds the NTFS security descriptor, alternate data streams and
+// (for split archives) change time of full to m, logging what's missing.
+func (w *walker) readExtras(full, rel string, m *winMeta) {
+	for _, warn := range readExtras(full, m, w.split) {
+		w.j.logf("warn", "%s: not backed up: %s", rel, warn)
+	}
 }
 
 func (w *walker) skip(rel string, format string, args ...any) {
@@ -249,6 +259,7 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 			w.skip(crel, "%v", err)
 			return nil
 		}
+		w.readExtras(full, crel, &meta)
 		err = w.do(func() error {
 			w.cat.StartDirectory(name)
 			return w.enc.CreateDir([]byte(name), toPxarMeta(fi, meta))
@@ -279,9 +290,7 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 			w.skip(crel, "cloud placeholder (not available offline)")
 			return nil
 		}
-		if w.split {
-			meta.chtime = changeTime(full)
-		}
+		w.readExtras(full, crel, &meta)
 		pm := toPxarMeta(fi, meta)
 		size := uint64(fi.Size())
 		if w.prev != nil {

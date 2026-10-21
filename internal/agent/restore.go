@@ -136,6 +136,7 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 		}
 		return false
 	}
+	enableRestorePrivilege()
 	var dirs []dirMeta
 	for {
 		if err := ctx.Err(); err != nil {
@@ -162,6 +163,13 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 			}
 			j.dirs.Add(1)
 			dirs = append(dirs, dirMeta{target, e.Meta})
+			// The archive root is the target folder itself: it keeps its own
+			// permissions and streams.
+			if e.Path != "" {
+				if err := writeStreams(target, ntFromPxar(e.Meta)); err != nil {
+					j.logf("warn", "metadata for %s: %v", e.Path, err)
+				}
+			}
 		case pxar.KindFile:
 			if err := j.restoreFile(dec, e, target, spec.Overwrite); err != nil {
 				return err
@@ -181,11 +189,18 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 			j.logf("info", "skipping %s entry %s", e.Kind, e.Path)
 		}
 	}
-	// Directory timestamps last, deepest first, so file creation doesn't bump them.
+	// Directory timestamps and permissions last, deepest first, so file
+	// creation doesn't bump them and the permissions can't get in the way.
+	root := filepath.Clean(spec.TargetDir)
 	for i := len(dirs) - 1; i >= 0; i-- {
 		d := dirs[i]
 		attrs, has, ctime := fromPxarMeta(d.md)
 		applyMeta(d.path, time.Unix(d.md.MtimeSecs, int64(d.md.MtimeNanos)), attrs, has, ctime)
+		if d.path != root {
+			if err := applySecurity(d.path, ntFromPxar(d.md)); err != nil {
+				j.logf("warn", "metadata for %s: %v", d.path, err)
+			}
+		}
 	}
 	return nil
 }
@@ -193,14 +208,15 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 func (j *job) restoreFile(dec *pxar.Decoder, e *pxar.Entry, target, overwrite string) error {
 	attrs, has, ctime := fromPxarMeta(e.Meta)
 	_, err := j.writeRestored(e.Path, target, overwrite, dec.Contents(),
-		time.Unix(e.Meta.MtimeSecs, int64(e.Meta.MtimeNanos)), attrs, has, ctime)
+		time.Unix(e.Meta.MtimeSecs, int64(e.Meta.MtimeNanos)), attrs, has, ctime, ntFromPxar(e.Meta))
 	return err
 }
 
 // writeRestored writes one restored file through a temporary name and applies
-// its metadata. It reports whether the file was written; existing files are
+// its metadata: streams first (writing them bumps the mtime), then
+// timestamps and attributes, then permissions. It reports whether the file was written; existing files are
 // kept according to overwrite, and unwritable targets are skipped with a warning.
-func (j *job) writeRestored(rel, target, overwrite string, src io.Reader, mtime time.Time, attrs uint32, hasAttrs bool, ctime time.Time) (bool, error) {
+func (j *job) writeRestored(rel, target, overwrite string, src io.Reader, mtime time.Time, attrs uint32, hasAttrs bool, ctime time.Time, nt ntExtras) (bool, error) {
 	if st, err := os.Lstat(target); err == nil {
 		switch overwrite {
 		case "overwrite":
@@ -239,7 +255,13 @@ func (j *job) writeRestored(rel, target, overwrite string, src io.Reader, mtime 
 		j.logf("warn", "cannot replace %s: %v", rel, err)
 		return false, nil
 	}
+	if err := writeStreams(target, nt); err != nil {
+		j.logf("warn", "metadata for %s: %v", rel, err)
+	}
 	if err := applyMeta(target, mtime, attrs, hasAttrs, ctime); err != nil {
+		j.logf("warn", "metadata for %s: %v", rel, err)
+	}
+	if err := applySecurity(target, nt); err != nil {
 		j.logf("warn", "metadata for %s: %v", rel, err)
 	}
 	j.files.Add(1)

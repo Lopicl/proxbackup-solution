@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Builds a test tree exercising Windows specifics (VSS on a locked file, attributes,
-  creation times, Unicode, long paths, symlinks, junctions, alternate data streams),
+  creation times, Unicode, long paths, symlinks, junctions, alternate data streams, NTFS ACLs),
   backs it up to PBS with a VSS snapshot, restores it and compares everything. Then
   image-backs up a small VHDX volume and checks the restored image.
   Results are written as JSON to $Work\results.json.
@@ -63,8 +63,18 @@ try {
   $long = $src; foreach ($n in 1..12) { $long = Join-Path $long ('very-long-directory-name-' + $n) }
   New-Item -ItemType Directory -Force -Path "\\?\$long" | Out-Null
   [IO.File]::WriteAllText("\\?\$long\deep.txt", 'deep file')
-  # alternate data stream (not backed up in phase 1, must not break anything)
+  # alternate data streams: small ones are kept, ones over 64 KiB skipped with a warning
   Set-Content -Path "$src\ads.txt" -Value 'main stream'; Set-Content -Path "$src\ads.txt" -Stream 'secret' -Value 'ads'
+  Set-Content -Path "$src\ads.txt" -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=3"
+  [IO.File]::WriteAllBytes("$src\ads.txt:huge", (New-Object byte[] (100KB)))
+  New-Item -ItemType Directory -Force -Path "$src\ads dir" | Out-Null
+  Set-Content -Path "$src\ads dir" -Stream 'dirstream' -Value 'on a folder'
+  # NTFS ACLs: an explicit ACE on a file, a protected folder with its own DACL
+  Set-Content "$src\acl.txt" 'acl'
+  icacls "$src\acl.txt" /grant '*S-1-5-32-545:(R,W)' | Out-Null
+  New-Item -ItemType Directory -Force -Path "$src\private" | Out-Null
+  Set-Content "$src\private\inner.txt" 'inner'
+  icacls "$src\private" /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' | Out-Null
   # symlink + junction
   cmd /c "mklink `"$src\link-to-readme.txt`" `"Documents\readme.txt`"" | Out-Null
   cmd /c "mklink /J `"$src\junction-to-windows`" `"C:\Windows`"" | Out-Null
@@ -106,6 +116,18 @@ try {
   Check 'symlink restored as symlink' ($l.LinkType -eq 'SymbolicLink') "$($l.LinkType) -> $($l.Target)"
   Check 'junction not restored' (-not (Test-Path "$dst\junction-to-windows"))
   Check 'empty dir restored' (Test-Path "$dst\empty dir")
+  $ads = { param($p, $n) (Get-Content -LiteralPath $p -Stream $n -ErrorAction SilentlyContinue) -join "`n" }
+  Check 'ADS restored' ((& $ads "$dst\ads.txt" 'secret') -eq 'ads') (& $ads "$dst\ads.txt" 'secret')
+  Check 'Zone.Identifier restored' ((& $ads "$dst\ads.txt" 'Zone.Identifier') -match 'ZoneId=3')
+  Check 'folder ADS restored' ((& $ads "$dst\ads dir" 'dirstream') -eq 'on a folder')
+  Check 'large ADS skipped with warning' ((-not (Get-Item -LiteralPath "$dst\ads.txt" -Stream huge -ErrorAction SilentlyContinue)) -and $r.text -match 'stream "huge"')
+  Check 'main stream intact with ADS' ((Get-Content -LiteralPath "$dst\ads.txt") -eq 'main stream')
+  $sddl = { param($p) (Get-Acl -LiteralPath $p).Sddl }
+  foreach ($f in 'acl.txt', 'private', 'private\inner.txt', 'Documents') {
+    $a = & $sddl (Join-Path $src $f); $b = & $sddl (Join-Path $dst $f)
+    Check "ACL: $f" ($a -eq $b) $b
+  }
+  Check 'protected folder stays protected' ((Get-Acl -LiteralPath "$dst\private").AreAccessRulesProtected)
 
   # ---------- incremental ----------
   $r3 = RunAgent (@('backup') + $common + @('-source', $src, '-vss=true'))

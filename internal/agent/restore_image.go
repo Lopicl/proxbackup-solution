@@ -109,7 +109,7 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 			size := uint64(data.Size())
 			before := j.bytesRead.Load()
 			src := countingReader{io.NewSectionReader(data, 0, data.Size()), &j.bytesRead}
-			if _, err := j.writeRestored(rel, target, spec.Overwrite, src, f.Mtime, f.Attrs, true, f.Ctime); err != nil {
+			if _, err := j.writeRestored(rel, target, spec.Overwrite, src, f.Mtime, f.Attrs, true, f.Ctime, ntExtras{}); err != nil {
 				return err
 			}
 			// Kept files count as done for progress.

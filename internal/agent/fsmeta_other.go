@@ -25,14 +25,20 @@ func statMeta(fi fs.FileInfo) winMeta {
 	return m
 }
 
-// changeTime returns the inode change time of p, or the zero time.
-func changeTime(p string) time.Time {
+// readExtras sets the inode change time of p with withChtime. There are no
+// NTFS security descriptors or alternate data streams to read.
+func readExtras(p string, m *winMeta, withChtime bool) []string {
 	var st unix.Stat_t
-	if err := unix.Lstat(p, &st); err != nil {
-		return time.Time{}
+	if withChtime && unix.Lstat(p, &st) == nil {
+		m.chtime = time.Unix(st.Ctim.Unix())
 	}
-	return time.Unix(st.Ctim.Unix())
+	return nil
 }
+
+// Development builds don't restore NTFS security descriptors or streams.
+func writeStreams(string, ntExtras) error  { return nil }
+func applySecurity(string, ntExtras) error { return nil }
+func enableRestorePrivilege()              {}
 
 func applyMeta(p string, mtime time.Time, attrs uint32, _ bool, _ time.Time) error {
 	if fi, err := os.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
