@@ -119,8 +119,8 @@ Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**.
 | Phase 2 | Items |
 | --- | --- |
 | Done | Group jobs, client-side encryption with key escrow, immutable backups, tamper-resistant retention, file restore from volume images, per-file restore browser, new top bar (profile menu, Console Settings), tray app with self-service restore |
-| Open | Console user management with granular permissions, NTFS ACLs/ADS, bandwidth and metered-network/battery limits, SMB/NFS share backups |
-| Moved | Guided pull-sync to a second PBS (immutable off-host copy) → phase 5 |
+| Open | Console user management with granular permissions, NTFS ACLs/ADS and bandwidth and metered-network/battery limits |
+| Moved | Guided pull-sync to a second PBS (immutable off-host copy) and SMB/NFS share backups → phase 5 |
 
 ### Verified
 
