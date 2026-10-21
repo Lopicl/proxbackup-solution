@@ -5,41 +5,42 @@ package server
 import (
 	"context"
 	"errors"
-	"time"
 
 	"proxbackup/pkg/pbs"
 )
 
-// Immutable backups, lock window: every new snapshot of a job with a lock
-// period is marked protected on PBS, and releaseLocks unprotects it once it is
-// older than the job's current lock period. PBS refuses to prune or forget
-// protected snapshots, which guards against a compromised PC and operator
-// mistakes (not against a compromised console: its Admin token can unprotect).
-
-// maxLockDays bounds the per-job lock period.
-const maxLockDays = 3650
+// Immutable backups: every new snapshot of a job with Lock is marked
+// protected on PBS and stays protected for as long as the job's retention
+// keeps it. The daily retention pass (pruneJob) unprotects a console-locked
+// snapshot only right before it forgets it; with no retention, snapshots stay
+// protected. PBS refuses to prune or forget protected snapshots, which guards
+// against a compromised PC and operator mistakes (not against a compromised
+// console: its Admin token can unprotect).
 
 func (s *Server) lockSnapshot(ctx context.Context, pc *pbs.Client, t *Target, c *Client, j *Job, backupTime int64) error {
 	if err := pc.SetProtected(ctx, t.Datastore, c.Namespace, "host", j.BackupID, backupTime, true); err != nil {
 		return err
 	}
 	return s.store.AddSnapshotLock(ctx, SnapshotLock{JobID: j.ID, TargetID: t.ID, Namespace: c.Namespace, BackupType: "host",
-		BackupID: j.BackupID, BackupTime: backupTime, LockDays: j.LockDays})
+		BackupID: j.BackupID, BackupTime: backupTime})
 }
 
-// lockExpired reports whether l's lock period is over at now. The job's
-// current lock period applies (shortening it releases older snapshots);
-// for deleted jobs, the one recorded at protection time.
-func lockExpired(l SnapshotLock, j *Job, now time.Time) bool {
-	days := l.LockDays
-	if j != nil {
-		days = j.LockDays
+// lockOrphaned reports whether l is no longer under the retention of a job
+// with Lock: its job was deleted or turned locking off, or the job's backup
+// group moved (another target, namespace or backup id). c is j's client.
+func lockOrphaned(l SnapshotLock, j *Job, c *Client) bool {
+	if j == nil || !j.Lock {
+		return true
 	}
-	return now.Unix() >= l.BackupTime+int64(days)*86400
+	if c.Revoked { // revoked clients' backups stay for recovery
+		return false
+	}
+	return l.TargetID != c.TargetID || l.Namespace != c.Namespace || l.BackupType != "host" || l.BackupID != j.BackupID
 }
 
-// releaseLocks unprotects console-locked snapshots whose lock period is over.
-// Runs daily from housekeeping.
+// releaseLocks unprotects console-locked snapshots that no job's retention
+// covers any more (see lockOrphaned). Runs daily from housekeeping, before
+// applyRetention, which releases the others as it prunes them.
 func (s *Server) releaseLocks(ctx context.Context) {
 	locks, err := s.store.SnapshotLocks(ctx)
 	if err != nil {
@@ -51,12 +52,17 @@ func (s *Server) releaseLocks(ctx context.Context) {
 	released := 0
 	for _, l := range locks {
 		var job *Job
+		var client *Client
 		if j, err := s.store.Job(ctx, l.JobID); err == nil {
-			job = j
+			if client, err = s.store.Client(ctx, j.ClientID); err == nil {
+				job = j
+			} else if !errors.Is(err, errNotFound) {
+				continue
+			}
 		} else if !errors.Is(err, errNotFound) {
 			continue
 		}
-		if !lockExpired(l, job, time.Now()) {
+		if !lockOrphaned(l, job, client) {
 			continue
 		}
 		pc, t := clients[l.TargetID], targets[l.TargetID]
@@ -73,16 +79,23 @@ func (s *Server) releaseLocks(ctx context.Context) {
 			}
 			clients[l.TargetID], targets[l.TargetID] = pc, t
 		}
-		err := pc.SetProtected(ctx, t.Datastore, l.Namespace, l.BackupType, l.BackupID, l.BackupTime, false)
-		if err != nil && !pbs.IsNotFound(err) { // a vanished snapshot has nothing left to release
-			s.log.Error("unprotect snapshot", "target", t.Name, "ns", l.Namespace, "group", l.BackupType+"/"+l.BackupID,
-				"time", l.BackupTime, "err", err)
+		if err := s.unlockSnapshot(ctx, pc, t, l); err != nil {
 			continue // retried tomorrow
 		}
-		s.store.DeleteSnapshotLock(ctx, l.ID)
 		released++
 	}
 	if released > 0 {
 		s.log.Info("snapshot locks released", "count", released)
 	}
+}
+
+// unlockSnapshot unprotects l's snapshot on t and forgets the lock.
+func (s *Server) unlockSnapshot(ctx context.Context, pc *pbs.Client, t *Target, l SnapshotLock) error {
+	err := pc.SetProtected(ctx, t.Datastore, l.Namespace, l.BackupType, l.BackupID, l.BackupTime, false)
+	if err != nil && !pbs.IsNotFound(err) { // a vanished snapshot has nothing left to release
+		s.log.Error("unprotect snapshot", "target", t.Name, "ns", l.Namespace, "group", l.BackupType+"/"+l.BackupID,
+			"time", l.BackupTime, "err", err)
+		return err
+	}
+	return s.store.DeleteSnapshotLock(ctx, l.ID)
 }

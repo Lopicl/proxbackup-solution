@@ -60,9 +60,9 @@ make deb        # bin/proxbackup-server_<version>_{amd64,arm64}.deb for installi
    from the server immediately. A job can cover many PCs: on the **Jobs** page, pick clients by
    name or by tag (or all clients). Each PC keeps its own backup group and history, can be
    disabled or get extra excludes, and an optional start spread staggers the PCs' start times.
-   Per job you can also turn on **client-side encryption** (the console escrows the key) and set
-   a **lock period** (default 14 days) during which new snapshots are protected on PBS against
-   prune and deletion. Retention runs on the console once a day, not after each run, and only
+   Per job you can also turn on **client-side encryption** (the console escrows the key) and
+   **immutable backups** (on by default): new snapshots are protected on PBS against prune and
+   deletion for as long as the job's retention keeps them. Retention runs on the console once a day, not after each run, and only
    a capped number of backups per job and day count, so a compromised PC can't flood its group
    to push the good snapshots out.
 5. **Restore:** on the client page, open *Snapshots* and click *Browse files* to tick files and
@@ -170,7 +170,7 @@ repository.
 ## Status
 
 Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**. Done so far: group jobs,
-client-side encryption with key escrow, immutable lock window, tamper-resistant retention,
+client-side encryption with key escrow, immutable backups (locked while retention keeps them), tamper-resistant retention,
 file restore from volume images, the per-file restore browser in the web UI, a top navigation bar with a profile
 menu (Profile Settings, Logout) and a Console Settings icon, and the tray app with self-service
 restore. Still open in phase 2: console user

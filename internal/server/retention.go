@@ -21,7 +21,8 @@ import (
 //   - retention runs on the console's own daily schedule, never after a run;
 //   - only the first dailyCap snapshots of a job per day (console time) are
 //     locked and count for the keep-* buckets, later ones are pruned;
-//   - the oldest successful snapshot inside the lock window is always kept.
+//   - console-locked snapshots (see locks.go) count like unprotected ones and
+//     are only unprotected when retention removes them.
 //
 // Hitting the cap is a ransomware signal: it is logged and notified.
 
@@ -90,9 +91,8 @@ type pruneSelection struct {
 
 // selectPrune applies keep to a group like PBS prune does (same buckets, in
 // local time, protected snapshots kept on top), except that snapshots past
-// the first limit of their day don't count and are removed, and the snapshot
-// at anchor (0 = none) is always kept.
-func selectPrune(snaps []pbs.SnapshotInfo, keep pbs.KeepOptions, limit int, anchor int64, loc *time.Location) pruneSelection {
+// the first limit of their day don't count and are removed.
+func selectPrune(snaps []pbs.SnapshotInfo, keep pbs.KeepOptions, limit int, loc *time.Location) pruneSelection {
 	list := slices.Clone(snaps)
 	slices.SortFunc(list, func(a, b pbs.SnapshotInfo) int { return int(b.BackupTime - a.BackupTime) }) // newest first
 	mark := make([]pruneMark, len(list))
@@ -104,11 +104,6 @@ func selectPrune(snaps []pbs.SnapshotInfo, keep pbs.KeepOptions, limit int, anch
 			if i == 0 {
 				mark[i] = markKeepPartial
 			}
-		}
-	}
-	for i, s := range list {
-		if mark[i] == markNone && anchor > 0 && s.BackupTime == anchor {
-			mark[i] = markKeep
 		}
 	}
 	// The cap counts every finished snapshot of the day, oldest first.
@@ -226,25 +221,33 @@ func (s *Server) pruneJob(ctx context.Context, pc *pbs.Client, t *Target, c *Cli
 		}
 		return err
 	}
-	var anchor int64
-	if j.LockDays > 0 {
-		since := now.Add(-time.Duration(j.LockDays) * 24 * time.Hour).Unix()
-		times, err := s.store.SuccessfulBackupTimes(ctx, j.ID, since)
-		if err != nil {
-			return err
-		}
-		for _, bt := range times { // oldest first; the first still on PBS
-			if slices.ContainsFunc(snaps, func(s pbs.SnapshotInfo) bool { return s.BackupTime == bt && s.Finished() }) {
-				anchor = bt
-				break
-			}
+	// Console locks last as long as retention keeps the snapshot: they don't
+	// keep it on top of the counts, and are released when it is removed.
+	locks, err := s.store.GroupSnapshotLocks(ctx, t.ID, c.Namespace, "host", j.BackupID)
+	if err != nil {
+		return err
+	}
+	locked := map[int64]SnapshotLock{}
+	for _, l := range locks {
+		locked[l.BackupTime] = l
+	}
+	view := slices.Clone(snaps)
+	for i := range view {
+		if _, ok := locked[view[i].BackupTime]; ok {
+			view[i].Protected = false
 		}
 	}
 	limit := dailyCap(j, now)
-	sel := selectPrune(snaps, j.Retention, limit, anchor, time.Local)
+	sel := selectPrune(view, j.Retention, limit, time.Local)
 	removed := 0
 	var errs []error
 	for _, sn := range sel.Remove {
+		if l, ok := locked[sn.BackupTime]; ok {
+			if err := s.unlockSnapshot(ctx, pc, t, l); err != nil {
+				errs = append(errs, fmt.Errorf("unprotect %d: %w", sn.BackupTime, err))
+				continue
+			}
+		}
 		if err := pc.ForgetSnapshot(ctx, t.Datastore, c.Namespace, "host", j.BackupID, sn.BackupTime); err != nil && !pbs.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("forget %d: %w", sn.BackupTime, err))
 			continue

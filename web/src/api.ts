@@ -113,7 +113,7 @@ export interface JobDefinition {
   window_minutes: number
   catch_up: boolean
   retention: Keep
-  lock_days: number // snapshots stay protected on PBS this long (0 = off)
+  lock: boolean // snapshots stay protected on PBS while retention keeps them
   daily_cap: number // backups per day that are locked and count for retention (0 = from the schedule)
   spread_minutes: number // members' start times are spread over this many minutes
   enabled: boolean

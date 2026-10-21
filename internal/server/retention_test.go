@@ -39,7 +39,7 @@ func TestSelectPruneMatchesPBSBuckets(t *testing.T) {
 	for d := 1; d <= 10; d++ {
 		snaps = append(snaps, snap(day(d, 9), false), snap(day(d, 21), false))
 	}
-	sel := selectPrune(snaps, pbs.KeepOptions{Last: 2, Daily: 3}, 10, 0, loc)
+	sel := selectPrune(snaps, pbs.KeepOptions{Last: 2, Daily: 3}, 10, loc)
 	// keep-last: 10th 21:00 and 09:00; keep-daily then takes the newest of the 9th, 8th, 7th.
 	if sel.Kept != 5 || len(sel.Remove) != 15 || len(sel.OverCap) != 0 {
 		t.Fatalf("kept %d, removed %d, over cap %v", sel.Kept, len(sel.Remove), sel.OverCap)
@@ -63,7 +63,7 @@ func TestSelectPruneFloodKeepsGoodSnapshots(t *testing.T) {
 	for i := range 50 {
 		snaps = append(snaps, snap(time.Date(2026, 10, 13, 1, i, 0, 0, loc), false))
 	}
-	sel := selectPrune(snaps, pbs.KeepOptions{Last: 7}, 4, 0, loc)
+	sel := selectPrune(snaps, pbs.KeepOptions{Last: 7}, 4, loc)
 	if sel.OverCap["2026-10-13"] != 46 {
 		t.Fatalf("over cap %v", sel.OverCap)
 	}
@@ -79,21 +79,21 @@ func TestSelectPruneFloodKeepsGoodSnapshots(t *testing.T) {
 	}
 }
 
-func TestSelectPruneAnchorAndProtected(t *testing.T) {
+func TestSelectPruneProtected(t *testing.T) {
 	loc := time.UTC
 	at := func(d int) time.Time { return time.Date(2026, 10, d, 21, 0, 0, 0, loc) }
 	var snaps []pbs.SnapshotInfo
 	for d := 1; d <= 10; d++ {
 		snaps = append(snaps, snap(at(d), d == 5))
 	}
-	sel := selectPrune(snaps, pbs.KeepOptions{Last: 2}, 4, at(3).Unix(), loc)
+	sel := selectPrune(snaps, pbs.KeepOptions{Last: 2}, 4, loc)
 	removed := removedTimes(sel)
-	for _, keep := range []int{3, 5, 9, 10} { // anchor, protected, keep-last 2
+	for _, keep := range []int{5, 9, 10} { // protected, keep-last 2
 		if slices.Contains(removed, at(keep).Unix()) {
 			t.Errorf("day %d removed", keep)
 		}
 	}
-	if len(removed) != 6 || sel.Kept != 4 {
+	if len(removed) != 7 || sel.Kept != 3 {
 		t.Errorf("removed %d, kept %d", len(removed), sel.Kept)
 	}
 }
@@ -106,7 +106,7 @@ func TestSelectPruneUnfinished(t *testing.T) {
 		snap(at(4), false),
 		{BackupTime: at(5).Unix()}, // newest, may still be running
 	}
-	sel := selectPrune(snaps, pbs.KeepOptions{Last: 3}, 4, 0, loc)
+	sel := selectPrune(snaps, pbs.KeepOptions{Last: 3}, 4, loc)
 	if got, want := removedTimes(sel), []int64{at(3).Unix()}; !slices.Equal(got, want) {
 		t.Errorf("removed %v, want %v", got, want)
 	}

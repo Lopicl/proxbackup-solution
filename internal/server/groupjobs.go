@@ -47,7 +47,7 @@ type GroupJob struct {
 	Enabled         bool            `json:"enabled"`
 	ChangeDetection string          `json:"change_detection"`
 	Encrypt         bool            `json:"encrypt"`
-	LockDays        int             `json:"lock_days"`
+	Lock            bool            `json:"lock"`
 	SpreadMinutes   int             `json:"spread_minutes"`
 	DailyCap        int             `json:"daily_cap"`
 	// Members: these clients, plus every client with one of Tags.
@@ -78,13 +78,13 @@ func startDelay(groupID, clientID int64, spreadMinutes int) int {
 }
 
 const groupCols = `id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, window_minutes, catch_up, retention,
-	enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at, daily_cap`
+	enabled, change_detection, encrypt, lock_days>0, spread_minutes, member_tags, created_at, daily_cap`
 
 func scanGroupJob(sc interface{ Scan(...any) error }) (*GroupJob, error) {
 	g := &GroupJob{}
 	var src, exc, vol, ret, tags string
 	err := sc.Scan(&g.ID, &g.Name, &g.Kind, &g.BackupID, &src, &exc, &vol, &g.UseVSS, &g.Schedule, &g.WindowMinutes, &g.CatchUp, &ret,
-		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.SpreadMinutes, &tags, &g.CreatedAt, &g.DailyCap)
+		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.Lock, &g.SpreadMinutes, &tags, &g.CreatedAt, &g.DailyCap)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -174,7 +174,7 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 			window_minutes, catch_up, retention, enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at,
 			daily_cap) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
-			g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.CreatedAt, g.DailyCap)
+			g.ChangeDetection, g.Encrypt, g.Lock, g.SpreadMinutes, tags, g.CreatedAt, g.DailyCap)
 		if err != nil {
 			return err
 		}
@@ -185,7 +185,7 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 		schedule=?, window_minutes=?, catch_up=?, retention=?, enabled=?, change_detection=?, encrypt=?, lock_days=?, spread_minutes=?,
 		member_tags=?, daily_cap=? WHERE id=?`,
 		g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
-		g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.DailyCap, g.ID)
+		g.ChangeDetection, g.Encrypt, g.Lock, g.SpreadMinutes, tags, g.DailyCap, g.ID)
 	return err
 }
 
@@ -418,7 +418,7 @@ func (s *Store) migrateGroupJobs() error {
 	}
 	defer tx.Rollback()
 	rows, err := tx.QueryContext(ctx, `SELECT j.id, j.client_id, c.name, j.name, j.kind, j.backup_id, j.sources, j.excludes, j.volumes,
-		j.use_vss, j.schedule, j.window_minutes, j.catch_up, j.retention, j.enabled, j.change_detection, j.encrypt, j.lock_days, j.created_at
+		j.use_vss, j.schedule, j.window_minutes, j.catch_up, j.retention, j.enabled, j.change_detection, j.encrypt, j.lock_days>0, j.created_at
 		FROM jobs j JOIN clients c ON c.id=j.client_id WHERE j.group_id=0 AND c.revoked=0 ORDER BY j.id`)
 	if err != nil {
 		return err
@@ -434,7 +434,7 @@ func (s *Store) migrateGroupJobs() error {
 		var o old
 		g := &o.g
 		if err := rows.Scan(&o.jobID, &o.clientID, &o.clientName, &g.Name, &g.Kind, &o.bid, &o.src, &o.exc, &o.vol, &g.UseVSS, &g.Schedule,
-			&g.WindowMinutes, &g.CatchUp, &o.rt, &g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.CreatedAt); err != nil {
+			&g.WindowMinutes, &g.CatchUp, &o.rt, &g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.Lock, &g.CreatedAt); err != nil {
 			rows.Close()
 			return err
 		}

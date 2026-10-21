@@ -118,7 +118,8 @@ func (s *Store) migrate() error {
 		{"clients", "crypt_fingerprint", "TEXT NOT NULL DEFAULT ''"},
 		{"clients", "crypt_created", "INTEGER NOT NULL DEFAULT 0"},
 		{"jobs", "encrypt", "INTEGER NOT NULL DEFAULT 0"},
-		// Immutable backups: days a new snapshot stays protected (0 = off).
+		// Immutable backups: protect new snapshots while retention keeps them
+		// (any value > 0; it used to be a number of days).
 		{"jobs", "lock_days", "INTEGER NOT NULL DEFAULT 0"},
 		// Namespaces a client used before its target's root namespace changed;
 		// their snapshots stay listed and restorable.
@@ -301,8 +302,9 @@ type Job struct {
 	ChangeDetection string `json:"change_detection"`
 	// Encrypt client-side with the client key.
 	Encrypt bool `json:"encrypt"`
-	// LockDays keeps each new snapshot protected on PBS for that many days (0 = off).
-	LockDays int `json:"lock_days"`
+	// Lock keeps each new snapshot protected on PBS for as long as retention
+	// keeps it (see locks.go).
+	Lock bool `json:"lock"`
 	// DailyCap is the number of backups per day that are locked and count for
 	// retention (0 = derived from the schedule, see dailyCap).
 	DailyCap int `json:"daily_cap"`
@@ -840,7 +842,7 @@ const jobCols = `j.id, j.client_id, j.group_id, COALESCE(g.name, j.name), COALES
 	COALESCE(g.sources, j.sources), COALESCE(g.excludes, j.excludes), j.extra_excludes, COALESCE(g.volumes, j.volumes),
 	COALESCE(g.use_vss, j.use_vss), COALESCE(g.schedule, j.schedule), COALESCE(g.retention, j.retention), j.enabled,
 	COALESCE(g.enabled, 1), j.created_at, COALESCE(g.window_minutes, j.window_minutes), COALESCE(g.catch_up, j.catch_up),
-	COALESCE(g.change_detection, j.change_detection), COALESCE(g.encrypt, j.encrypt), COALESCE(g.lock_days, j.lock_days),
+	COALESCE(g.change_detection, j.change_detection), COALESCE(g.encrypt, j.encrypt), COALESCE(g.lock_days, j.lock_days)>0,
 	COALESCE(g.spread_minutes, 0), COALESCE(g.daily_cap, 0)`
 const jobFrom = ` FROM jobs j LEFT JOIN group_jobs g ON g.id=j.group_id`
 
@@ -848,7 +850,7 @@ func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	j := &Job{}
 	var src, exc, extra, vol, ret string
 	err := sc.Scan(&j.ID, &j.ClientID, &j.GroupID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &extra, &vol, &j.UseVSS, &j.Schedule, &ret,
-		&j.MemberEnabled, &j.GroupEnabled, &j.CreatedAt, &j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.LockDays,
+		&j.MemberEnabled, &j.GroupEnabled, &j.CreatedAt, &j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.Lock,
 		&j.SpreadMinutes, &j.DailyCap)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
@@ -1255,20 +1257,27 @@ type SnapshotLock struct {
 	BackupType string
 	BackupID   string
 	BackupTime int64
-	// LockDays at protection time; used when the job has been deleted.
-	LockDays int
 }
 
 func (s *Store) AddSnapshotLock(ctx context.Context, l SnapshotLock) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO snapshot_locks(job_id, target_id, namespace, backup_type, backup_id, backup_time, lock_days)
-		VALUES(?,?,?,?,?,?,?) ON CONFLICT DO UPDATE SET job_id=excluded.job_id, lock_days=excluded.lock_days`,
-		l.JobID, l.TargetID, l.Namespace, l.BackupType, l.BackupID, l.BackupTime, l.LockDays)
+		VALUES(?,?,?,?,?,?,0) ON CONFLICT DO UPDATE SET job_id=excluded.job_id`, // lock_days: no longer used
+		l.JobID, l.TargetID, l.Namespace, l.BackupType, l.BackupID, l.BackupTime)
 	return err
 }
 
 func (s *Store) SnapshotLocks(ctx context.Context) ([]SnapshotLock, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, target_id, namespace, backup_type, backup_id, backup_time, lock_days
-		FROM snapshot_locks ORDER BY backup_time`)
+	return s.snapshotLocks(ctx, "1")
+}
+
+// GroupSnapshotLocks lists the locks of one backup group.
+func (s *Store) GroupSnapshotLocks(ctx context.Context, targetID int64, ns, btype, id string) ([]SnapshotLock, error) {
+	return s.snapshotLocks(ctx, "target_id=? AND namespace=? AND backup_type=? AND backup_id=?", targetID, ns, btype, id)
+}
+
+func (s *Store) snapshotLocks(ctx context.Context, where string, args ...any) ([]SnapshotLock, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, job_id, target_id, namespace, backup_type, backup_id, backup_time
+		FROM snapshot_locks WHERE `+where+` ORDER BY backup_time`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1276,7 +1285,7 @@ func (s *Store) SnapshotLocks(ctx context.Context) ([]SnapshotLock, error) {
 	var out []SnapshotLock
 	for rows.Next() {
 		var l SnapshotLock
-		if err := rows.Scan(&l.ID, &l.JobID, &l.TargetID, &l.Namespace, &l.BackupType, &l.BackupID, &l.BackupTime, &l.LockDays); err != nil {
+		if err := rows.Scan(&l.ID, &l.JobID, &l.TargetID, &l.Namespace, &l.BackupType, &l.BackupID, &l.BackupTime); err != nil {
 			return nil, err
 		}
 		out = append(out, l)
