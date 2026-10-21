@@ -389,10 +389,22 @@ const lines = (s: string) =>
 type EditorTab = 'general' | 'clients' | 'source' | 'schedule' | 'retention' | 'security'
 
 // Option is a checkbox with a title and a one-line explanation under it.
-function Option({ checked, onChange, title, children }: { checked: boolean; onChange: (v: boolean) => void; title: ReactNode; children?: ReactNode }) {
+function Option({
+  checked,
+  onChange,
+  title,
+  disabled,
+  children,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  title: ReactNode
+  disabled?: boolean
+  children?: ReactNode
+}) {
   return (
-    <label className="option">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+    <label className={'option' + (disabled ? ' disabled' : '')}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
       <span>
         <b>{title}</b>
         {children && <small>{children}</small>}
@@ -407,6 +419,9 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
   const [filter, setFilter] = useState('')
   const [tab, setTab] = useState<EditorTab>('general')
   const clients = useLoad(api.clients, [])
+  const encryption = useLoad(api.encryptionSettings, [])
+  // Encryption can only be turned on once a master key is set (jobs encrypted earlier keep it).
+  const needsMasterKey = !job.encrypt && !!encryption.data && !encryption.data.master_pubkey
   const set = (patch: Partial<GroupJob>) => setJ({ ...j, ...patch })
   const tags = j.tags ?? []
   const chosen = j.clients ?? []
@@ -654,10 +669,15 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
             <>
               <h3>Encryption</h3>
               <div className="options">
-                <Option checked={!!j.encrypt} onChange={(v) => set({ encrypt: v })} title="Encrypt on the PC">
+                <Option checked={!!j.encrypt} onChange={(v) => set({ encrypt: v })} title="Encrypt on the PC" disabled={needsMasterKey}>
                   AES-256-GCM with each client's own key, escrowed by this console. PBS only ever sees encrypted data.
                 </Option>
               </div>
+              {needsMasterKey && (
+                <p className="warn-text small">
+                  Set up an RSA master key in <Link to="/settings">Console Settings</Link> first. It keeps encrypted backups recoverable even if this console is lost.
+                </p>
+              )}
               {!!j.id && !!j.encrypt !== !!job.encrypt && (
                 <div className="notice">
                   {j.encrypt ? 'The next run encrypts everything' : 'The next run stores everything unencrypted'}: it reads every file and uploads all data again,

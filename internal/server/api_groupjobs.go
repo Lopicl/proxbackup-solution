@@ -175,6 +175,7 @@ func (s *Server) handleSaveGroupJob(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	g.ID = 0
+	turningOn := g.Encrypt // new jobs; existing ones only when they weren't encrypted
 	if r.PathValue("id") != "" {
 		id, err := pathID(r)
 		if err != nil {
@@ -191,10 +192,20 @@ func (s *Server) handleSaveGroupJob(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.ID, g.CreatedAt = id, old.CreatedAt
+		turningOn = g.Encrypt && !old.Encrypt
 	}
 	if err := validateGroupJob(&g); err != nil {
 		httpError(w, 400, err)
 		return
+	}
+	if turningOn {
+		if ok, err := s.hasMasterKey(ctx); err != nil {
+			httpError(w, 500, err)
+			return
+		} else if !ok {
+			httpError(w, 409, errNoMasterKey)
+			return
+		}
 	}
 	for _, id := range g.Clients {
 		if c, err := s.store.Client(ctx, id); err != nil || c.Revoked {

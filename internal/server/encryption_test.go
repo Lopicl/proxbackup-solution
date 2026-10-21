@@ -111,3 +111,70 @@ func TestClientEncryptionKey(t *testing.T) {
 		t.Fatal("revoke dropped the key")
 	}
 }
+
+func TestEncryptionNeedsMasterKey(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	c := groupTestClients(t, s, "pc-1")[0]
+	save := func(g GroupJob) int {
+		t.Helper()
+		body, _ := json.Marshal(g)
+		req := httptest.NewRequest("POST", "/api/group-jobs", strings.NewReader(string(body)))
+		if g.ID != 0 {
+			req = httptest.NewRequest("PUT", "/api/group-jobs/"+jsonNum(g.ID), strings.NewReader(string(body)))
+			req.SetPathValue("id", jsonNum(g.ID))
+		}
+		rec := httptest.NewRecorder()
+		s.handleSaveGroupJob(rec, req)
+		return rec.Code
+	}
+	setMaster := func(pemKey string) int {
+		t.Helper()
+		body, _ := json.Marshal(encryptionSettings{MasterPubKey: pemKey})
+		rec := httptest.NewRecorder()
+		s.handleSaveEncryption(rec, httptest.NewRequest("PUT", "/api/settings/encryption", strings.NewReader(string(body))))
+		return rec.Code
+	}
+	g := GroupJob{Name: "files", Kind: "files", Sources: []string{`C:\Users`}, Enabled: true, Encrypt: true, Clients: []int64{c.ID}}
+
+	if code := save(g); code != 409 {
+		t.Fatalf("new encrypted job without master key: %d", code)
+	}
+	g.Encrypt = false
+	if code := save(g); code != 200 {
+		t.Fatalf("new job: %d", code)
+	}
+	g.ID, g.Encrypt = 1, true
+	if code := save(g); code != 409 {
+		t.Fatalf("turning encryption on without master key: %d", code)
+	}
+
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	der, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if code := setMaster(string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))); code != 200 {
+		t.Fatalf("master key: %d", code)
+	}
+	if code := save(g); code != 200 {
+		t.Fatalf("turning encryption on with master key: %d", code)
+	}
+	if code := setMaster(""); code != 409 {
+		t.Fatalf("removing master key with an encrypted job: %d", code)
+	}
+	g.Encrypt = false
+	if code := save(g); code != 200 {
+		t.Fatalf("turning encryption off: %d", code)
+	}
+	if code := setMaster(""); code != 200 {
+		t.Fatalf("removing master key: %d", code)
+	}
+
+	// Jobs encrypted before the rule keep working and stay editable.
+	old := &GroupJob{Name: "old", Kind: "files", Sources: []string{`C:\Data`}, Enabled: true, Encrypt: true, ChangeDetection: "metadata", Clients: []int64{c.ID}}
+	if _, err := s.store.SaveGroupJob(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	old.Name = "old renamed"
+	if code := save(*old); code != 200 {
+		t.Fatalf("editing an already encrypted job: %d", code)
+	}
+}

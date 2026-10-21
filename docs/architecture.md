@@ -553,7 +553,10 @@ sequenceDiagram
   key pair* in Console Settings creates that RSA-4096 pair in the browser (Web Crypto,
   `web/src/masterkey.ts`): the private key is downloaded as `master-private.pem`, a
   passphrase-encrypted PKCS#8 key (PBES2, PBKDF2-HMAC-SHA256, AES-256-CBC) like
-  `key create-master-key` writes, and only the public key reaches the console. Turning
+  `key create-master-key` writes, and only the public key reaches the console. A job can
+  only turn encryption on while a master key is set (409 otherwise; jobs encrypted earlier
+  keep working and stay editable), and the master key can't be removed while any job
+  encrypts, so every encrypted snapshot is recoverable without the console. Turning
   encryption on or off makes the next run read and upload everything (chunks of differently
   keyed snapshots are never reused, the agent checks the previous manifest's key fingerprint).
 * **Immutable backups (phase 2):** PBS has no WORM mode, so immutability is layered:

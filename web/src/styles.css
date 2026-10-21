@@ -197,6 +197,8 @@ pre.copy { background: var(--bg); padding: 12px; border-radius: 6px; white-space
 .options { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 14px; }
 .option { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .option:hover { border-color: var(--muted); }
+.option.disabled { opacity: .55; cursor: not-allowed; }
+.option.disabled:hover { border-color: var(--border); }
 .option > input { width: auto; margin-top: 3px; }
 .option > span { display: flex; flex-direction: column; gap: 2px; }
 .option small { color: var(--muted); font-size: 12px; }

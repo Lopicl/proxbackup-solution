@@ -127,7 +127,7 @@ function EncryptionCard() {
       <p className="muted-text">
         Jobs with encryption on are encrypted on the PC with a key of its own, created with the client's first encrypted job. This console keeps every key
         (sealed with its master key), sends it to the agent and uses it for restores, so a lost PC's backups stay restorable. Download a client's key on its page
-        to restore with <code>proxmox-backup-client --keyfile</code>.
+        to restore with <code>proxmox-backup-client --keyfile</code>. Jobs can turn encryption on once an RSA master key is set below.
       </p>
       <form
         onSubmit={async (e) => {
@@ -143,7 +143,7 @@ function EncryptionCard() {
         }}
       >
         <Field
-          label="RSA master public key (optional)"
+          label="RSA master public key"
           hint={
             <>
               With a master key, every encrypted snapshot also holds its key encrypted with it (<code>rsa-encrypted.key.blob</code>), recoverable without this

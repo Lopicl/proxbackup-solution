@@ -88,7 +88,7 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 | --- | --- |
 | Schedule | Pushed to the PC and started by the agent on its own clock. Missed windows (PC off, asleep, busy) catch up ASAP by default, or are recorded as *missed*. *Run now* starts it from the console. |
 | Group jobs | Each PC keeps its own backup group and history, can be disabled or get extra excludes. An optional start spread staggers start times. |
-| Encryption | Client-side; the console escrows the key. |
+| Encryption | Client-side; the console escrows the key. Needs an RSA master key first (Console Settings can generate one), so backups stay recoverable without the console. |
 | Keep awake | On by default. The PC doesn't go to sleep on idle while a backup or restore runs (sleep the user asks for still happens). |
 | Wake for backups | On by default. A sleeping or hibernated PC wakes up for its scheduled backup, then sleeps again. Needs *Allow wake timers* in the power plan; a PC that is shut down stays off. |
 | Immutable backups | On by default. Snapshots are protected against prune and deletion for a minimum period (default 14 days), then for as long as retention keeps them. |

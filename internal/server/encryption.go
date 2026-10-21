@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -28,6 +29,19 @@ const encryptionSettingsKey = "encryption"
 type encryptionSettings struct {
 	// MasterPubKey is a PEM RSA public key ("" = no master-key copy).
 	MasterPubKey string `json:"master_pubkey"`
+}
+
+// Encryption can only be turned on with a master key set, so no encrypted
+// snapshot depends on the console alone for its key.
+var errNoMasterKey = errors.New("set up an RSA master key in Console Settings before turning encryption on")
+
+// hasMasterKey reports whether a master public key is configured.
+func (s *Server) hasMasterKey(ctx context.Context) (bool, error) {
+	var es encryptionSettings
+	if err := s.store.Setting(ctx, encryptionSettingsKey, &es); err != nil {
+		return false, err
+	}
+	return es.MasterPubKey != "", nil
 }
 
 // clientKey returns the client's key for the agent, nil if it has none.
@@ -149,6 +163,24 @@ func (s *Server) handleSaveEncryption(w http.ResponseWriter, r *http.Request) {
 		es.MasterPubKey += "\n"
 	}
 	ctx := r.Context()
+	if es.MasterPubKey == "" {
+		// Keep the rule: no encrypted jobs without a master key.
+		gs, err := s.store.GroupJobs(ctx)
+		if err != nil {
+			httpError(w, 500, err)
+			return
+		}
+		var names []string
+		for _, g := range gs {
+			if g.Encrypt {
+				names = append(names, g.Name)
+			}
+		}
+		if len(names) > 0 {
+			httpError(w, 409, fmt.Errorf("turn encryption off in these jobs before removing the master key: %s", strings.Join(names, ", ")))
+			return
+		}
+	}
 	if err := s.store.SetSetting(ctx, encryptionSettingsKey, es); err != nil {
 		httpError(w, 500, err)
 		return
