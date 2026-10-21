@@ -5,31 +5,49 @@ package server
 import (
 	"context"
 	"errors"
+	"time"
 
 	"proxbackup/pkg/pbs"
 )
 
-// Immutable backups: every new snapshot of a job with Lock is marked
-// protected on PBS and stays protected for as long as the job's retention
-// keeps it. The daily retention pass (pruneJob) unprotects a console-locked
-// snapshot only right before it forgets it; with no retention, snapshots stay
-// protected. PBS refuses to prune or forget protected snapshots, which guards
-// against a compromised PC and operator mistakes (not against a compromised
-// console: its Admin token can unprotect).
+// Immutable backups: every new snapshot of a job with a lock period (LockDays
+// > 0) is marked protected on PBS and stays protected for at least that many
+// days, and after that for as long as the job's retention keeps it. The daily
+// retention pass (pruneJob) picks the keep-* buckets as if console-locked
+// snapshots were unprotected, and unprotects one only right before it forgets
+// it, once its minimum period is over; with no retention, snapshots stay
+// protected. The minimum period is the flood guard: whatever a compromised PC
+// uploads, its last good snapshots survive that long. PBS refuses to prune or
+// forget protected snapshots, which also guards against operator mistakes (not
+// against a compromised console: its Admin token can unprotect).
+
+// maxLockDays bounds the per-job minimum lock period.
+const maxLockDays = 3650
 
 func (s *Server) lockSnapshot(ctx context.Context, pc *pbs.Client, t *Target, c *Client, j *Job, backupTime int64) error {
 	if err := pc.SetProtected(ctx, t.Datastore, c.Namespace, "host", j.BackupID, backupTime, true); err != nil {
 		return err
 	}
 	return s.store.AddSnapshotLock(ctx, SnapshotLock{JobID: j.ID, TargetID: t.ID, Namespace: c.Namespace, BackupType: "host",
-		BackupID: j.BackupID, BackupTime: backupTime})
+		BackupID: j.BackupID, BackupTime: backupTime, LockDays: j.LockDays})
 }
 
-// lockOrphaned reports whether l is no longer under the retention of a job
-// with Lock: its job was deleted or turned locking off, or the job's backup
-// group moved (another target, namespace or backup id). c is j's client.
+// lockMinOver reports whether l's minimum lock period is over at now. The
+// job's current period applies (shortening it, or turning locking off, ends
+// it sooner); for deleted jobs, the one recorded at protection time.
+func lockMinOver(l SnapshotLock, j *Job, now time.Time) bool {
+	days := l.LockDays
+	if j != nil {
+		days = j.LockDays
+	}
+	return now.Unix() >= l.BackupTime+int64(days)*86400
+}
+
+// lockOrphaned reports whether l is no longer under the retention of a locking
+// job: its job was deleted or turned locking off, or the job's backup group
+// moved (another target, namespace or backup id). c is j's client.
 func lockOrphaned(l SnapshotLock, j *Job, c *Client) bool {
-	if j == nil || !j.Lock {
+	if j == nil || j.LockDays <= 0 {
 		return true
 	}
 	if c.Revoked { // revoked clients' backups stay for recovery
@@ -39,8 +57,9 @@ func lockOrphaned(l SnapshotLock, j *Job, c *Client) bool {
 }
 
 // releaseLocks unprotects console-locked snapshots that no job's retention
-// covers any more (see lockOrphaned). Runs daily from housekeeping, before
-// applyRetention, which releases the others as it prunes them.
+// covers any more (see lockOrphaned) once their minimum period is over. Runs
+// daily from housekeeping, before applyRetention, which releases the others
+// as it prunes them.
 func (s *Server) releaseLocks(ctx context.Context) {
 	locks, err := s.store.SnapshotLocks(ctx)
 	if err != nil {
@@ -62,7 +81,7 @@ func (s *Server) releaseLocks(ctx context.Context) {
 		} else if !errors.Is(err, errNotFound) {
 			continue
 		}
-		if !lockOrphaned(l, job, client) {
+		if !lockOrphaned(l, job, client) || !lockMinOver(l, job, time.Now()) {
 			continue
 		}
 		pc, t := clients[l.TargetID], targets[l.TargetID]

@@ -418,11 +418,11 @@ func (s *Server) afterRun(ctx context.Context, runID int64) {
 	s.notify.RunFinished(ctx, run)
 }
 
-// afterBackup protects the new snapshot while retention keeps it, unless the
+// afterBackup protects the new snapshot (see locks.go), unless the
 // job already had its daily cap of backups that day.
 func (s *Server) afterBackup(ctx context.Context, run *Run) {
 	j, err := s.store.Job(ctx, run.JobID)
-	if err != nil || !j.Lock || run.Result.BackupTime <= 0 {
+	if err != nil || j.LockDays <= 0 || run.Result.BackupTime <= 0 {
 		return
 	}
 	logErr := func(what string, err error) {
@@ -462,7 +462,7 @@ func (s *Server) afterBackup(ctx context.Context, run *Run) {
 		logErr("lock", err)
 	} else {
 		s.store.AddLogs(ctx, run.ID, []LogLine{{Time: now(), Level: "info",
-			Msg: "server: snapshot protected until retention removes it"}})
+			Msg: fmt.Sprintf("server: snapshot protected for at least %d day(s), then while retention keeps it", j.LockDays)}})
 	}
 }
 

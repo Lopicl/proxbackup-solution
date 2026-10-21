@@ -283,14 +283,14 @@ function delayText(s: number) {
   return m >= 60 ? `+${Math.floor(m / 60)}h ${m % 60}m` : `+${m} min`
 }
 
-export function JobTags({ j }: { j: Pick<GroupJob, 'enabled' | 'encrypt' | 'lock'> }) {
+export function JobTags({ j }: { j: Pick<GroupJob, 'enabled' | 'encrypt' | 'lock_days'> }) {
   return (
     <>
       {!j.enabled && <span className="tag">disabled</span>}
       {j.encrypt && <span className="tag">encrypted</span>}
-      {j.lock && (
-        <span className="tag" title="New snapshots are protected on PBS for as long as retention keeps them">
-          locked
+      {j.lock_days > 0 && (
+        <span className="tag" title={`New snapshots are protected on PBS for at least ${j.lock_days} day(s), then for as long as retention keeps them`}>
+          locked ≥{j.lock_days}d
         </span>
       )}
     </>
@@ -359,7 +359,7 @@ export function newGroupJob(clients: number[]): Partial<GroupJob> {
     window_minutes: 60,
     catch_up: true,
     retention: { 'keep-last': 3, 'keep-daily': 14, 'keep-weekly': 8, 'keep-monthly': 12 },
-    lock: true,
+    lock_days: 14,
     daily_cap: 0,
     spread_minutes: 0,
     enabled: true,
@@ -539,7 +539,7 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
         )}
         <Field
           label="Retention"
-          hint="Applied by this console once a day to each member's backup group, never because a PC reported a run. All zero keeps everything. Snapshots an operator protected on PBS are kept on top of these counts."
+          hint="Applied by this console once a day to each member's backup group, never because a PC reported a run. All zero keeps everything. Snapshots inside the minimum lock period, and ones an operator protected on PBS, are kept on top of these counts."
         >
           <div className="keep">
             {keepKeys.map((k) => (
@@ -558,11 +558,22 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
         <div className="grid2">
           <Field
             label="Immutable backups"
-            hint="Each new snapshot is marked protected on PBS for as long as retention keeps it, and released only when retention removes it: until then nothing can prune or delete it, not even the PC or an operator by mistake. With no retention, snapshots stay protected."
+            hint="Each new snapshot is marked protected on PBS for at least this many days, then for as long as retention keeps it: until then nothing can prune or delete it, not even the PC or an operator by mistake. The minimum is the flood guard: set it longer than you'd take to notice an attack. With no retention, snapshots stay protected."
           >
-            <label>
-              <input type="checkbox" checked={!!j.lock} onChange={(e) => set({ lock: e.target.checked })} /> Protect snapshots while retention keeps them
-            </label>
+            <div className="checks" style={{ flexDirection: 'row', alignItems: 'center', gap: 8, margin: 0 }}>
+              <input type="checkbox" checked={(j.lock_days ?? 0) > 0} onChange={(e) => set({ lock_days: e.target.checked ? 14 : 0 })} />
+              <span>Protect for at least</span>
+              <input
+                type="number"
+                min={1}
+                max={3650}
+                style={{ width: '6em' }}
+                disabled={!((j.lock_days ?? 0) > 0)}
+                value={j.lock_days || ''}
+                onChange={(e) => set({ lock_days: Math.max(1, Number(e.target.value) || 1) })}
+              />
+              <span>days, then while retention keeps them</span>
+            </div>
           </Field>
           <Field
             label="Backups per day"

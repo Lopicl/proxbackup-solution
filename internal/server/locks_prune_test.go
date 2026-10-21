@@ -66,17 +66,18 @@ func TestPruneJobReleasesLocksWithRetention(t *testing.T) {
 	ctx := context.Background()
 	c := groupTestClients(t, s, "pc1")[0]
 	tg, _ := s.store.Target(ctx, c.TargetID)
-	j := &Job{ID: 7, BackupID: "pc1", Lock: true, Retention: pbs.KeepOptions{Last: 2}}
+	j := &Job{ID: 7, BackupID: "pc1", LockDays: 4, Retention: pbs.KeepOptions{Last: 2}}
 
+	now := time.Date(2026, 10, 10, 22, 0, 0, 0, time.Local)
 	at := func(d int) int64 { return time.Date(2026, 10, d, 21, 0, 0, 0, time.Local).Unix() }
 	f := &fakeProtectPBS{protected: map[int64]bool{}}
-	for d := 1; d <= 5; d++ {
+	for d := 1; d <= 10; d++ {
 		f.protected[at(d)] = true
 		if d == 2 {
 			continue // protected by an operator, not the console
 		}
 		s.store.AddSnapshotLock(ctx, SnapshotLock{JobID: j.ID, TargetID: tg.ID, Namespace: c.Namespace, BackupType: "host",
-			BackupID: "pc1", BackupTime: at(d)})
+			BackupID: "pc1", BackupTime: at(d), LockDays: j.LockDays})
 	}
 	srv := httptest.NewTLSServer(f)
 	defer srv.Close()
@@ -87,22 +88,31 @@ func TestPruneJobReleasesLocksWithRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := s.pruneJob(ctx, pc, tg, c, j, time.Now()); err != nil {
+	if err := s.pruneJob(ctx, pc, tg, c, j, now); err != nil {
 		t.Fatal(err)
 	}
-	// keep-last 2 keeps days 4 and 5, still locked; the operator's day 2 stays
-	// on top; days 1 and 3 were unlocked and forgotten.
-	want := map[int64]bool{at(2): true, at(4): true, at(5): true}
+	// keep-last 2 keeps days 9 and 10; days 8 and 7 are inside the 4-day
+	// minimum; the operator's day 2 stays on top. Days 1 and 3-6 were
+	// unlocked and forgotten.
+	want := []int{2, 7, 8, 9, 10}
 	if len(f.protected) != len(want) {
 		t.Fatalf("left on PBS: %v", f.protected)
 	}
-	for bt, p := range want {
-		if f.protected[bt] != p {
-			t.Errorf("snapshot %d protected=%v, want %v", bt, f.protected[bt], p)
+	for _, d := range want {
+		if !f.protected[at(d)] {
+			t.Errorf("day %d not protected", d)
 		}
 	}
 	locks, _ := s.store.GroupSnapshotLocks(ctx, tg.ID, c.Namespace, "host", "pc1")
-	if len(locks) != 2 || locks[0].BackupTime != at(4) || locks[1].BackupTime != at(5) {
+	if len(locks) != 4 || locks[0].BackupTime != at(7) {
 		t.Errorf("locks left: %+v", locks)
+	}
+
+	// A day later day 7 is past the minimum and outside keep-last: released.
+	if err := s.pruneJob(ctx, pc, tg, c, j, now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.protected[at(7)]; ok || len(f.protected) != 4 {
+		t.Errorf("after a day: %v", f.protected)
 	}
 }

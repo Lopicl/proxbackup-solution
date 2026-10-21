@@ -21,8 +21,9 @@ import (
 //   - retention runs on the console's own daily schedule, never after a run;
 //   - only the first dailyCap snapshots of a job per day (console time) are
 //     locked and count for the keep-* buckets, later ones are pruned;
-//   - console-locked snapshots (see locks.go) count like unprotected ones and
-//     are only unprotected when retention removes them.
+//   - console-locked snapshots (see locks.go) count like unprotected ones, are
+//     kept until their minimum lock period is over and only unprotected when
+//     retention removes them.
 //
 // Hitting the cap is a ransomware signal: it is logged and notified.
 
@@ -221,8 +222,9 @@ func (s *Server) pruneJob(ctx context.Context, pc *pbs.Client, t *Target, c *Cli
 		}
 		return err
 	}
-	// Console locks last as long as retention keeps the snapshot: they don't
-	// keep it on top of the counts, and are released when it is removed.
+	// Console locks last for the job's minimum lock period and as long as
+	// retention keeps the snapshot: they don't keep it on top of the counts,
+	// and are released when it is removed.
 	locks, err := s.store.GroupSnapshotLocks(ctx, t.ID, c.Namespace, "host", j.BackupID)
 	if err != nil {
 		return err
@@ -243,6 +245,10 @@ func (s *Server) pruneJob(ctx context.Context, pc *pbs.Client, t *Target, c *Cli
 	var errs []error
 	for _, sn := range sel.Remove {
 		if l, ok := locked[sn.BackupTime]; ok {
+			if !lockMinOver(l, j, now) {
+				sel.Kept++ // still inside the minimum lock period
+				continue
+			}
 			if err := s.unlockSnapshot(ctx, pc, t, l); err != nil {
 				errs = append(errs, fmt.Errorf("unprotect %d: %w", sn.BackupTime, err))
 				continue

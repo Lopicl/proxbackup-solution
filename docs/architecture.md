@@ -522,17 +522,20 @@ sequenceDiagram
   encryption on or off makes the next run read and upload everything (chunks of differently
   keyed snapshots are never reused, the agent checks the previous manifest's key fingerprint).
 * **Immutable backups (phase 2):** PBS has no WORM mode, so immutability is layered:
-  * *Lock (implemented):* jobs have a `lock` switch (on for new jobs; stored in the old
-    `lock_days` column, any value > 0 = on). After each successful run the console marks the
-    new snapshot `protected` (`PUT admin/datastore/{store}/protected`) and records it in
-    `snapshot_locks`. The lock lasts as long as the job's retention keeps the snapshot: the
-    daily retention pass treats console-locked snapshots like unprotected ones when it picks
-    the keep-* buckets, and unprotects one only right before it forgets it. With no retention
-    (or for revoked clients, which retention skips) snapshots stay locked. A daily housekeeping
-    pass first releases locks no job's retention covers any more: the job was deleted or turned
-    locking off, or its backup group moved (target, namespace or backup id). Snapshots
-    protected by hand are never touched and are kept *on top of* the keep-* counts. PBS refuses
-    to prune or forget protected snapshots, which guards against the PC and operator mistakes.
+  * *Lock (implemented):* jobs have a minimum lock period in days (`lock_days`, default 14
+    for new jobs, 0 = off). After each successful run the console marks the new snapshot
+    `protected` (`PUT admin/datastore/{store}/protected`) and records it in `snapshot_locks`
+    with the period. The lock lasts at least that many days and, after that, as long as the
+    job's retention keeps the snapshot: the daily retention pass picks the keep-* buckets as if
+    console-locked snapshots were unprotected, keeps the ones still inside the job's *current*
+    minimum period on top, and unprotects the others only right before it forgets them. With no
+    retention (or for revoked clients, which retention skips) snapshots stay locked. A daily
+    housekeeping pass first releases locks no job's retention covers any more (the job was
+    deleted or turned locking off, or its backup group moved to another target, namespace or
+    backup id) once their minimum period is over (deleted jobs use the period recorded at lock
+    time; turning locking off ends it at once). Snapshots protected by hand are never touched
+    and are kept *on top of* the keep-* counts. PBS refuses to prune or forget protected
+    snapshots, which guards against the PC and operator mistakes.
   * *Tamper-resistant retention (implemented):* a compromised PC can upload as many snapshots
     as it likes with its token (and report runs for them), which would push the good snapshots
     out of the keep-* buckets (quickly with `keep-last`, over days with calendar buckets). So:
@@ -542,6 +545,8 @@ sequenceDiagram
       past the cap of its day (console time) is not locked. At retention time, only the first
       *cap* finished snapshots of each day count for the buckets; later ones are forgotten
       (unless protected);
+    * every locked snapshot is kept for the minimum lock period, so the last good snapshots
+      before an attack survive at least that long whatever the PC uploads;
     * hitting the cap is logged and notified (`job.daily_cap`, once per job and day, whatever
       the success/failure switches), since it is a ransomware signal.
 
@@ -964,4 +969,4 @@ are regular `CLIENT`s linked to their cluster and node name; their jobs and runs
 | Share credentials leak from the console *(phase 2)* | Sealed with the master key, used only by the console process, never sent to agents or the browser; admins use a dedicated read-only account. Write credentials for restores are never stored |
 | Share backups overload the PBS host *(phase 2)* | Low CPU/I/O priority for share jobs, a cap on parallel share jobs, per-job bandwidth limits, and share jobs kept out of verify/GC windows |
 | Share backups read inconsistent data (no VSS on a remote share) *(phase 2)* | Server-side snapshots by default (`server_snapshot = prefer`), `require` for strict jobs; live reads log every changed or skipped file |
-| Compromised PC floods its group so retention prunes the good snapshots | Daily retention on the console only, per-day backup cap (extra snapshots aren't locked, don't count and are removed, with an alert), so flooding only rotates snapshots out as fast as the keep-* buckets allow (phase 2, implemented) |
+| Compromised PC floods its group so retention prunes the good snapshots | Daily retention on the console only, per-day backup cap (extra snapshots aren't locked, don't count and are removed, with an alert), and every locked snapshot survives the minimum lock period whatever the PC uploads after it (phase 2, implemented) |

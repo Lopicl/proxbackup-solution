@@ -85,7 +85,7 @@ func TestMigrateSingleJobsToGroupJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	g, _ := s.store.GroupJob(ctx, j.GroupID)
-	if g.Name != "User files" || g.BackupID != "" || g.Schedule != "0 21 * * *" || !g.Lock || g.Retention.Last != 3 ||
+	if g.Name != "User files" || g.BackupID != "" || g.Schedule != "0 21 * * *" || g.LockDays != 7 || g.Retention.Last != 3 ||
 		!slices.Equal(g.Clients, []int64{cs[0].ID}) || !slices.Equal(g.Excludes, []string{"*.iso"}) {
 		t.Fatalf("migrated group = %+v", g)
 	}
