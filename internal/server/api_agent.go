@@ -259,7 +259,7 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 			Sources: j.Sources, Excludes: j.AllExcludes(), Volumes: j.Volumes, UseVSS: j.UseVSS,
 			ChangeDetection: s.changeDetection(ctx, t, j),
 			Schedule:        j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp, Encrypt: j.Encrypt,
-			StartDelay: j.StartDelay})
+			StartDelay: j.StartDelay, PreventSleep: j.PreventSleep})
 	}
 	b, _ := json.Marshal(cfg)
 	sum := sha256.Sum256(b)
@@ -342,7 +342,7 @@ func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSp
 		}
 		spec.BackupID, spec.Sources, spec.Excludes, spec.Volumes, spec.UseVSS = j.BackupID, j.Sources, j.AllExcludes(), j.Volumes, j.UseVSS
 		spec.ChangeDetection = s.changeDetection(ctx, t, j)
-		spec.Encrypt = j.Encrypt
+		spec.Encrypt, spec.PreventSleep = j.Encrypt, j.PreventSleep
 	}
 	return spec, nil
 }

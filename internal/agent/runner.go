@@ -301,6 +301,13 @@ func (r *Runner) execute(parent context.Context, t task) {
 		rep.Log("info", fmt.Sprintf("starting %s job requested from the server (agent %s)", t.spec.Kind, r.version))
 	}
 	name := r.jobName(t.spec.JobID, t.spec.Kind)
+	if t.spec.PreventSleep || t.spec.Restore != nil {
+		if release, err := keepAwake(fmt.Sprintf("ProxBackup: %q in progress", name)); err != nil {
+			rep.Log("warn", "can't keep the PC awake during the run: "+err.Error())
+		} else {
+			defer release()
+		}
+	}
 	r.runStarted(name, t.spec.Kind, t.trigger)
 	started := time.Now()
 	var res api.Result

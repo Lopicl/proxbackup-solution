@@ -428,6 +428,9 @@ a slot.
   before the change.
 * Schedules use the PC's local time zone, which is reported to the server and shown in the UI.
 * `missed` runs appear in the history and trigger failure notifications, with warning severity.
+* While a run of a job with `prevent_sleep` (default on) or a restore is going, the agent holds a
+  `PowerRequestSystemRequired` power request, so Windows doesn't sleep on idle. It shows up in
+  `powercfg /requests`. Sleep the user asks for (lid, power button, Start menu) still happens.
 
 ```mermaid
 stateDiagram-v2

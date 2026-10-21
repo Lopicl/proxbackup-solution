@@ -362,6 +362,7 @@ export function newGroupJob(clients: number[]): Partial<GroupJob> {
     lock_days: 14,
     daily_cap: 0,
     spread_minutes: 0,
+    prevent_sleep: true,
     enabled: true,
     clients,
     tags: [],
@@ -592,6 +593,10 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
           <label>
             <input type="checkbox" checked={!!j.encrypt} onChange={(e) => set({ encrypt: e.target.checked })} /> Encrypt on the PC (AES-256-GCM with each
             client's own key, escrowed by this console)
+          </label>
+          <label>
+            <input type="checkbox" checked={!!j.prevent_sleep} onChange={(e) => set({ prevent_sleep: e.target.checked })} /> Keep the PC awake while a
+            backup runs (Windows won't go to sleep on idle until it finishes)
           </label>
           <label>
             <input type="checkbox" checked={!!j.enabled} onChange={(e) => set({ enabled: e.target.checked })} /> Enabled

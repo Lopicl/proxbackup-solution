@@ -168,7 +168,7 @@ func validateGroupJob(g *GroupJob) error {
 }
 
 func (s *Server) handleSaveGroupJob(w http.ResponseWriter, r *http.Request) {
-	var g GroupJob
+	g := GroupJob{PreventSleep: true} // on unless the request turns it off
 	if err := decodeJSON(r, &g); err != nil {
 		httpError(w, 400, err)
 		return

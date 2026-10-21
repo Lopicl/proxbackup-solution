@@ -107,6 +107,8 @@ type JobSpec struct {
 	// can read an encrypted previous snapshot.
 	Encrypt bool      `json:"encrypt,omitempty"`
 	Crypt   *CryptKey `json:"crypt,omitempty"`
+	// PreventSleep keeps the PC awake while the run is going.
+	PreventSleep bool `json:"prevent_sleep,omitempty"`
 }
 
 // JobConfig is a backup job as pushed to the agent. The agent owns the
@@ -134,6 +136,8 @@ type JobConfig struct {
 	// StartDelay (seconds) shifts every scheduled time of the job, spreading
 	// the members of a group job so they don't all hit PBS at once.
 	StartDelay int `json:"start_delay,omitempty"`
+	// PreventSleep as in JobSpec.
+	PreventSleep bool `json:"prevent_sleep,omitempty"`
 }
 
 // AgentConfig is everything the agent needs to run scheduled backups on its
@@ -150,7 +154,7 @@ type AgentConfig struct {
 func (c *AgentConfig) Spec(j JobConfig) JobSpec {
 	return JobSpec{JobID: j.ID, Kind: j.Kind, Target: c.Target, BackupID: j.BackupID,
 		Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS, ChangeDetection: j.ChangeDetection,
-		Encrypt: j.Encrypt, Crypt: c.Crypt}
+		Encrypt: j.Encrypt, Crypt: c.Crypt, PreventSleep: j.PreventSleep}
 }
 
 // JobState is the agent's view of a job's schedule, reported on every poll.
