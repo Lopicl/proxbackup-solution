@@ -1,6 +1,6 @@
 # ProxBackup Solution
 
-Centrally managed Windows PC backups to **Proxmox Backup Server**, natively.
+Centrally managed Windows PC backups to **Proxmox Backup Server**.
 
 The agent speaks the PBS backup protocol itself — no Linux proxy, no `proxmox-backup-client` — so
 PC backups are ordinary PBS snapshots: deduplicated, verifiable, syncable and prunable.
