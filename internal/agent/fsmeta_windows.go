@@ -218,6 +218,10 @@ func applySecurity(p string, nt ntExtras) error {
 	if !sd.IsValid() {
 		return errors.New("invalid security descriptor")
 	}
+	// Without the request bit, the system drops SE_DACL_AUTO_INHERITED.
+	if ctl, _, err := sd.Control(); err == nil && ctl&windows.SE_DACL_AUTO_INHERITED != 0 {
+		sd.SetControl(windows.SE_DACL_AUTO_INHERIT_REQ, windows.SE_DACL_AUTO_INHERIT_REQ)
+	}
 	all := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.GROUP_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION)
 	err := setFileSecurity(p, all, sd)
 	if err == windows.ERROR_INVALID_OWNER || err == windows.ERROR_ACCESS_DENIED || err == windows.ERROR_PRIVILEGE_NOT_HELD {

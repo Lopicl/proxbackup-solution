@@ -66,7 +66,7 @@ try {
   # alternate data streams: small ones are kept, ones over 64 KiB skipped with a warning
   Set-Content -Path "$src\ads.txt" -Value 'main stream'; Set-Content -Path "$src\ads.txt" -Stream 'secret' -Value 'ads'
   Set-Content -Path "$src\ads.txt" -Stream 'Zone.Identifier' -Value "[ZoneTransfer]`r`nZoneId=3"
-  [IO.File]::WriteAllBytes("$src\ads.txt:huge", (New-Object byte[] (100KB)))
+  Set-Content -Path "$src\ads.txt" -Stream 'huge' -Value ('x' * 100KB)
   New-Item -ItemType Directory -Force -Path "$src\ads dir" | Out-Null
   Set-Content -Path "$src\ads dir" -Stream 'dirstream' -Value 'on a folder'
   # NTFS ACLs: an explicit ACE on a file, a protected folder with its own DACL
@@ -95,14 +95,14 @@ try {
   # ---------- restore ----------
   $dst = Join-Path $Work 'restore'
   $label = ($src.ToLower() -replace '[:\\]+', '-').Trim('-') -replace '[^a-z0-9_.-]', '-'
-  $r2 = RunAgent (@('restore') + $common + @('-time', "$snapTime", '-archive', "$label.pxar.didx", '-target', $dst, '-overwrite', 'overwrite'))
+  $r2 = RunAgent (@('restore') + $common + @('-time', "$snapTime", '-archive', "$label.mpxar.didx", '-target', $dst, '-overwrite', 'overwrite'))
   $results.restore_output = $r2.text
   Check 'restore succeeded' ($r2.json -and $r2.json.state -eq 'success') $r2.json.state
 
-  function H($p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
+  function FileHash($p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash }
   foreach ($f in 'big.bin','Documents\readme.txt','Documents\Über Ordner\日本語 ünïcödé.txt','locked.db','hidden.txt','dated.txt') {
     $a = Join-Path $src $f; $b = Join-Path $dst $f
-    Check "content: $f" ((Test-Path -LiteralPath $b) -and (H $a) -eq (H $b))
+    Check "content: $f" ((Test-Path -LiteralPath $b) -and (FileHash $a) -eq (FileHash $b))
   }
   Check 'long path restored' ([IO.File]::Exists("\\?\" + ($long.Replace($src, $dst)) + '\deep.txt'))
   $ga = { param($p) (Get-Item -LiteralPath $p -Force).Attributes }
@@ -128,6 +128,15 @@ try {
     Check "ACL: $f" ($a -eq $b) $b
   }
   Check 'protected folder stays protected' ((Get-Acl -LiteralPath "$dst\private").AreAccessRulesProtected)
+  # Restored descriptors are kept as backed up, not re-inherited from the new parent.
+  $dst2 = Join-Path $Work 'restore-protected'
+  New-Item -ItemType Directory -Force -Path $dst2 | Out-Null
+  icacls $dst2 /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+  $r5 = RunAgent (@('restore') + $common + @('-time', "$snapTime", '-archive', "$label.mpxar.didx", '-target', $dst2, '-overwrite', 'overwrite'))
+  foreach ($f in 'acl.txt', 'Documents\readme.txt') {
+    $a = & $sddl (Join-Path $src $f); $b = & $sddl (Join-Path $dst2 $f)
+    Check "ACL under a different parent: $f" ($r5.json.state -eq 'success' -and $a -eq $b) $b
+  }
 
   # ---------- incremental ----------
   $r3 = RunAgent (@('backup') + $common + @('-source', $src, '-vss=true'))

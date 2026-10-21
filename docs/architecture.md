@@ -114,7 +114,8 @@ streams (`FileStreamInfo`) and, in split archives, its change time.
   bumps `ChangeTime` anyway, and the first run after the upgrade reads every file once.
 * Restore writes streams first (writing one bumps the mtime), then timestamps and attributes,
   then the descriptor via `SetFileSecurityW`, unchanged, inherited ACEs included, like
-  `robocopy /SEC`. Folder descriptors are set in the final deepest-first pass, so a restrictive
+  `robocopy /SEC` (with `SE_DACL_AUTO_INHERIT_REQ`, or the system drops the auto-inherited
+  flag). Folder descriptors are set in the final deepest-first pass, so a restrictive
   DACL can't block writing the files inside. The agent enables `SeRestorePrivilege` so any
   owner can be set; without it the owner is left as is (logged) and group and DACL still
   apply. The restore target folder (the archive root) keeps its own permissions and streams.
@@ -122,6 +123,9 @@ streams (`FileStreamInfo`) and, in split archives, its change time.
 * `proxmox-backup-client restore` on Linux writes them as plain `user.*` xattrs. ext4 fits only
   about 4 KiB of xattrs per file, so restores there may need `--ignore-xattrs`.
 * Not yet for file restores from volume images: their streams are logged, not restored.
+* Verified on the Windows 11 VM (`scripts/windows-vm-test.ps1`): file and folder streams,
+  oversized streams skipped, descriptors identical after restore (also under a parent with
+  different permissions), and an unchanged tree fully reused.
 
 **pxar v2 split archives** *(phase 1).* File backups write format version 2, the
 split-archive format `proxmox-backup-client` uses since PBS 3.3, so unchanged files are not

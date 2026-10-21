@@ -136,7 +136,7 @@ Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**.
 - run events, file and image restores (byte-identical)
 
 **On Windows 11 (ARM64 VM) against PBS 4.2:** VSS snapshots, file backup and restore (contents,
-attributes, timestamps, symlinks; junctions skipped), incremental reuse, volume images, browsing
+attributes, timestamps, NTFS ACLs, alternate data streams, symlinks; junctions skipped), incremental reuse, volume images, browsing
 in the PBS GUI, single-file restore from volume images, restores from the console's file browser,
 and the agent as a Windows service installed by enrollment or the setup `.exe`.
 
