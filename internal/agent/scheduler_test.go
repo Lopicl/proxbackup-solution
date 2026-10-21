@@ -209,3 +209,23 @@ func TestSchedulerPause(t *testing.T) {
 		t.Fatalf("after resume: started %v missed %v", h.started, h.missed)
 	}
 }
+
+func TestSchedulerNextWake(t *testing.T) {
+	late := daily(true)
+	late.WakeToRun = true
+	early := api.JobConfig{ID: 2, Name: "image", Schedule: "0 3 * * *", StartDelay: 600, WakeToRun: true}
+	noWake := api.JobConfig{ID: 3, Name: "other", Schedule: "0 12 * * *"}
+	h := newHarness(t, late, early, noWake)
+	from := time.Date(2026, 10, 12, 9, 0, 0, 0, time.Local)
+	if got, want := h.s.NextWake(from), time.Date(2026, 10, 12, 21, 0, 0, 0, time.Local); !got.Equal(want) {
+		t.Fatalf("NextWake = %v, want %v (jobs that don't wake are skipped)", got, want)
+	}
+	// After 21:00 the earliest is the 03:00 job, shifted by its start delay.
+	if got, want := h.s.NextWake(from.Add(13*time.Hour)), time.Date(2026, 10, 13, 3, 10, 0, 0, time.Local); !got.Equal(want) {
+		t.Fatalf("NextWake = %v, want %v", got, want)
+	}
+	h2 := newHarness(t, noWake)
+	if got := h2.s.NextWake(from); !got.IsZero() {
+		t.Fatalf("NextWake without waking jobs = %v", got)
+	}
+}

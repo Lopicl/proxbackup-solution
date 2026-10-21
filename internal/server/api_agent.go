@@ -259,7 +259,8 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 			Sources: j.Sources, Excludes: j.AllExcludes(), Volumes: j.Volumes, UseVSS: j.UseVSS,
 			ChangeDetection: s.changeDetection(ctx, t, j),
 			Schedule:        j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp, Encrypt: j.Encrypt,
-			StartDelay: j.StartDelay, PreventSleep: j.PreventSleep})
+			StartDelay: j.StartDelay, PreventSleep: j.PreventSleep,
+			WakeToRun: j.WakeToRun})
 	}
 	b, _ := json.Marshal(cfg)
 	sum := sha256.Sum256(b)

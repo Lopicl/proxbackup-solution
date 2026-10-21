@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -29,10 +30,12 @@ type Runner struct {
 	sched   *Scheduler
 	spool   *spool
 
-	mu       sync.Mutex
-	running  map[int64]context.CancelFunc // by server run id
-	inflight map[int64]bool               // job ids queued or running
-	queue    chan task
+	mu         sync.Mutex
+	running    map[int64]context.CancelFunc // by server run id
+	inflight   map[int64]bool               // job ids queued or running
+	queue      chan task
+	wakeAt     time.Time // armed wake time (scheduleLoop only)
+	wakeWarned bool
 
 	updating       bool // self-update in progress (selfupdate.go)
 	updateFailed   string
@@ -106,12 +109,49 @@ func (r *Runner) scheduleLoop(ctx context.Context) {
 	defer t.Stop()
 	for {
 		r.sched.Tick()
+		r.armWake()
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
 	}
+}
+
+// errNoWake: the PC has no sleep state it can wake from on a timer.
+var errNoWake = errors.New("this PC can't wake up on a timer (no supported sleep state, or wake timers are off)")
+
+// wakeLead is how long before a scheduled run the PC is woken, so the
+// schedule check (every 20s) sees the run on time.
+const wakeLead = 30 * time.Second
+
+// armWake sets the wake timer to the next scheduled run that may wake the PC,
+// skipping runs while scheduled backups are paused from the tray.
+func (r *Runner) armWake() {
+	now := time.Now()
+	from := now
+	if until, _ := r.pauseInfo(); until > 0 {
+		from = time.Unix(until, 0)
+	}
+	at := r.sched.NextWake(from)
+	if !at.IsZero() {
+		at = at.Add(-wakeLead)
+		if !at.After(now) {
+			return // due now: the PC is awake and keeps the armed time
+		}
+	}
+	if at.Equal(r.wakeAt) {
+		return
+	}
+	if err := setWakeTimer(at); err != nil {
+		if !r.wakeWarned {
+			r.log.Warn("can't set the wake timer for scheduled backups", "err", err)
+		}
+		r.wakeWarned = true
+	} else if !at.IsZero() {
+		r.log.Info("PC will wake up for the next scheduled backup", "at", at.Format(time.RFC3339))
+	}
+	r.wakeAt = at
 }
 
 func (r *Runner) spoolLoop(ctx context.Context) {
@@ -301,7 +341,8 @@ func (r *Runner) execute(parent context.Context, t task) {
 		rep.Log("info", fmt.Sprintf("starting %s job requested from the server (agent %s)", t.spec.Kind, r.version))
 	}
 	name := r.jobName(t.spec.JobID, t.spec.Kind)
-	if t.spec.PreventSleep || t.spec.Restore != nil {
+	// A run the PC woke up for also needs it, or Windows sleeps again after 2 minutes.
+	if t.spec.PreventSleep || t.spec.Restore != nil || (t.local && t.job.WakeToRun) {
 		if release, err := keepAwake(fmt.Sprintf("ProxBackup: %q in progress", name)); err != nil {
 			rep.Log("warn", "can't keep the PC awake during the run: "+err.Error())
 		} else {

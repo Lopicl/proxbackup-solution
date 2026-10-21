@@ -431,6 +431,13 @@ a slot.
 * While a run of a job with `prevent_sleep` (default on) or a restore is going, the agent holds a
   `PowerRequestSystemRequired` power request, so Windows doesn't sleep on idle. It shows up in
   `powercfg /requests`. Sleep the user asks for (lid, power button, Start menu) still happens.
+* Jobs with `wake_to_run` (default on) wake the PC: after every schedule check the agent arms
+  one waitable timer (`SetWaitableTimer` with resume) 30 s before the next scheduled run of such
+  a job, skipping runs during a tray pause. It shows up in `powercfg /waketimers`. A run the PC
+  woke up for always holds the keep-awake request, or Windows would sleep again after its
+  2-minute unattended idle timeout. Windows ignores the timer when *Allow wake timers* is off,
+  and it can't wake a PC that is shut down. On PCs with no sleep state it can wake from (most
+  VMs) the agent logs one warning.
 
 ```mermaid
 stateDiagram-v2

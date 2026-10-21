@@ -265,6 +265,32 @@ func (s *Scheduler) States() []api.JobState {
 	return out
 }
 
+// NextWake is the earliest scheduled start after t of a job that may wake
+// the PC from sleep (zero if there is none).
+func (s *Scheduler) NextWake(t time.Time) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var next time.Time
+	if s.cfg == nil {
+		return next
+	}
+	for _, j := range s.cfg.Jobs {
+		if !j.WakeToRun || j.Schedule == "" {
+			continue
+		}
+		sched, err := schedule.Parse(j.Schedule)
+		if err != nil {
+			continue
+		}
+		if n := sched.Next(t.Add(-delay(j))); !n.IsZero() {
+			if n = n.Add(delay(j)); next.IsZero() || n.Before(next) {
+				next = n
+			}
+		}
+	}
+	return next
+}
+
 // lateStart decides what to do when a queued scheduled run finally gets its
 // turn: if it waited past its window (agent busy with another job), it becomes
 // a catch-up run or is recorded as missed.

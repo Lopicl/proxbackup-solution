@@ -363,6 +363,7 @@ export function newGroupJob(clients: number[]): Partial<GroupJob> {
     daily_cap: 0,
     spread_minutes: 0,
     prevent_sleep: true,
+    wake_to_run: true,
     enabled: true,
     clients,
     tags: [],
@@ -598,6 +599,12 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
             <input type="checkbox" checked={!!j.prevent_sleep} onChange={(e) => set({ prevent_sleep: e.target.checked })} /> Keep the PC awake while a
             backup runs (Windows won't go to sleep on idle until it finishes)
           </label>
+          {j.schedule && (
+            <label>
+              <input type="checkbox" checked={!!j.wake_to_run} onChange={(e) => set({ wake_to_run: e.target.checked })} /> Wake the PC from sleep or
+              hibernation for scheduled backups (needs "Allow wake timers" in the power plan; a PC that is shut down stays off)
+            </label>
+          )}
           <label>
             <input type="checkbox" checked={!!j.enabled} onChange={(e) => set({ enabled: e.target.checked })} /> Enabled
           </label>

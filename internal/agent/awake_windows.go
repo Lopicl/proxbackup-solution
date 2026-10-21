@@ -4,6 +4,7 @@ package agent
 
 import (
 	"fmt"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -53,4 +54,39 @@ func keepAwake(reason string) (release func(), err error) {
 		procPowerClearRequest.Call(h, powerRequestSystemRequired)
 		windows.CloseHandle(windows.Handle(h))
 	}, nil
+}
+
+var (
+	procCreateWaitableTimerW = kernel32.NewProc("CreateWaitableTimerW")
+	procSetWaitableTimer     = kernel32.NewProc("SetWaitableTimer")
+	procCancelWaitableTimer  = kernel32.NewProc("CancelWaitableTimer")
+	wakeTimer                windows.Handle // kept open: closing it cancels the timer
+)
+
+// setWakeTimer makes Windows wake from sleep or hibernation at t (zero t
+// cancels). Only one wake time is armed at a time. Windows ignores it when
+// "Allow wake timers" is off in the power plan, which it reports as
+// ERROR_NOT_SUPPORTED.
+func setWakeTimer(t time.Time) error {
+	if wakeTimer == 0 {
+		h, _, e := procCreateWaitableTimerW.Call(0, 1, 0) // manual reset, unnamed
+		if h == 0 {
+			return fmt.Errorf("CreateWaitableTimer: %w", e)
+		}
+		wakeTimer = windows.Handle(h)
+	}
+	if t.IsZero() {
+		procCancelWaitableTimer.Call(uintptr(wakeTimer))
+		return nil
+	}
+	// A positive due time is absolute, in FILETIME units (UTC).
+	due := windows.NsecToFiletime(t.UnixNano())
+	ok, _, e := procSetWaitableTimer.Call(uintptr(wakeTimer), uintptr(unsafe.Pointer(&due)), 0, 0, 0, 1)
+	if ok == 0 {
+		return fmt.Errorf("SetWaitableTimer: %w", e)
+	}
+	if e == windows.ERROR_NOT_SUPPORTED {
+		return errNoWake
+	}
+	return nil
 }

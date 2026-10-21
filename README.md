@@ -90,6 +90,7 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 | Group jobs | Each PC keeps its own backup group and history, can be disabled or get extra excludes. An optional start spread staggers start times. |
 | Encryption | Client-side; the console escrows the key. |
 | Keep awake | On by default. The PC doesn't go to sleep on idle while a backup or restore runs (sleep the user asks for still happens). |
+| Wake for backups | On by default. A sleeping or hibernated PC wakes up for its scheduled backup, then sleeps again. Needs *Allow wake timers* in the power plan; a PC that is shut down stays off. |
 | Immutable backups | On by default. Snapshots are protected against prune and deletion for a minimum period (default 14 days), then for as long as retention keeps them. |
 | Retention | Runs on the console once a day. Only a capped number of backups per job and day count, so a compromised PC can't flood its group to push good snapshots out. |
 

@@ -3,7 +3,9 @@
 package agent
 
 import (
+	"errors"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -17,4 +19,15 @@ func TestKeepAwake(t *testing.T) {
 		t.Fatal(err)
 	}
 	release()
+}
+
+func TestSetWakeTimer(t *testing.T) {
+	if err := setWakeTimer(time.Now().Add(time.Hour)); errors.Is(err, errNoWake) {
+		t.Log(err) // e.g. a VM without sleep states
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if err := setWakeTimer(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
 }

@@ -117,6 +117,7 @@ export interface JobDefinition {
   daily_cap: number // backups per day that are locked and count for retention (0 = from the schedule)
   spread_minutes: number // members' start times are spread over this many minutes
   prevent_sleep: boolean // keep the PC from going to sleep while a run is going
+  wake_to_run: boolean // wake the PC from sleep or hibernation for scheduled runs
   enabled: boolean
 }
 

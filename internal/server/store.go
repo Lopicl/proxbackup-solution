@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS group_jobs (
   catch_up INTEGER NOT NULL DEFAULT 1, retention TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
   change_detection TEXT NOT NULL DEFAULT 'metadata', encrypt INTEGER NOT NULL DEFAULT 0, lock_days INTEGER NOT NULL DEFAULT 0,
   spread_minutes INTEGER NOT NULL DEFAULT 0, member_tags TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL,
-  daily_cap INTEGER NOT NULL DEFAULT 0, prevent_sleep INTEGER NOT NULL DEFAULT 1);
+  daily_cap INTEGER NOT NULL DEFAULT 0, prevent_sleep INTEGER NOT NULL DEFAULT 1,
+  wake_to_run INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS restore_sessions (
   token_hash TEXT PRIMARY KEY, client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
   user_name TEXT NOT NULL, user_sid TEXT NOT NULL, admin INTEGER NOT NULL, scope TEXT NOT NULL,
@@ -142,6 +143,8 @@ func (s *Store) migrate() error {
 		{"clients", "revoked_jobs", "TEXT NOT NULL DEFAULT '[]'"},
 		// Keep the PC from going to sleep while a backup runs.
 		{"group_jobs", "prevent_sleep", "INTEGER NOT NULL DEFAULT 1"},
+		// Wake the PC from sleep for scheduled backups.
+		{"group_jobs", "wake_to_run", "INTEGER NOT NULL DEFAULT 1"},
 	}
 	for _, c := range cols {
 		var n int
@@ -312,6 +315,8 @@ type Job struct {
 	DailyCap int `json:"daily_cap"`
 	// PreventSleep keeps the PC from going to sleep while a run is going.
 	PreventSleep bool `json:"prevent_sleep"`
+	// WakeToRun wakes the PC from sleep or hibernation for scheduled runs.
+	WakeToRun bool `json:"wake_to_run"`
 	// Reported by the agent (it owns the schedule).
 	NextRun        int64 `json:"next_run,omitempty"`
 	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
@@ -847,7 +852,7 @@ const jobCols = `j.id, j.client_id, j.group_id, COALESCE(g.name, j.name), COALES
 	COALESCE(g.use_vss, j.use_vss), COALESCE(g.schedule, j.schedule), COALESCE(g.retention, j.retention), j.enabled,
 	COALESCE(g.enabled, 1), j.created_at, COALESCE(g.window_minutes, j.window_minutes), COALESCE(g.catch_up, j.catch_up),
 	COALESCE(g.change_detection, j.change_detection), COALESCE(g.encrypt, j.encrypt), COALESCE(g.lock_days, j.lock_days),
-	COALESCE(g.spread_minutes, 0), COALESCE(g.daily_cap, 0), COALESCE(g.prevent_sleep, 1)`
+	COALESCE(g.spread_minutes, 0), COALESCE(g.daily_cap, 0), COALESCE(g.prevent_sleep, 1), COALESCE(g.wake_to_run, 1)`
 const jobFrom = ` FROM jobs j LEFT JOIN group_jobs g ON g.id=j.group_id`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
@@ -855,7 +860,7 @@ func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	var src, exc, extra, vol, ret string
 	err := sc.Scan(&j.ID, &j.ClientID, &j.GroupID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &extra, &vol, &j.UseVSS, &j.Schedule, &ret,
 		&j.MemberEnabled, &j.GroupEnabled, &j.CreatedAt, &j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.LockDays,
-		&j.SpreadMinutes, &j.DailyCap, &j.PreventSleep)
+		&j.SpreadMinutes, &j.DailyCap, &j.PreventSleep, &j.WakeToRun)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}

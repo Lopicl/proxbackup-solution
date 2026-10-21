@@ -138,6 +138,8 @@ type JobConfig struct {
 	StartDelay int `json:"start_delay,omitempty"`
 	// PreventSleep as in JobSpec.
 	PreventSleep bool `json:"prevent_sleep,omitempty"`
+	// WakeToRun wakes the PC from sleep or hibernation for scheduled runs.
+	WakeToRun bool `json:"wake_to_run,omitempty"`
 }
 
 // AgentConfig is everything the agent needs to run scheduled backups on its

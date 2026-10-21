@@ -89,7 +89,7 @@ func TestMigrateSingleJobsToGroupJobs(t *testing.T) {
 		!slices.Equal(g.Clients, []int64{cs[0].ID}) || !slices.Equal(g.Excludes, []string{"*.iso"}) {
 		t.Fatalf("migrated group = %+v", g)
 	}
-	if j.BackupID != "pc-1" || !j.Enabled || j.Name != "User files" || !j.PreventSleep || !g.PreventSleep {
+	if j.BackupID != "pc-1" || !j.Enabled || j.Name != "User files" || !j.PreventSleep || !g.PreventSleep || !j.WakeToRun || !g.WakeToRun {
 		t.Fatalf("migrated member = %+v", j)
 	}
 	// A disabled job becomes a disabled group; a custom backup group is kept.
