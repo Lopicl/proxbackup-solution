@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { ALL_CLIENTS, api, type GroupJob, type GroupJobView, type GroupMember, type Job, type Keep } from '../api'
 import { RunsTable } from './RunsTable'
 import { ago, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
@@ -386,10 +386,26 @@ const lines = (s: string) =>
     .map((l) => l.trim())
     .filter(Boolean)
 
+type EditorTab = 'general' | 'clients' | 'source' | 'schedule' | 'retention' | 'security'
+
+// Option is a checkbox with a title and a one-line explanation under it.
+function Option({ checked, onChange, title, children }: { checked: boolean; onChange: (v: boolean) => void; title: ReactNode; children?: ReactNode }) {
+  return (
+    <label className="option">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>
+        <b>{title}</b>
+        {children && <small>{children}</small>}
+      </span>
+    </label>
+  )
+}
+
 export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClose: (saved?: GroupJob, deleted?: boolean) => void }) {
   const [j, setJ] = useState<Partial<GroupJob>>(job)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
+  const [tab, setTab] = useState<EditorTab>('general')
   const clients = useLoad(api.clients, [])
   const set = (patch: Partial<GroupJob>) => setJ({ ...j, ...patch })
   const tags = j.tags ?? []
@@ -399,12 +415,28 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
   const matching = (clients.data ?? []).filter((c) => allClients || chosen.includes(c.id) || c.tags.some((t) => tags.includes(t)))
   const shown = (clients.data ?? []).filter((c) => !filter || c.name.includes(filter.toLowerCase()) || c.tags.some((t) => t.includes(filter.toLowerCase())))
   const toggleTag = (t: string) => set({ tags: tags.includes(t) ? tags.filter((x) => x !== t) : [...tags, t] })
+  const files = j.kind === 'files'
+  const locked = (j.lock_days ?? 0) > 0
+
+  const tabs: [EditorTab, string, ReactNode?][] = [
+    ['general', 'General'],
+    ['clients', 'Clients', matching.length],
+    ['source', files ? 'Folders' : 'Volumes', what({ kind: j.kind ?? 'files', sources: j.sources ?? [], volumes: j.volumes ?? [] }).length],
+    ['schedule', 'Schedule'],
+    ['retention', 'Retention'],
+    ['security', 'Security'],
+  ]
 
   return (
     <Modal title={j.id ? `Edit job “${job.name}”` : 'New backup job'} onClose={() => onClose()} wide>
       <form
         onSubmit={async (e) => {
           e.preventDefault()
+          if (!j.name?.trim()) {
+            setTab('general')
+            setError('The job needs a name.')
+            return
+          }
           try {
             const saved = await api.saveGroupJob(j)
             onClose(saved)
@@ -413,208 +445,259 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
           }
         }}
       >
-        <div className="grid2">
-          <Field label="Name">
-            <input value={j.name ?? ''} onChange={(e) => set({ name: e.target.value })} required />
-          </Field>
-          <Field label="Type">
-            <select value={j.kind} onChange={(e) => set({ kind: e.target.value as GroupJob['kind'], backup_id: '' })} disabled={!!j.id}>
-              <option value="files">Files and folders (pxar)</option>
-              <option value="image">Volume image (block level)</option>
-            </select>
-          </Field>
-        </div>
-
-        <Field
-          label={`Clients (${matching.length} selected)`}
-          hint="Pick PCs by name and/or by tag: clients tagged later join automatically, and new PCs join jobs for all clients. Each PC keeps its own backup group and history."
-        >
-          <div className="chips">
-            <button type="button" className={`chip ${allClients ? 'on' : ''}`} onClick={() => toggleTag(ALL_CLIENTS)}>
-              All clients
+        <nav className="tabs editor-tabs">
+          {tabs.map(([k, label, count]) => (
+            <button type="button" key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>
+              {label}
+              {count !== undefined && <span className="count">{count}</span>}
             </button>
-            {[...new Set([...knownTags, ...tags.filter((t) => t !== ALL_CLIENTS)])].map((t) => (
-              <button type="button" key={t} className={`chip ${tags.includes(t) ? 'on' : ''}`} onClick={() => toggleTag(t)}>
-                #{t}
-              </button>
-            ))}
-          </div>
-          {!allClients && (
+          ))}
+        </nav>
+
+        <div className="tab-panel">
+          {tab === 'general' && (
             <>
-              <input className="member-filter" placeholder="Filter clients…" value={filter} onChange={(e) => setFilter(e.target.value)} />
-              <div className="member-list">
-                {shown.length === 0 && <span className="muted-text">No clients.</span>}
-                {shown.map((c) => {
-                  const viaTag = c.tags.filter((t) => tags.includes(t))
-                  return (
-                    <label key={c.id}>
-                      <input
-                        type="checkbox"
-                        checked={chosen.includes(c.id) || viaTag.length > 0}
-                        disabled={viaTag.length > 0 && !chosen.includes(c.id)}
-                        onChange={(e) => set({ clients: e.target.checked ? [...chosen, c.id] : chosen.filter((x) => x !== c.id) })}
-                      />
-                      <OnlineDot online={c.online} /> {c.name}
-                      {c.tags.map((t) => (
-                        <span key={t} className="tag">
-                          #{t}
-                        </span>
-                      ))}
-                    </label>
-                  )
-                })}
+              <div className="grid2">
+                <Field label="Name">
+                  <input value={j.name ?? ''} onChange={(e) => set({ name: e.target.value })} autoFocus />
+                </Field>
+                <Field label="Type" hint={j.id ? 'The type of an existing job cannot be changed.' : undefined}>
+                  <select value={j.kind} onChange={(e) => set({ kind: e.target.value as GroupJob['kind'], backup_id: '' })} disabled={!!j.id}>
+                    <option value="files">Files and folders (pxar)</option>
+                    <option value="image">Volume image (block level)</option>
+                  </select>
+                </Field>
+              </div>
+              <Field
+                label="Backup ID (PBS backup group)"
+                hint={`Empty = the client's name${j.kind === 'image' ? ' plus “-image”' : ''}. Every client has its own namespace, so members never share a group.`}
+              >
+                <input value={j.backup_id ?? ''} onChange={(e) => set({ backup_id: e.target.value })} placeholder={j.kind === 'image' ? '<client>-image' : '<client>'} />
+              </Field>
+              <div className="options">
+                <Option checked={!!j.enabled} onChange={(v) => set({ enabled: v })} title="Enabled">
+                  A disabled job never starts on its own and is skipped by “Run now on all members”.
+                </Option>
               </div>
             </>
           )}
-        </Field>
 
-        {j.kind === 'files' ? (
-          <div className="grid2">
-            <Field label="Folders to back up" hint="One absolute path per line.">
-              <textarea rows={5} value={(j.sources ?? []).join('\n')} onChange={(e) => set({ sources: lines(e.target.value) })} />
-            </Field>
-            <Field
-              label="Exclude patterns"
-              hint={
-                <>
-                  One per line, e.g. <code>*.iso</code>, <code>**/Downloads</code>. Temp folders, pagefile etc. are always excluded. Members can add their own.
-                </>
-              }
-            >
-              <textarea rows={5} value={(j.excludes ?? []).join('\n')} onChange={(e) => set({ excludes: lines(e.target.value) })} />
-            </Field>
-            <Field
-              label="Change detection"
-              hint="Unchanged files are skipped by size, timestamps and attributes. Needs PBS 3.3 or later; older servers automatically get the legacy format."
-            >
-              <select value={j.change_detection ?? 'metadata'} onChange={(e) => set({ change_detection: e.target.value as GroupJob['change_detection'] })}>
-                <option value="metadata">Skip unchanged files (recommended)</option>
-                <option value="data">Read every file</option>
-                <option value="legacy">Legacy single archive (pxar v1)</option>
-              </select>
-            </Field>
-          </div>
-        ) : (
-          <Field label="Volumes" hint="Drive letters, one per line, e.g. C:. Each volume becomes a 4 MiB fixed-chunk image archive.">
-            <textarea rows={3} value={(j.volumes ?? []).join('\n')} onChange={(e) => set({ volumes: lines(e.target.value) })} />
-          </Field>
-        )}
-        <div className="grid2">
-          <Field
-            label="Schedule (cron, PC local time)"
-            hint="minute hour day-of-month month day-of-week, or @daily / @every 6h. Empty = manual. Each agent starts the job itself — the server only pushes this configuration."
-          >
-            <input value={j.schedule ?? ''} onChange={(e) => set({ schedule: e.target.value })} placeholder="0 21 * * *" />
-            <div className="chips">
-              {schedulePresets.map(([v, label]) => (
-                <button type="button" key={label} className={`chip ${j.schedule === v ? 'on' : ''}`} onClick={() => set({ schedule: v })}>
-                  {label}
+          {tab === 'clients' && (
+            <>
+              <p className="muted-text intro">
+                Pick PCs by tag and/or by name. Clients tagged later join automatically, and new PCs join jobs for all clients. Each PC keeps its own backup group
+                and history.
+              </p>
+              <h3>By tag</h3>
+              <div className="chips">
+                <button type="button" className={`chip ${allClients ? 'on' : ''}`} onClick={() => toggleTag(ALL_CLIENTS)}>
+                  All clients
                 </button>
-              ))}
-            </div>
-          </Field>
-          <Field
-            label="Backup ID (PBS backup group)"
-            hint={`Empty = the client's name${j.kind === 'image' ? ' plus “-image”' : ''}. Every client has its own namespace, so members never share a group.`}
-          >
-            <input value={j.backup_id ?? ''} onChange={(e) => set({ backup_id: e.target.value })} />
-          </Field>
-        </div>
-        {j.schedule && (
-          <div className="grid3">
-            <Field label="Start window (minutes)" hint="A scheduled run may start up to this long after its time and still count as on time.">
-              <input type="number" min={1} max={10080} value={j.window_minutes ?? 60} onChange={(e) => set({ window_minutes: Number(e.target.value) })} />
-            </Field>
-            <Field
-              label="Start spread (minutes)"
-              hint="Each member starts at its own fixed offset within this range after the scheduled time, so many PCs don't hit PBS at the same minute. 0 = all at once."
-            >
-              <input type="number" min={0} max={1440} value={j.spread_minutes ?? 0} onChange={(e) => set({ spread_minutes: Number(e.target.value) || 0 })} />
-            </Field>
-            <Field label="If the PC is off, asleep or busy during the window">
-              <select value={j.catch_up ? 'catch' : 'skip'} onChange={(e) => set({ catch_up: e.target.value === 'catch' })}>
-                <option value="catch">Run as soon as it is available again (catch-up)</option>
-                <option value="skip">Skip it and record the run as missed</option>
-              </select>
-            </Field>
-          </div>
-        )}
-        <Field
-          label="Retention"
-          hint="Applied by this console once a day to each member's backup group, never because a PC reported a run. All zero keeps everything. Snapshots inside the minimum lock period, and ones an operator protected on PBS, are kept on top of these counts."
-        >
-          <div className="keep">
-            {keepKeys.map((k) => (
-              <label key={k}>
-                <span>{k.replace('keep-', '')}</span>
-                <input
-                  type="number"
-                  min={0}
-                  value={j.retention?.[k] ?? 0}
-                  onChange={(e) => set({ retention: { ...j.retention, [k]: Number(e.target.value) || undefined } })}
-                />
-              </label>
+                {[...new Set([...knownTags, ...tags.filter((t) => t !== ALL_CLIENTS)])].map((t) => (
+                  <button type="button" key={t} className={`chip ${tags.includes(t) ? 'on' : ''}`} onClick={() => toggleTag(t)}>
+                    #{t}
+                  </button>
+                ))}
+              </div>
+              <h3>By name</h3>
+              {allClients ? (
+                <p className="muted-text">Every client is a member of this job.</p>
+              ) : (
+                <>
+                  <input className="member-filter" placeholder="Filter clients…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+                  <div className="member-list">
+                    {shown.length === 0 && <span className="muted-text">No clients.</span>}
+                    {shown.map((c) => {
+                      const viaTag = c.tags.filter((t) => tags.includes(t))
+                      return (
+                        <label key={c.id} title={viaTag.length && !chosen.includes(c.id) ? `Selected through ${viaTag.map((t) => '#' + t).join(', ')}` : ''}>
+                          <input
+                            type="checkbox"
+                            checked={chosen.includes(c.id) || viaTag.length > 0}
+                            disabled={viaTag.length > 0 && !chosen.includes(c.id)}
+                            onChange={(e) => set({ clients: e.target.checked ? [...chosen, c.id] : chosen.filter((x) => x !== c.id) })}
+                          />
+                          <OnlineDot online={c.online} /> {c.name}
+                          {c.tags.map((t) => (
+                            <span key={t} className="tag">
+                              #{t}
+                            </span>
+                          ))}
+                        </label>
+                      )
+                    })}
+                  </div>
+                </>
+              )}
+            </>
+          )}
+
+          {tab === 'source' &&
+            (files ? (
+              <>
+                <div className="grid2">
+                  <Field label="Folders to back up" hint="One absolute path per line.">
+                    <textarea rows={6} value={(j.sources ?? []).join('\n')} onChange={(e) => set({ sources: lines(e.target.value) })} />
+                  </Field>
+                  <Field
+                    label="Exclude patterns"
+                    hint={
+                      <>
+                        One per line, e.g. <code>*.iso</code>, <code>**/Downloads</code>. Temp folders, pagefile etc. are always excluded. Members can add their own.
+                      </>
+                    }
+                  >
+                    <textarea rows={6} value={(j.excludes ?? []).join('\n')} onChange={(e) => set({ excludes: lines(e.target.value) })} />
+                  </Field>
+                </div>
+                <h3>How files are read</h3>
+                <Field
+                  label="Change detection"
+                  hint="Unchanged files are skipped by size, timestamps and attributes. Needs PBS 3.3 or later; older servers automatically get the legacy format."
+                >
+                  <select value={j.change_detection ?? 'metadata'} onChange={(e) => set({ change_detection: e.target.value as GroupJob['change_detection'] })}>
+                    <option value="metadata">Skip unchanged files (recommended)</option>
+                    <option value="data">Read every file</option>
+                    <option value="legacy">Legacy single archive (pxar v1)</option>
+                  </select>
+                </Field>
+                <div className="options">
+                  <Option checked={!!j.use_vss} onChange={(v) => set({ use_vss: v })} title="Use a VSS snapshot (recommended)">
+                    Backs up a consistent point-in-time copy, including files that are open or locked.
+                  </Option>
+                </div>
+              </>
+            ) : (
+              <Field label="Volumes" hint="Drive letters, one per line, e.g. C:. Each volume becomes a 4 MiB fixed-chunk image archive.">
+                <textarea rows={4} value={(j.volumes ?? []).join('\n')} onChange={(e) => set({ volumes: lines(e.target.value) })} />
+              </Field>
             ))}
-          </div>
-        </Field>
-        <div className="grid2">
-          <Field
-            label="Immutable backups"
-            hint="Each new snapshot is marked protected on PBS for at least this many days, then for as long as retention keeps it: until then nothing can prune or delete it, not even the PC or an operator by mistake. The minimum is the flood guard: set it longer than you'd take to notice an attack. With no retention, snapshots stay protected."
-          >
-            <div className="checks" style={{ flexDirection: 'row', alignItems: 'center', gap: 8, margin: 0 }}>
-              <input type="checkbox" checked={(j.lock_days ?? 0) > 0} onChange={(e) => set({ lock_days: e.target.checked ? 14 : 0 })} />
-              <span>Protect for at least</span>
-              <input
-                type="number"
-                min={1}
-                max={3650}
-                style={{ width: '6em' }}
-                disabled={!((j.lock_days ?? 0) > 0)}
-                value={j.lock_days || ''}
-                onChange={(e) => set({ lock_days: Math.max(1, Number(e.target.value) || 1) })}
-              />
-              <span>days, then while retention keeps them</span>
-            </div>
-          </Field>
-          <Field
-            label="Backups per day"
-            hint="Only this many backups of a member per day are locked and count for retention; later ones are removed by retention and reported as a possible ransomware sign. 0 = automatic (the scheduled runs plus 3)."
-          >
-            <input type="number" min={0} max={100} value={j.daily_cap ?? 0} onChange={(e) => set({ daily_cap: Number(e.target.value) || 0 })} />
-          </Field>
-        </div>
-        <div className="checks">
-          {j.kind === 'files' && (
-            <label>
-              <input type="checkbox" checked={!!j.use_vss} onChange={(e) => set({ use_vss: e.target.checked })} /> Use VSS snapshot (recommended, consistent and
-              includes open files)
-            </label>
+
+          {tab === 'schedule' && (
+            <>
+              <Field
+                label="When (cron, PC local time)"
+                hint="minute hour day-of-month month day-of-week, or @daily / @every 6h. Empty = manual only. Each agent starts the job itself — the server only pushes this configuration."
+              >
+                <div className="chips presets">
+                  {schedulePresets.map(([v, label]) => (
+                    <button type="button" key={label} className={`chip ${j.schedule === v ? 'on' : ''}`} onClick={() => set({ schedule: v })}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <input value={j.schedule ?? ''} onChange={(e) => set({ schedule: e.target.value })} placeholder="manual only" />
+              </Field>
+              {j.schedule ? (
+                <>
+                  <h3>Timing</h3>
+                  <div className="grid3">
+                    <Field label="Start window (minutes)" hint="A run may start up to this long after its time and still count as on time.">
+                      <input type="number" min={1} max={10080} value={j.window_minutes ?? 60} onChange={(e) => set({ window_minutes: Number(e.target.value) })} />
+                    </Field>
+                    <Field label="Start spread (minutes)" hint="Each member starts at its own fixed offset within this range, so PCs don't all hit PBS at once. 0 = all at once.">
+                      <input type="number" min={0} max={1440} value={j.spread_minutes ?? 0} onChange={(e) => set({ spread_minutes: Number(e.target.value) || 0 })} />
+                    </Field>
+                    <Field label="If the PC misses the window" hint="Because it was off, asleep or busy.">
+                      <select value={j.catch_up ? 'catch' : 'skip'} onChange={(e) => set({ catch_up: e.target.value === 'catch' })}>
+                        <option value="catch">Run when available (catch-up)</option>
+                        <option value="skip">Skip and record as missed</option>
+                      </select>
+                    </Field>
+                  </div>
+                </>
+              ) : (
+                <p className="muted-text">This job only runs when started by hand. Pick a schedule to set its timing.</p>
+              )}
+              <h3>Power</h3>
+              <div className="options">
+                <Option checked={!!j.prevent_sleep} onChange={(v) => set({ prevent_sleep: v })} title="Keep the PC awake while a backup runs">
+                  Windows won't go to sleep on idle until the backup finishes.
+                </Option>
+                {j.schedule && (
+                  <Option checked={!!j.wake_to_run} onChange={(v) => set({ wake_to_run: v })} title="Wake the PC for scheduled backups">
+                    Wakes it from sleep or hibernation. Needs “Allow wake timers” in the power plan; a PC that is shut down stays off.
+                  </Option>
+                )}
+              </div>
+            </>
           )}
-          <label>
-            <input type="checkbox" checked={!!j.encrypt} onChange={(e) => set({ encrypt: e.target.checked })} /> Encrypt on the PC (AES-256-GCM with each
-            client's own key, escrowed by this console)
-          </label>
-          <label>
-            <input type="checkbox" checked={!!j.prevent_sleep} onChange={(e) => set({ prevent_sleep: e.target.checked })} /> Keep the PC awake while a
-            backup runs (Windows won't go to sleep on idle until it finishes)
-          </label>
-          {j.schedule && (
-            <label>
-              <input type="checkbox" checked={!!j.wake_to_run} onChange={(e) => set({ wake_to_run: e.target.checked })} /> Wake the PC from sleep or
-              hibernation for scheduled backups (needs "Allow wake timers" in the power plan; a PC that is shut down stays off)
-            </label>
+
+          {tab === 'retention' && (
+            <>
+              <p className="muted-text intro">
+                Applied by this console once a day to each member's backup group, never because a PC reported a run. Snapshots still inside their lock period, and
+                ones an operator protected on PBS, are kept on top of these counts.
+              </p>
+              <h3>Snapshots to keep</h3>
+              <div className="keep">
+                {keepKeys.map((k) => (
+                  <label key={k}>
+                    <span>{k.replace('keep-', '')}</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={j.retention?.[k] ?? 0}
+                      onChange={(e) => set({ retention: { ...j.retention, [k]: Number(e.target.value) || undefined } })}
+                    />
+                  </label>
+                ))}
+              </div>
+              <p className="summary">
+                Keeps <b>{keepText(j.retention ?? {})}</b>
+                {keepText(j.retention ?? {}) === 'keep all' && <span className="muted-text"> — all counts are zero, nothing is ever pruned</span>}
+              </p>
+            </>
           )}
-          <label>
-            <input type="checkbox" checked={!!j.enabled} onChange={(e) => set({ enabled: e.target.checked })} /> Enabled
-          </label>
+
+          {tab === 'security' && (
+            <>
+              <h3>Encryption</h3>
+              <div className="options">
+                <Option checked={!!j.encrypt} onChange={(v) => set({ encrypt: v })} title="Encrypt on the PC">
+                  AES-256-GCM with each client's own key, escrowed by this console. PBS only ever sees encrypted data.
+                </Option>
+              </div>
+              {!!j.id && !!j.encrypt !== !!job.encrypt && (
+                <div className="notice">
+                  {j.encrypt ? 'The next run encrypts everything' : 'The next run stores everything unencrypted'}: it reads every file and uploads all data again,
+                  since chunks can't be shared between encrypted and unencrypted snapshots. Existing snapshots stay as they are and remain restorable.
+                </div>
+              )}
+              <h3>Ransomware protection</h3>
+              <div className="options">
+                <Option
+                  checked={locked}
+                  onChange={(v) => set({ lock_days: v ? 14 : 0 })}
+                  title={
+                    <span className="inline-input">
+                      Immutable for at least
+                      <input
+                        type="number"
+                        min={1}
+                        max={3650}
+                        disabled={!locked}
+                        value={j.lock_days || ''}
+                        onChange={(e) => set({ lock_days: Math.max(1, Number(e.target.value) || 1) })}
+                      />
+                      days
+                    </span>
+                  }
+                >
+                  Each new snapshot is protected on PBS for this long, then for as long as retention keeps it: until then nothing can prune or delete it, not even
+                  the PC or an operator by mistake. Set it longer than you'd take to notice an attack.
+                </Option>
+              </div>
+              <Field
+                label="Backups per day"
+                hint="Only this many backups of a member per day are locked and count for retention; extra ones are removed by retention and reported as a possible ransomware sign. 0 = automatic (the scheduled runs plus 3)."
+              >
+                <input type="number" min={0} max={100} className="narrow" value={j.daily_cap ?? 0} onChange={(e) => set({ daily_cap: Number(e.target.value) || 0 })} />
+              </Field>
+            </>
+          )}
         </div>
-        {!!j.id && !!j.encrypt !== !!job.encrypt && (
-          <div className="notice">
-            {j.encrypt ? 'The next run encrypts everything' : 'The next run stores everything unencrypted'}: it reads every file and uploads all data again, since chunks
-            can't be shared between encrypted and unencrypted snapshots. Existing snapshots stay as they are and remain restorable.
-          </div>
-        )}
+
         <ErrorBox error={error} />
         <div className="buttons">
           {j.id && (

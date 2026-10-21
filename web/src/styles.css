@@ -182,3 +182,24 @@ pre.copy { background: var(--bg); padding: 12px; border-radius: 6px; white-space
 .member-list label { display: flex; gap: 6px; align-items: center; font-size: 13px; }
 .member-list input { width: auto; }
 .run-count { white-space: nowrap; margin-right: 4px; }
+
+/* tabbed job editor */
+.editor-tabs { margin: -4px 0 16px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.editor-tabs button { border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: 8px 14px; margin-bottom: -1px; white-space: nowrap; }
+.editor-tabs button:hover { color: var(--text); }
+.editor-tabs button.active { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.editor-tabs .count { margin-left: 6px; font-size: 11px; padding: 0 6px; border-radius: 8px; background: #8882; color: var(--muted); font-weight: 600; }
+.tab-panel { min-height: 330px; }
+.tab-panel h3:first-child { margin-top: 0; }
+.tab-panel .intro { margin: 0 0 4px; }
+.tab-panel .presets { margin: 0 0 6px; }
+.tab-panel .summary { margin: 12px 0 0; }
+.options { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 14px; }
+.option { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.option:hover { border-color: var(--muted); }
+.option > input { width: auto; margin-top: 3px; }
+.option > span { display: flex; flex-direction: column; gap: 2px; }
+.option small { color: var(--muted); font-size: 12px; }
+.inline-input { display: inline-flex; align-items: center; gap: 8px; }
+.inline-input input { width: 5.5em; padding: 3px 8px; }
+input.narrow { width: 8em; }
