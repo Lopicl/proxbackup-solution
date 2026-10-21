@@ -81,11 +81,13 @@ func (j *job) runImage(ctx context.Context) (api.Result, error) {
 		}
 		addStats(&res, st)
 		j.logf("info", "%s: %d chunks (%d new, %d reused), %d bytes uploaded", v.archive, st.Chunks, st.NewChunks, st.ReusedChunks, st.UploadedBytes)
+		workers := chunkWorkers()
+		perWorker := func(d time.Duration) time.Duration { return (d / time.Duration(workers)).Round(100 * time.Millisecond) }
 		j.logf("info", "%s: took %s (%s/s); %s of free space not read; disk reads %s, waiting for chunk workers %s; "+
-			"%d workers spent hashing %s, compressing+encrypting %s, uploading %s",
+			"%d workers in parallel, each spent on average %s hashing, %s compressing+encrypting, %s uploading",
 			v.archive, st.Duration.Round(100*time.Millisecond), gib(uint64(float64(v.size)/max(st.Duration.Seconds(), 1))), gib(ic.skipped),
-			ic.read.Round(100*time.Millisecond), ic.wait.Round(100*time.Millisecond), chunkWorkers(),
-			st.HashTime.Round(100*time.Millisecond), st.EncodeTime.Round(100*time.Millisecond), st.UploadTime.Round(100*time.Millisecond))
+			ic.read.Round(100*time.Millisecond), ic.wait.Round(100*time.Millisecond),
+			workers, perWorker(st.HashTime), perWorker(st.EncodeTime), perWorker(st.UploadTime))
 	}
 
 	// List each volume's files from the same snapshot, so the image can be
