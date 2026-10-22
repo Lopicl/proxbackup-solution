@@ -47,6 +47,8 @@ as a target and starts the console on `https://<pbs-host>:8077`. Sign in with a 
 
 - Settings (public URL, host names): `/etc/proxbackup/proxbackup.env`
 - `apt purge` removes the console and its token; backups stay in PBS.
+- Ports, firewall rules, hiding the console and PBS web UIs from PCs (nginx example), and hosts
+  with several interfaces: [docs/network.md](docs/network.md)
 
 **Standalone:**
 

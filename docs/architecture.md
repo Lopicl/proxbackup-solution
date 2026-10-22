@@ -294,7 +294,8 @@ read on every run.
 * **Listener.** One TLS port, `:8077`, serves the admin UI and API (session cookie + CSRF) and,
   under `/agent/`, the agent API (mTLS, client certs from the internal CA). The TLS handshake
   asks for a client certificate without requiring one, so browsers and enrollment (server auth
-  only) work on the same port. `-agent-addr` can still split the agent API onto its own port.
+  only) work on the same port. `-agent-addr` can still split the agent API onto its own port
+  (firewall setup: [network.md](network.md)).
 * **Installed on the PBS host** (`.deb`, `packaging/deb`). The package creates the admin token
   `root@pam!proxbackup-console` with `proxmox-backup-manager`, and runs the console as the system
   user `proxbackup`, which can read the token secret. With `-local-pbs` the console registers
