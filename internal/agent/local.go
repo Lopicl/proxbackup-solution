@@ -214,7 +214,7 @@ func (r *Runner) handleLocal(ctx context.Context, peer *ipc.Peer, req ipc.Reques
 }
 
 func (r *Runner) localStatus(peer *ipc.Peer) *ipc.Status {
-	st := &ipc.Status{Version: r.version, Client: r.cfg.ClientName, Server: r.cfg.ServerURL, User: peer.User, Admin: peer.Admin,
+	st := &ipc.Status{Version: r.version, Client: r.cfg.ClientName, Server: r.serverURL(), User: peer.User, Admin: peer.Admin,
 		Jobs: []ipc.Job{}, Recent: []ipc.RunInfo{}}
 	st.Exe, _ = os.Executable()
 	st.PausedUntil, st.PausedBy = r.pauseInfo()
@@ -287,7 +287,7 @@ func (r *Runner) restoreLink(ctx context.Context, peer *ipc.Peer) (string, error
 	var resp api.RestoreSessionResponse
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if err := postJSON(ctx, r.hc, r.cfg.ServerURL+"/agent/v1/restore-sessions", req, &resp); err != nil {
+	if err := postJSON(ctx, r.hc, r.serverURL()+"/agent/v1/restore-sessions", req, &resp); err != nil {
 		kept.Close()
 		return "", fmt.Errorf("the ProxBackup Console is unreachable: %w", err)
 	}

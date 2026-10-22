@@ -193,6 +193,9 @@ type PollResponse struct {
 	Cancel []int64      `json:"cancel"`
 	// Update offers a newer agent; the agent installs it when idle.
 	Update *AgentUpdate `json:"update,omitempty"`
+	// ServerURL is the console's current agent-facing URL (PROXBACKUP_PUBLIC_URL).
+	// Agents enrolled under another URL switch to it once it answers.
+	ServerURL string `json:"server_url,omitempty"`
 }
 
 // AgentUpdate describes an agent binary the server offers.

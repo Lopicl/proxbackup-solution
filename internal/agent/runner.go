@@ -46,6 +46,9 @@ type Runner struct {
 	local localState // tray app view (local.go)
 
 	trayErrs map[uint32]string // tray app launch failures by user session
+
+	urlMu     sync.Mutex // guards cfg.ServerURL/FallbackURL
+	moveTried map[string]time.Time
 }
 
 // task is one unit of work for the worker.
@@ -202,8 +205,87 @@ func (r *Runner) pollLoop(ctx context.Context) {
 }
 
 // pollOnce sends a heartbeat (long-polling up to wait seconds) and applies the
-// response: configuration updates, cancellations and on-demand jobs.
+// response: configuration updates, cancellations and on-demand jobs. If the
+// console is unreachable it tries the previous console URL, and it follows the
+// console to a new URL once that answers.
 func (r *Runner) pollOnce(ctx context.Context, wait int) error {
+	resp, err := r.poll(ctx, r.serverURL(), wait)
+	if err != nil {
+		if fb := r.fallbackURL(); fb != "" && ctx.Err() == nil {
+			fctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			resp, ferr := r.poll(fctx, fb, 0)
+			cancel()
+			if ferr == nil {
+				r.log.Warn("console unreachable; using its previous address", "url", fb, "err", err)
+				r.swapServer(fb)
+				r.followServer(ctx, resp.ServerURL)
+				return nil
+			}
+		}
+		return err
+	}
+	r.followServer(ctx, resp.ServerURL)
+	return nil
+}
+
+// followServer switches to the console URL the server announced once a poll
+// through it succeeds; the old URL stays as the fallback. Failed attempts are
+// retried every 10 minutes, so the old address must stay reachable meanwhile.
+func (r *Runner) followServer(ctx context.Context, to string) {
+	to = strings.TrimRight(to, "/")
+	if to == "" || to == r.serverURL() {
+		return
+	}
+	r.urlMu.Lock()
+	if t, ok := r.moveTried[to]; ok && time.Since(t) < 10*time.Minute {
+		r.urlMu.Unlock()
+		return
+	}
+	if r.moveTried == nil {
+		r.moveTried = map[string]time.Time{}
+	}
+	r.moveTried[to] = time.Now()
+	r.urlMu.Unlock()
+	pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if _, err := r.poll(pctx, to, 0); err != nil {
+		r.log.Warn("console moved, but its new address is unreachable; staying on the current one", "current", r.serverURL(), "new", to, "err", err)
+		return
+	}
+	r.log.Info("console moved; switching to its new address", "old", r.serverURL(), "new", to)
+	r.swapServer(to)
+}
+
+func (r *Runner) serverURL() string {
+	r.urlMu.Lock()
+	defer r.urlMu.Unlock()
+	return r.cfg.ServerURL
+}
+
+func (r *Runner) fallbackURL() string {
+	r.urlMu.Lock()
+	defer r.urlMu.Unlock()
+	if r.cfg.FallbackURL == r.cfg.ServerURL {
+		return ""
+	}
+	return r.cfg.FallbackURL
+}
+
+// swapServer makes to the active console URL and the current one the fallback.
+func (r *Runner) swapServer(to string) {
+	r.urlMu.Lock()
+	defer r.urlMu.Unlock()
+	if to == r.cfg.ServerURL {
+		return
+	}
+	r.cfg.ServerURL, r.cfg.FallbackURL = to, r.cfg.ServerURL
+	if err := r.cfg.save(); err != nil {
+		r.log.Error("saving the new console address", "err", err)
+	}
+}
+
+// poll does one poll against base and applies the response.
+func (r *Runner) poll(ctx context.Context, base string, wait int) (*api.PollResponse, error) {
 	hostname, _ := os.Hostname()
 	req := api.PollRequest{
 		Hostname: hostname, OS: osDescription(), AgentVersion: r.version, RunningRuns: r.runningIDs(),
@@ -212,8 +294,8 @@ func (r *Runner) pollOnce(ctx context.Context, wait int) error {
 	req.PausedUntil, req.PausedBy = r.pauseInfo()
 	req.TrayError = r.trayError()
 	var resp api.PollResponse
-	if err := postJSON(ctx, r.hc, fmt.Sprintf("%s/agent/v1/poll?wait=%d", r.cfg.ServerURL, wait), req, &resp); err != nil {
-		return err
+	if err := postJSON(ctx, r.hc, fmt.Sprintf("%s/agent/v1/poll?wait=%d", base, wait), req, &resp); err != nil {
+		return nil, err
 	}
 	r.setOnline(true)
 	if resp.Config != nil {
@@ -245,7 +327,7 @@ func (r *Runner) pollOnce(ctx context.Context, wait int) error {
 	if resp.Update != nil {
 		r.maybeUpdate(ctx, resp.Update)
 	}
-	return nil
+	return &resp, nil
 }
 
 // setTrayError records (msg != "") or clears a tray app launch failure.
@@ -410,12 +492,12 @@ func (r *Runner) execute(parent context.Context, t task) {
 
 func (r *Runner) register(ctx context.Context, reg *api.RunRegister) (int64, error) {
 	var resp api.RunRegisterResponse
-	if err := postJSON(ctx, r.hc, r.cfg.ServerURL+"/agent/v1/runs", reg, &resp); err != nil {
+	if err := postJSON(ctx, r.hc, r.serverURL()+"/agent/v1/runs", reg, &resp); err != nil {
 		return 0, err
 	}
 	return resp.RunID, nil
 }
 
 func (r *Runner) postEvents(ctx context.Context, runID int64, events []api.Event) error {
-	return postJSON(ctx, r.hc, fmt.Sprintf("%s/agent/v1/runs/%d/events", r.cfg.ServerURL, runID), events, nil)
+	return postJSON(ctx, r.hc, fmt.Sprintf("%s/agent/v1/runs/%d/events", r.serverURL(), runID), events, nil)
 }

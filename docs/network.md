@@ -27,7 +27,10 @@ Then `systemctl restart proxbackup-server`.
 
 - The public URL's host must be listed in `PROXBACKUP_HOSTNAMES`. Changing that list reissues the
   console certificate: reload open browser tabs and accept the new certificate.
-- Agents store the console URL at enrollment. PCs enrolled under an old URL need setup re-run.
+- Agents learn a changed `PROXBACKUP_PUBLIC_URL` with their next poll and switch once the new
+  address answers; the old one is kept as a fallback. Until every PC has switched (Clients →
+  *Last seen*), keep the old address listening as well: both variables take a comma separated
+  list, e.g. `PROXBACKUP_AGENT_ADDR=10.0.4.10:8078,10.0.9.10:8077`.
 - The tray's *Restore files…* opens the web UI on the UI port. If PCs can't reach it, self-service
   restore doesn't work for them.
 

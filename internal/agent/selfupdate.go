@@ -113,7 +113,7 @@ func (r *Runner) download(ctx context.Context, u *api.AgentUpdate, dst string) e
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.cfg.ServerURL+u.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.serverURL()+u.URL, nil)
 	if err != nil {
 		return err
 	}

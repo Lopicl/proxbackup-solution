@@ -114,7 +114,8 @@ func (s *Server) handleCreateRestoreSession(w http.ResponseWriter, r *http.Reque
 func (s *Server) uiBaseURL(r *http.Request) string {
 	host := r.Host
 	if s.cfg.AgentAddr != "" && s.cfg.AgentAddr != s.cfg.UIAddr {
-		if _, port, err := net.SplitHostPort(s.cfg.UIAddr); err == nil {
+		uiAddr, _, _ := strings.Cut(s.cfg.UIAddr, ",")
+		if _, port, err := net.SplitHostPort(strings.TrimSpace(uiAddr)); err == nil {
 			h := host
 			if hh, _, err := net.SplitHostPort(host); err == nil {
 				h = hh

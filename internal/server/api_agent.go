@@ -189,7 +189,8 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 			c = fresh // e.g. moved to another namespace while this poll waited
 		}
 		offer := s.updater.agentOffer(ctx, c.ID, req.OS, req.AgentVersion)
-		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID), Update: offer}
+		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID), Update: offer,
+			ServerURL: strings.TrimRight(s.cfg.PublicURL, "/")}
 		cfg, err := s.agentConfig(ctx, c)
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err)

@@ -59,7 +59,7 @@ if [ ! -f "$ENV_FILE" ]; then
 PROXBACKUP_PUBLIC_URL=https://$fqdn:$PORT
 PROXBACKUP_HOSTNAMES=$hosts
 
-# Web UI and agent API.
+# Web UI and agent API (comma separated for several addresses).
 PROXBACKUP_LISTEN=:$PORT
 
 # Running on this PBS: register its datastores and accept PBS admin logins.

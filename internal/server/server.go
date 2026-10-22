@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,8 +25,8 @@ import (
 // Config configures the management server.
 type Config struct {
 	DataDir   string
-	UIAddr    string   // admin UI + API, e.g. ":8077"
-	AgentAddr string   // separate agent mTLS endpoint; empty = served on UIAddr
+	UIAddr    string   // admin UI + API, e.g. ":8077"; comma separated for several
+	AgentAddr string   // separate agent mTLS endpoint(s); empty = served on UIAddr
 	PublicURL string   // URL agents use to reach the agent API, e.g. "https://backup.example.com:8077"
 	Hostnames []string // extra SANs for the server certificate
 	Version   string
@@ -110,9 +111,16 @@ func (s *Server) Run(ctx context.Context) error {
 		mux := http.NewServeMux()
 		mux.Handle("/agent/", agent)
 		mux.Handle("/", ui)
-		servers = append(servers, &http.Server{Addr: s.cfg.UIAddr, Handler: mux})
+		for _, a := range splitAddrs(s.cfg.UIAddr) {
+			servers = append(servers, &http.Server{Addr: a, Handler: mux})
+		}
 	} else {
-		servers = append(servers, &http.Server{Addr: s.cfg.UIAddr, Handler: ui}, &http.Server{Addr: s.cfg.AgentAddr, Handler: agent})
+		for _, a := range splitAddrs(s.cfg.UIAddr) {
+			servers = append(servers, &http.Server{Addr: a, Handler: ui})
+		}
+		for _, a := range splitAddrs(s.cfg.AgentAddr) {
+			servers = append(servers, &http.Server{Addr: a, Handler: agent})
+		}
 	}
 	errc := make(chan error, len(servers))
 	for _, hs := range servers {
@@ -139,7 +147,23 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
+// splitAddrs splits a comma separated listen address list, e.g. to keep the
+// old address up while agents move to a new PROXBACKUP_PUBLIC_URL.
+func splitAddrs(s string) []string {
+	var out []string
+	for _, a := range strings.Split(s, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			out = append(out, a)
+		}
+	}
+	if len(out) == 0 {
+		return []string{s}
+	}
+	return out
+}
+
 func displayAddr(a string) string {
+	a, _, _ = strings.Cut(a, ",")
 	if len(a) > 0 && a[0] == ':' {
 		return "localhost" + a
 	}

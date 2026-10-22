@@ -26,9 +26,12 @@ import (
 
 // Config is the persisted agent state.
 type Config struct {
-	ServerURL  string `json:"server_url"`
-	ClientID   int64  `json:"client_id"`
-	ClientName string `json:"client_name"`
+	ServerURL string `json:"server_url"`
+	// FallbackURL is the console URL used before the last switch (see
+	// Runner.moveServer); tried when ServerURL is unreachable.
+	FallbackURL string `json:"fallback_url,omitempty"`
+	ClientID    int64  `json:"client_id"`
+	ClientName  string `json:"client_name"`
 
 	dir string
 }

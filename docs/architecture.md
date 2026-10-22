@@ -206,7 +206,10 @@ read on every run.
   with their schedules. The agent stores it in `jobs.json` (0600). Saving a job in the UI wakes
   the poll, so changes arrive within seconds when the PC is online. At startup the agent tries a
   quick sync (≤10 s) before its first schedule check, so changes made while the PC was off take
-  effect immediately.
+  effect immediately. Every poll reply also carries the console's `PROXBACKUP_PUBLIC_URL`; when
+  it differs from the URL in `agent.json`, the agent polls the new one and switches once it
+  answers (retrying every 10 min otherwise), keeping the old URL as a fallback for when the new
+  one is unreachable.
 * **Group jobs.** Every backup job is a group job: one definition (type, sources, excludes,
   schedule, window, catch-up, retention, lock, change detection, encryption) assigned to
   clients chosen by name and/or by client tag (`*` = all clients, so newly enrolled PCs join).

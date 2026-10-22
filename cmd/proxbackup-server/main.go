@@ -46,8 +46,8 @@ func main() {
 	var local server.LocalPBS
 	var localPBS bool
 	flag.StringVar(&cfg.DataDir, "data-dir", envOr("PROXBACKUP_DATA_DIR", "/var/lib/proxbackup"), "data directory (database, CA, keys)")
-	flag.StringVar(&cfg.UIAddr, "listen", envOr("PROXBACKUP_LISTEN", ":8077"), "listen address for the web UI and the agent API")
-	flag.StringVar(&cfg.AgentAddr, "agent-addr", os.Getenv("PROXBACKUP_AGENT_ADDR"), "optional separate listen address for the agent API (mTLS)")
+	flag.StringVar(&cfg.UIAddr, "listen", envOr("PROXBACKUP_LISTEN", ":8077"), "listen address(es, comma separated) for the web UI and the agent API")
+	flag.StringVar(&cfg.AgentAddr, "agent-addr", os.Getenv("PROXBACKUP_AGENT_ADDR"), "optional separate listen address(es, comma separated) for the agent API (mTLS)")
 	flag.StringVar(&cfg.PublicURL, "public-url", os.Getenv("PROXBACKUP_PUBLIC_URL"), "agent-facing URL, e.g. https://backup.example.com:8077")
 	flag.StringVar(&hosts, "hostnames", os.Getenv("PROXBACKUP_HOSTNAMES"), "comma separated host names/IPs for the server certificate")
 	flag.BoolVar(&localPBS, "local-pbs", os.Getenv("PROXBACKUP_LOCAL_PBS") == "1", "running on the PBS host: register its datastores and allow PBS admin logins")
