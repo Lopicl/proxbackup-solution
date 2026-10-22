@@ -2,7 +2,7 @@
 
 import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { api, setUnauthorizedHandler, type Me } from './api'
+import { api, ApiError, setReachableHandler, setUnauthorizedHandler, UNREACHABLE, type Me } from './api'
 import { ErrorBox, Field, Modal } from './ui'
 import { Dashboard } from './pages/Dashboard'
 import { Clients } from './pages/Clients'
@@ -180,11 +180,28 @@ function ProfileMenu({ me, onSettings, onLogout }: { me: Me; onSettings: () => v
   )
 }
 
+/** Pinned over every page while API requests fail without a response. */
+function Unreachable() {
+  const [down, setDown] = useState(false)
+  useEffect(() => setReachableHandler((ok) => setDown(!ok)), [])
+  if (!down) return null
+  return (
+    <div className="unreachable" role="alert">
+      <span>{UNREACHABLE}</span>
+      <button className="primary" onClick={() => location.reload()}>
+        Reload
+      </button>
+    </div>
+  )
+}
+
 function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined)
   const [profileOpen, setProfileOpen] = useState(false)
   const route = useHashRoute()
-  const loadMe = () => api.me().then(setMe, () => setMe(null))
+  // Unreachable keeps the current page (the banner explains); only a real
+  // answer from the console logs out.
+  const loadMe = () => api.me().then(setMe, (e) => setMe((m) => (e instanceof ApiError && e.status === 0 && m ? m : null)))
   // A PC user's restore page from the tray icon: authenticated by its token, no login.
   const selfRestore = route.startsWith('/restore/') ? route.slice('/restore/'.length) : ''
   useEffect(() => {
@@ -267,6 +284,7 @@ function App() {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <Unreachable />
     <App />
   </StrictMode>,
 )

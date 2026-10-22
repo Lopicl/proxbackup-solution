@@ -314,9 +314,32 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn
 }
 
+// fetch only rejects when no response came back at all. The usual cause is a
+// console restarted with a new self-signed certificate (PROXBACKUP_HOSTNAMES
+// changed): the browser accepted the old one and now fails every request
+// until the page is reloaded and the new certificate accepted.
+export const UNREACHABLE = "Can't reach the console — its certificate may have changed. Reload the page."
+
+let onReachable: (ok: boolean) => void = () => {}
+export function setReachableHandler(fn: (ok: boolean) => void) {
+  onReachable = fn
+}
+
+async function send(path: string, init: RequestInit): Promise<Response> {
+  let res: Response
+  try {
+    res = await fetch('/api' + path, init)
+  } catch {
+    onReachable(false)
+    throw new ApiError(0, UNREACHABLE)
+  }
+  onReachable(true)
+  return res
+}
+
 // Saves a GET response through the browser (errors come back as JSON).
 async function download(path: string, filename: string) {
-  const res = await fetch('/api' + path, { credentials: 'same-origin' })
+  const res = await send(path, { credentials: 'same-origin' })
   if (!res.ok) {
     const data = await res.json().catch(() => null)
     if (res.status === 401) onUnauthorized()
@@ -331,7 +354,7 @@ async function download(path: string, filename: string) {
 }
 
 async function request<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
-  const res = await fetch('/api' + path, {
+  const res = await send(path, {
     method,
     credentials: 'same-origin',
     headers: {

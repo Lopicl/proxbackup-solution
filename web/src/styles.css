@@ -205,3 +205,5 @@ pre.copy { background: var(--bg); padding: 12px; border-radius: 6px; white-space
 .inline-input { display: inline-flex; align-items: center; gap: 8px; }
 .inline-input input { width: 5.5em; padding: 3px 8px; }
 input.narrow { width: 8em; }
+.unreachable { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; align-items: center; gap: 12px; background: var(--bad); color: #fff; padding: 10px 14px; border-radius: 8px; box-shadow: 0 4px 16px #0004; max-width: calc(100vw - 24px); }
+.unreachable button { flex: none; background: #fff; color: var(--bad); border-color: #fff; }
