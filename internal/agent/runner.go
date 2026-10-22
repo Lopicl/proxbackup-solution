@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +44,8 @@ type Runner struct {
 	updateFailedAt time.Time
 
 	local localState // tray app view (local.go)
+
+	trayErrs map[uint32]string // tray app launch failures by user session
 }
 
 // task is one unit of work for the worker.
@@ -95,7 +99,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	go r.scheduleLoop(ctx)
 	go r.spoolLoop(ctx)
 	go r.serveLocal(ctx)
-	go launchTrays(ctx, r.log)
+	go launchTrays(ctx, r.log, r.setTrayError)
 	r.pollLoop(ctx)
 	return ctx.Err()
 }
@@ -206,6 +210,7 @@ func (r *Runner) pollOnce(ctx context.Context, wait int) error {
 		ConfigRev: r.sched.Rev(), Schedule: r.sched.States(), TimeZone: time.Now().Format("MST -07:00"),
 	}
 	req.PausedUntil, req.PausedBy = r.pauseInfo()
+	req.TrayError = r.trayError()
 	var resp api.PollResponse
 	if err := postJSON(ctx, r.hc, fmt.Sprintf("%s/agent/v1/poll?wait=%d", r.cfg.ServerURL, wait), req, &resp); err != nil {
 		return err
@@ -241,6 +246,32 @@ func (r *Runner) pollOnce(ctx context.Context, wait int) error {
 		r.maybeUpdate(ctx, resp.Update)
 	}
 	return nil
+}
+
+// setTrayError records (msg != "") or clears a tray app launch failure.
+func (r *Runner) setTrayError(session uint32, msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if msg == "" {
+		delete(r.trayErrs, session)
+		return
+	}
+	if r.trayErrs == nil {
+		r.trayErrs = map[uint32]string{}
+	}
+	r.trayErrs[session] = msg
+}
+
+// trayError is the tray app launch failures for the poll ("" = none).
+func (r *Runner) trayError() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	msgs := make([]string, 0, len(r.trayErrs))
+	for _, m := range r.trayErrs {
+		msgs = append(msgs, m)
+	}
+	sort.Strings(msgs)
+	return strings.Join(msgs, "; ")
 }
 
 func (r *Runner) runningIDs() []int64 {

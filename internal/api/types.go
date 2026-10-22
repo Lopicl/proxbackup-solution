@@ -181,6 +181,9 @@ type PollRequest struct {
 	// backups from the tray app until then; PausedBy is their account.
 	PausedUntil int64  `json:"paused_until,omitempty"`
 	PausedBy    string `json:"paused_by,omitempty"`
+	// TrayError: the service can't start the tray app in a user session
+	// ("" = fine). See the agent log in %ProgramData%\proxbackup\logs.
+	TrayError string `json:"tray_error,omitempty"`
 }
 
 // PollResponse carries config updates, on-demand work and cancellations.

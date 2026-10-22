@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -89,7 +90,18 @@ func main() {
 		os.Exit(tray.Run(version, *dataDir, *replace))
 	case "run", "install", "uninstall", "start", "stop":
 		fs.Parse(args)
-		err = serviceCommand(cmd, *dataDir, log)
+		if cmd == "run" {
+			// The service has no console: also log to <data dir>\logs\agent.log.
+			if lf, lerr := agent.OpenLogFile(*dataDir); lerr == nil {
+				defer lf.Close()
+				log = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, lf), nil))
+			} else {
+				log.Warn("can't open the log file; logging to stderr only", "err", lerr)
+			}
+		}
+		if err = serviceCommand(cmd, *dataDir, log); err != nil && cmd == "run" {
+			log.Error("agent stopped", "err", err)
+		}
 	case "backup", "image", "restore":
 		err = adhoc(cmd, fs, args, dataDir)
 	default:
@@ -116,10 +128,12 @@ type program struct {
 func (p *program) Start(service.Service) error {
 	cfg, err := agent.LoadConfig(p.dataDir)
 	if err != nil {
+		p.log.Error("can't load the agent configuration", "err", err)
 		return err
 	}
 	r, err := agent.NewRunner(cfg, version, p.log)
 	if err != nil {
+		p.log.Error("can't start the agent", "err", err)
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())

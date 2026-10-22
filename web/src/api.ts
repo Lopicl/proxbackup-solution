@@ -81,6 +81,7 @@ export interface Client {
   encryption_created: number
   paused_until: number // scheduled backups paused from the tray app until then (unix s; compare with now)
   paused_by: string
+  tray_error: string // the agent can't start the tray app on the PC ('' = fine)
   revoked: boolean
   revoked_at: number
   restorable: boolean // revoked and can be un-revoked (its agent reconnects)

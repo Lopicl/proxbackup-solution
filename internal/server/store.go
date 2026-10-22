@@ -136,6 +136,8 @@ func (s *Store) migrate() error {
 		// Scheduled backups paused by a PC user from the tray app.
 		{"clients", "paused_until", "INTEGER NOT NULL DEFAULT 0"},
 		{"clients", "paused_by", "TEXT NOT NULL DEFAULT ''"},
+		// The agent can't start its tray app (as last reported).
+		{"clients", "tray_error", "TEXT NOT NULL DEFAULT ''"},
 		// Revoked clients can be restored: when, the certificate serial the agent
 		// still holds, and the jobs that were enabled.
 		{"clients", "revoked_at", "INTEGER NOT NULL DEFAULT 0"},
@@ -261,6 +263,8 @@ type Client struct {
 	// tray app until then (as last reported; check against the time).
 	PausedUntil int64  `json:"paused_until"`
 	PausedBy    string `json:"paused_by"`
+	// TrayError: the agent can't start the tray app on the PC ("" = fine).
+	TrayError string `json:"tray_error"`
 	// AgentUpdate is the version the agent can be updated to (the console's), and
 	// AgentUpdatePushed whether an admin pushed it and the agent hasn't fetched it yet.
 	AgentUpdate       string `json:"agent_update,omitempty"`
@@ -498,7 +502,7 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
 	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags, paused_until, paused_by,
-	revoked_at, revoked_serial, revoked_jobs`
+	tray_error, revoked_at, revoked_serial, revoked_jobs`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
@@ -506,7 +510,7 @@ func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
 		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags, &c.PausedUntil, &c.PausedBy,
-		&c.RevokedAt, &c.revokedSerial, &revJobs)
+		&c.TrayError, &c.RevokedAt, &c.revokedSerial, &revJobs)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -586,8 +590,8 @@ func (s *Store) MoveClientNamespace(ctx context.Context, c *Client, ns string) e
 func (s *Store) TouchClient(ctx context.Context, id int64, req api.PollRequest) {
 	sched, _ := json.Marshal(nonNilStates(req.Schedule))
 	s.db.ExecContext(ctx, `UPDATE clients SET last_seen=?, hostname=?, os=?, agent_version=?, config_rev=?, schedule_state=?, time_zone=?,
-		paused_until=?, paused_by=? WHERE id=?`, now(), req.Hostname, req.OS, req.AgentVersion, req.ConfigRev, sched, req.TimeZone,
-		req.PausedUntil, req.PausedBy, id)
+		paused_until=?, paused_by=?, tray_error=? WHERE id=?`, now(), req.Hostname, req.OS, req.AgentVersion, req.ConfigRev, sched, req.TimeZone,
+		req.PausedUntil, req.PausedBy, req.TrayError, id)
 }
 
 // SetClientKey stores a new encryption key for a client that has none. It

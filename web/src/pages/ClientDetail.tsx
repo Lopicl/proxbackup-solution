@@ -159,6 +159,11 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
             </b>
           </span>
         )}
+        {c.tray_error && (
+          <span title="Reported by the agent service. Details are in its log on the PC: %ProgramData%\proxbackup\logs\agent.log">
+            Tray icon <b className="warn-text">{c.tray_error}</b>
+          </span>
+        )}
         <span title="Schedules are evaluated by the agent on the PC's own clock">
           PC time zone <b>{c.time_zone || '—'}</b>
         </span>

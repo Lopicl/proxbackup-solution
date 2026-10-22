@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -19,8 +20,9 @@ import (
 // launchTrays starts the tray app ("proxbackup-agent tray") in every active
 // user session, as that user, and again after a crash or an agent update. It
 // is the same executable, so self-update keeps both in step. A user who quits
-// the tray gets it back at their next logon.
-func launchTrays(ctx context.Context, log *slog.Logger) {
+// the tray gets it back at their next logon. Failures are passed to setErr
+// per session (0: listing sessions), and cleared with "".
+func launchTrays(ctx context.Context, log *slog.Logger, setErr func(session uint32, msg string)) {
 	exe, err := os.Executable()
 	if err != nil {
 		return
@@ -45,6 +47,9 @@ func launchTrays(ctx context.Context, log *slog.Logger) {
 		sessions, err := userSessions()
 		if err != nil {
 			log.Warn("listing user sessions", "err", err)
+			setErr(0, "can't list the user sessions to start the tray app: "+err.Error())
+		} else {
+			setErr(0, "")
 		}
 		for id, p := range procs {
 			if _, ok := sessions[id]; !ok { // logged off
@@ -52,6 +57,7 @@ func launchTrays(ctx context.Context, log *slog.Logger) {
 					windows.CloseHandle(p.h)
 				}
 				delete(procs, id)
+				setErr(id, "")
 			}
 		}
 		now := time.Now()
@@ -59,7 +65,10 @@ func launchTrays(ctx context.Context, log *slog.Logger) {
 			p := procs[id]
 			if p != nil && p.h != 0 {
 				if ev, _ := windows.WaitForSingleObject(p.h, 0); ev == uint32(windows.WAIT_TIMEOUT) {
-					continue // running
+					if now.Sub(p.started) >= time.Minute {
+						setErr(id, "") // up and running
+					}
+					continue
 				}
 				var code uint32
 				windows.GetExitCodeProcess(p.h, &code)
@@ -68,11 +77,13 @@ func launchTrays(ctx context.Context, log *slog.Logger) {
 				switch code {
 				case ipc.TrayExitQuit, ipc.TrayExitDuplicate:
 					p.done = true
+					setErr(id, "")
 				case ipc.TrayExitRestart:
 				default:
 					if now.Sub(p.started) < time.Minute {
 						p.retryAt = now.Add(5 * time.Minute) // crashing at start: don't spin
 						log.Warn("tray app exited", "session", id, "code", code)
+						setErr(id, fmt.Sprintf("the tray app in user session %d exited right after starting (exit code %#x)", id, code))
 					}
 				}
 			}
@@ -85,6 +96,7 @@ func launchTrays(ctx context.Context, log *slog.Logger) {
 			}
 			if err != nil {
 				log.Warn("starting the tray app", "session", id, "err", err)
+				setErr(id, fmt.Sprintf("can't start the tray app in user session %d: %v", id, err))
 				procs[id] = &trayProc{retryAt: now.Add(time.Minute)}
 				continue
 			}

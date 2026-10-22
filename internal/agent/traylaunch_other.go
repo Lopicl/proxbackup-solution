@@ -10,4 +10,4 @@ import (
 )
 
 // launchTrays: the tray app is Windows-only.
-func launchTrays(context.Context, *slog.Logger) {}
+func launchTrays(context.Context, *slog.Logger, func(uint32, string)) {}

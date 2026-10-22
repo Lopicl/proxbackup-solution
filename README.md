@@ -106,6 +106,11 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
   Administrators can restore anything; other users only their own profile folder, written with
   their own Windows permissions.
 
+### Troubleshooting
+
+The agent service logs to `%ProgramData%\proxbackup\logs\agent.log` (rotated at 5 MiB, 3 old files
+kept). If it can't start the tray icon in a user session, the client page in the console says so.
+
 ### Ad-hoc use without a console
 
 Handy for testing:
