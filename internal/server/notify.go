@@ -230,8 +230,8 @@ func sendMail(ns NotifySettings, pass, subject, body string) error {
 		}
 	}
 	if ns.SMTPUser != "" {
-		if err := c.Auth(smtp.PlainAuth("", ns.SMTPUser, pass, ns.SMTPHost)); err != nil {
-			return err
+		if err := c.Auth(smtpAuth(c, ns.SMTPUser, pass, ns.SMTPHost)); err != nil {
+			return fmt.Errorf("auth: %w", err)
 		}
 	}
 	if err := c.Mail(ns.SMTPFrom); err != nil {
@@ -253,6 +253,52 @@ func sendMail(ns NotifySettings, pass, subject, body string) error {
 		return err
 	}
 	return c.Quit()
+}
+
+// smtpAuth picks a mechanism the server advertises. PLAIN is preferred;
+// LOGIN covers servers without it, e.g. Azure Communication Services
+// (smtp.azurecomm.net) and Exchange Online, which answer AUTH PLAIN with
+// "504 5.7.4 Unrecognized authentication type".
+func smtpAuth(c *smtp.Client, user, pass, host string) smtp.Auth {
+	if ok, mechs := c.Extension("AUTH"); ok {
+		var plain, login bool
+		for _, m := range strings.Fields(strings.ToUpper(mechs)) {
+			plain = plain || m == "PLAIN"
+			login = login || m == "LOGIN"
+		}
+		if login && !plain {
+			return &loginAuth{user: user, pass: pass, host: host}
+		}
+	}
+	return smtp.PlainAuth("", user, pass, host)
+}
+
+// loginAuth implements AUTH LOGIN, which net/smtp lacks.
+type loginAuth struct{ user, pass, host string }
+
+func (a *loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	// Same rule as smtp.PlainAuth: never send credentials in clear text,
+	// except to localhost.
+	if !server.TLS && a.host != "localhost" && a.host != "127.0.0.1" && a.host != "::1" {
+		return "", nil, errors.New("unencrypted connection")
+	}
+	if server.Name != a.host {
+		return "", nil, errors.New("wrong host name")
+	}
+	return "LOGIN", nil, nil
+}
+
+func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if !more {
+		return nil, nil
+	}
+	switch p := strings.ToLower(strings.TrimSpace(string(fromServer))); {
+	case strings.HasPrefix(p, "user"):
+		return []byte(a.user), nil
+	case strings.HasPrefix(p, "pass"):
+		return []byte(a.pass), nil
+	}
+	return nil, fmt.Errorf("unexpected LOGIN challenge %q", fromServer)
 }
 
 func humanBytes(b uint64) string {
