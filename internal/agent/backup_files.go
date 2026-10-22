@@ -84,7 +84,10 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 	}
 
 	excl := NewExcluder(append(append([]string{}, DefaultExcludes...), j.spec.Excludes...))
-	cat := j.newCatalog()
+	cat := j.noCatalog()
+	if mode == changeLegacy {
+		cat = j.newCatalog()
+	}
 	defer cat.Close()
 	j.setPhase("upload")
 	for _, src := range sources {

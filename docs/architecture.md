@@ -167,10 +167,10 @@ read on every run.
   spec without `change_detection` (older console) means v1. Browsing and restoring v2 needs
   PBS 3.3 or later: the console reads the PBS version per target (cached for an hour) and
   sends `legacy` to agents of older servers.
-* **Catalog.** File backups still upload `catalog.pcat1.didx`, listing the `.mpxar` as the
-  archive. The PBS GUI can browse split archives through the `.mpxar` alone; whether the
-  catalog can be dropped for v2 is an open phase 2 decision. The console's restore browser
-  reads the catalog too, so dropping it means the browser has to read the `.mpxar` instead.
+* **Catalog.** v2 file backups upload no `catalog.pcat1.didx`, like `proxmox-backup-client`
+  in `data`/`metadata` mode. PBS lists split archives from the `.mpxar` (its catalog API
+  with `archive-name`), and the console's restore browser downloads each `.mpxar.didx` and
+  turns it into a catalog itself. Older v2 snapshots that do have a catalog keep using it.
 * **Validation.** Unit tests round-trip v2 archives and run the reuse path over 10
   generations of edits. The E2E suite builds a v2 snapshot from injected chunks on PBS 4.2,
   restores it, extracts a reused and a new file through PBS's own `pxar-file-download`, and
@@ -239,23 +239,24 @@ read on every run.
   Afterwards it lists the volume's files from the same shadow copy into the catalog, so the
   image can be browsed in the PBS GUI like a file backup (downloads need a pxar archive, so
   per-file restore from images is not possible there; see *File restore from images*).
-* **Catalog.** Every snapshot carries `catalog.pcat1.didx`, the file list the PBS GUI file
-  browser reads. Its root holds one folder per archive. File backups fill it while encoding the
-  pxar; a catalog failure only costs browsability, never the backup.
+* **Catalog.** Image and v1 file snapshots carry `catalog.pcat1.didx`, the file list the PBS
+  GUI file browser reads. Its root holds one folder per archive. v1 file backups fill it while
+  encoding the pxar; a catalog failure only costs browsability, never the backup. v2 (split)
+  file snapshots have none (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)).
   Whole-disk restore of a dead machine goes through the Linux-based recovery image (see
   [Bare-metal recovery](#bare-metal-recovery), roadmap phase 4).
 * **Restore.** The agent opens a reader session, downloads the index, fetches chunks on
   demand, decodes pxar, and writes files to the original or an alternate path. The overwrite
   policy (`skip`, `overwrite` or `if-newer`) is chosen per restore.
 * **Restore browser** *(phase 2, implemented)*. The web UI browses a snapshot's
-  `catalog.pcat1.didx` and restores the ticked files and folders, one restore run per archive.
+  `catalog.pcat1.didx` (for v2, a catalog the console builds from the `.mpxar.didx` archives) and restores the ticked files and folders, one restore run per archive.
   The console reads the catalog itself (`GET /api/clients/{id}/catalog`) with the target's
   admin token and, for encrypted snapshots, the escrowed client key. It downloads the catalog
   once into a temp file and keeps it while it is browsed (10 minutes idle, at most 8 open).
   "Original location" maps each archive back to its source through the client's current
   jobs (same naming as the agent: `api.SourceArchives`, `api.VolumeArchive`), so an archive
   whose source was removed from the job can only go to another folder. Snapshots without a
-  catalog keep the per-archive restore dialog with typed paths.
+  catalog or `.mpxar` keep the per-archive restore dialog with typed paths.
 * **File restore from images** *(phase 2, implemented)*. Restoring an `.img.fidx` archive with
   paths selected reads the NTFS file system inside the image instead of writing the whole
   volume. `pkg/ntfs` is a read-only NTFS reader over an `io.ReaderAt`; `pkg/pbs`
@@ -642,7 +643,7 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, pxar v2 split archives with metadata change detection (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)), buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
-| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, ✅ tray app (status, back up now, pause, recent runs, self-service restore page scoped to the user's profile for non-admins), ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, bandwidth limits, metered-network/battery awareness, immutable backups (✅ lock via the PBS `protected` flag while retention keeps a snapshot, ✅ tamper-resistant retention; see [Security model](#security-model)), decide whether pxar v2 file backups still need `catalog.pcat1.didx` |
+| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, ✅ tray app (status, back up now, pause, recent runs, self-service restore page scoped to the user's profile for non-admins), ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, bandwidth limits, metered-network/battery awareness, immutable backups (✅ lock via the PBS `protected` flag while retention keeps a snapshot, ✅ tamper-resistant retention; see [Security model](#security-model)), ✅ no `catalog.pcat1.didx` for pxar v2 file backups (browsed through the `.mpxar`) |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness, immutable off-host copy (guided pull-sync to a second PBS; see [Security model](#security-model)) |

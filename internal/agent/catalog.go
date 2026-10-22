@@ -35,6 +35,15 @@ func (j *job) newCatalog() *catalog {
 	return c
 }
 
+// noCatalog is a catalog that is neither written nor uploaded. Split (v2)
+// archives don't need one: like proxmox-backup-client, which uploads no catalog
+// in data or metadata mode, PBS and the console browse their .mpxar.didx.
+func (j *job) noCatalog() *catalog {
+	c := &catalog{j: j}
+	c.CatalogWriter, _ = pbs.NewCatalogWriter(io.Discard)
+	return c
+}
+
 func (c *catalog) Close() {
 	if c.f != nil {
 		c.f.Close()

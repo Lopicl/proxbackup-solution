@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,18 +20,20 @@ import (
 
 	"proxbackup/internal/api"
 	"proxbackup/pkg/pbs"
+	"proxbackup/pkg/pxar"
 )
 
-// The restore browser lists a snapshot's catalog.pcat1.didx. A catalog is
-// downloaded once into a temp file and kept while it is being browsed, so
-// opening a folder doesn't start a PBS reader session each time.
+// The restore browser lists a snapshot's catalog.pcat1.didx or, for split
+// (v2) archives, which have none, a catalog built from their .mpxar.didx. A
+// catalog is downloaded once into a temp file and kept while it is being
+// browsed, so opening a folder doesn't start a PBS reader session each time.
 
 const (
 	catalogIdle    = 10 * time.Minute
 	catalogMaxOpen = 8
 )
 
-var errNoCatalog = errors.New("this snapshot has no file catalog (it was taken by an older agent, or building the catalog failed)")
+var errNoCatalog = errors.New("this snapshot has no file catalog or .mpxar archive (it was taken by an older agent, or building the catalog failed)")
 
 type catalogCache struct {
 	mu      sync.Mutex
@@ -242,29 +245,128 @@ func (s *Server) downloadCatalog(ctx context.Context, t *Target, c *Client, ref 
 		return nil, err
 	}
 	i := slices.IndexFunc(m.Files, func(f pbs.FileInfo) bool { return f.Filename == pbs.CatalogArchiveName })
+	var meta []*pbs.FileInfo
 	if i < 0 {
-		return nil, errNoCatalog
+		// Split (v2) archives come without a catalog, like proxmox-backup-client
+		// makes them: the listing is built from their metadata archives.
+		for k := range m.Files {
+			if strings.HasSuffix(m.Files[k].Filename, ".mpxar.didx") {
+				meta = append(meta, &m.Files[k])
+			}
+		}
+		if len(meta) == 0 {
+			return nil, errNoCatalog
+		}
+	} else {
+		meta = []*pbs.FileInfo{&m.Files[i]}
 	}
-	if m.Files[i].CryptMode == "encrypt" && crypt == nil {
-		return nil, fmt.Errorf("snapshot %s is encrypted (key %s), but this client has no encryption key", ref, m.KeyFingerprint())
-	}
-	idx, err := rs.Index(ctx, pbs.CatalogArchiveName, &m.Files[i])
-	if err != nil {
-		return nil, err
+	for _, fi := range meta {
+		if fi.CryptMode == "encrypt" && crypt == nil {
+			return nil, fmt.Errorf("snapshot %s is encrypted (key %s), but this client has no encryption key", ref, m.KeyFingerprint())
+		}
 	}
 	f, err := os.CreateTemp("", "proxbackup-catalog-*")
 	if err != nil {
 		return nil, err
 	}
-	stream := rs.OpenIndex(ctx, idx, 4)
-	_, err = io.Copy(f, stream)
-	stream.Close()
+	if i >= 0 {
+		err = copyArchive(ctx, rs, f, meta[0])
+	} else {
+		err = buildCatalog(f, meta, func(fi *pbs.FileInfo, fn func(io.Reader) error) error {
+			return withArchive(ctx, rs, fi, fn)
+		})
+	}
 	if err != nil {
 		f.Close()
 		os.Remove(f.Name())
 		return nil, fmt.Errorf("download catalog: %w", err)
 	}
 	return f, nil
+}
+
+// withArchive calls fn with the decoded contents of the dynamic archive fi.
+func withArchive(ctx context.Context, rs *pbs.ReaderSession, fi *pbs.FileInfo, fn func(io.Reader) error) error {
+	idx, err := rs.Index(ctx, fi.Filename, fi)
+	if err != nil {
+		return err
+	}
+	stream := rs.OpenIndex(ctx, idx, 4)
+	defer stream.Close()
+	return fn(stream)
+}
+
+func copyArchive(ctx context.Context, rs *pbs.ReaderSession, w io.Writer, fi *pbs.FileInfo) error {
+	return withArchive(ctx, rs, fi, func(r io.Reader) error {
+		_, err := io.Copy(w, r)
+		return err
+	})
+}
+
+// buildCatalog writes a catalog of the split archives' metadata streams to w,
+// one root folder per archive, as the agent wrote it before v2 dropped it.
+func buildCatalog(w io.Writer, archives []*pbs.FileInfo, open func(*pbs.FileInfo, func(io.Reader) error) error) error {
+	cw, err := pbs.NewCatalogWriter(w)
+	if err != nil {
+		return err
+	}
+	for _, fi := range archives {
+		cw.StartDirectory(fi.Filename)
+		if err := open(fi, func(r io.Reader) error { return catalogMetadata(cw, r) }); err != nil {
+			return fmt.Errorf("%s: %w", fi.Filename, err)
+		}
+		if err := cw.EndDirectory(); err != nil {
+			return err
+		}
+	}
+	return cw.Finish()
+}
+
+// catalogMetadata adds the entries of a pxar metadata stream to the open
+// catalog directory. Entries come depth-first, so a directory ends when the
+// next entry is outside it.
+func catalogMetadata(cw *pbs.CatalogWriter, r io.Reader) error {
+	d := pxar.NewDecoder(r)
+	var open []string // open directories, relative paths
+	parent := func() string {
+		if len(open) == 0 {
+			return ""
+		}
+		return open[len(open)-1]
+	}
+	for {
+		e, err := d.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if e.Path == "" {
+			continue // archive root
+		}
+		dir, name := path.Split(e.Path)
+		dir = strings.TrimSuffix(dir, "/")
+		for parent() != dir {
+			if len(open) == 0 {
+				return fmt.Errorf("pxar: %q out of order", e.Path)
+			}
+			cw.EndDirectory()
+			open = open[:len(open)-1]
+		}
+		switch e.Kind {
+		case pxar.KindDir:
+			cw.StartDirectory(name)
+			open = append(open, e.Path)
+		case pxar.KindFile:
+			cw.AddFile(name, e.Size, e.Meta.MtimeSecs)
+		case pxar.KindSymlink:
+			cw.AddSymlink(name)
+		}
+	}
+	for range open {
+		cw.EndDirectory()
+	}
+	return cw.Err()
 }
 
 // archiveOrigins maps the archive names the client's jobs with backupID

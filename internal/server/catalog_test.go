@@ -3,14 +3,19 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 
 	"proxbackup/pkg/pbs"
+	"proxbackup/pkg/pxar"
 )
 
 func testCatalogFile(t *testing.T) *os.File {
@@ -75,5 +80,81 @@ func TestCatalogCache(t *testing.T) {
 	}
 	if len(cc.entries) > catalogMaxOpen {
 		t.Errorf("%d catalogs open", len(cc.entries))
+	}
+}
+
+// A split archive's metadata stream becomes the same listing the agent's
+// catalog had.
+func TestBuildCatalogFromMetadata(t *testing.T) {
+	dir := pxar.Metadata{Mode: pxar.ModeIFDIR | 0o755, MtimeSecs: 1700000000}
+	file := pxar.Metadata{Mode: pxar.ModeIFREG | 0o644, MtimeSecs: 1700000001}
+	link := pxar.Metadata{Mode: pxar.ModeIFLNK | 0o777, MtimeSecs: 1700000002}
+	archives := map[string][]byte{}
+	for _, name := range []string{"c-users.mpxar.didx", "d-data.mpxar.didx"} {
+		var m, p bytes.Buffer
+		enc, err := pxar.NewSplitEncoder(&m, &p, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		must(enc.CreateDir([]byte("alice"), dir))
+		must(enc.CreateDir([]byte("docs"), dir))
+		_, err = enc.AddFile([]byte("a.txt"), file, 3, strings.NewReader("abc"))
+		must(err)
+		must(enc.FinishDir())
+		must(enc.AddSymlink([]byte("link"), link, []byte("docs")))
+		_, err = enc.AddFile([]byte("notes.txt"), file, 5, strings.NewReader("hello"))
+		must(err)
+		must(enc.FinishDir())
+		_, err = enc.AddFile([]byte("top.txt"), file, 1, strings.NewReader("x"))
+		must(err)
+		must(enc.Close())
+		archives[name] = m.Bytes()
+	}
+	files := []*pbs.FileInfo{{Filename: "c-users.mpxar.didx"}, {Filename: "d-data.mpxar.didx"}}
+	f, err := os.CreateTemp(t.TempDir(), "cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = buildCatalog(f, files, func(fi *pbs.FileInfo, fn func(io.Reader) error) error {
+		return fn(bytes.NewReader(archives[fi.Filename]))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := f.Stat()
+	r, err := pbs.NewCatalogReader(f, st.Size())
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := func(p string) string {
+		es, err := r.ListDir(p)
+		if err != nil {
+			t.Fatalf("ListDir(%q): %v", p, err)
+		}
+		var out []string
+		for _, e := range es {
+			s := string(e.Type) + ":" + e.Name
+			if e.Type == pbs.CatalogFile {
+				s += fmt.Sprintf(":%d:%d", e.Size, e.Mtime)
+			}
+			out = append(out, s)
+		}
+		return strings.Join(out, " ")
+	}
+	for p, want := range map[string]string{
+		"/":                              "d:c-users.mpxar.didx d:d-data.mpxar.didx",
+		"/c-users.mpxar.didx":            "d:alice f:top.txt:1:1700000001",
+		"/d-data.mpxar.didx/alice":       "d:docs l:link f:notes.txt:5:1700000001",
+		"/d-data.mpxar.didx/alice/docs/": "f:a.txt:3:1700000001",
+	} {
+		if got := list(p); got != want {
+			t.Errorf("ListDir(%q) = %q, want %q", p, got, want)
+		}
 	}
 }
