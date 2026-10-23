@@ -2,12 +2,16 @@
 
 import { useState } from 'react'
 import { api, clientName, type Enrollment, type SetupToken, type Target } from '../api'
+import { usePerms } from '../perms'
 import { ago, Card, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
 
 export function Clients() {
+  const perms = usePerms()
+  // Enrollment creates clients outside any scope: it needs all clients.
+  const canEnroll = perms.all('clients.manage')
   const { data, error, reload } = useLoad(api.clients, [], 10000)
-  const enrollments = useLoad(api.enrollments, [], 10000)
-  const setups = useLoad(api.setupTokens, [], 10000)
+  const enrollments = useLoad(() => (canEnroll ? api.enrollments() : Promise.resolve([])), [canEnroll], 10000)
+  const setups = useLoad(() => (canEnroll ? api.setupTokens() : Promise.resolve([])), [canEnroll], 10000)
   const revoked = useLoad(api.revokedClients, [], 10000)
   const targets = useLoad(api.targets, [])
   const [adding, setAdding] = useState(false)
@@ -30,18 +34,20 @@ export function Clients() {
       <Card
         title={`${data?.length ?? 0} clients` + (pending.length ? `, ${pending.length} waiting to enroll` : '')}
         actions={
-          <>
-            <button onClick={() => setCreatingSetup(true)} title="One setup for many PCs: each asks for its client name">
-              Create agent setup
-            </button>
-            <button className="primary" onClick={() => setAdding(true)}>
-              Add client
-            </button>
-          </>
+          canEnroll && (
+            <>
+              <button onClick={() => setCreatingSetup(true)} title="One setup for many PCs: each asks for its client name">
+                Create agent setup
+              </button>
+              <button className="primary" onClick={() => setAdding(true)}>
+                Add client
+              </button>
+            </>
+          )
         }
       >
         {data && data.length === 0 && pending.length === 0 ? (
-          <Empty>No clients yet. Click “Add client” to generate an enrollment token for a Windows PC.</Empty>
+          <Empty>{canEnroll ? 'No clients yet. Click “Add client” to generate an enrollment token for a Windows PC.' : 'No clients you have access to.'}</Empty>
         ) : (
           <table>
             <thead>
@@ -190,7 +196,7 @@ export function Clients() {
                   <td>{ago(c.revoked_at)}</td>
                   <td>{ago(c.last_seen)}</td>
                   <td className="row-actions">
-                    {c.restorable ? (
+                    {!perms.can('clients.manage', c) ? null : c.restorable ? (
                       <button
                         className="small"
                         title="Reactivate the client: its agent reconnects with a new PBS token and its jobs are re-enabled"
@@ -259,8 +265,8 @@ function EnrollInstructions({ command, expires }: { command: string; expires: nu
   return (
     <>
       <p>
-        On the Windows PC, copy <code>proxbackup-agent.exe</code> to a folder (e.g. <code>C:\Program Files\proxbackup</code>) and run in an elevated prompt. The token
-        can be used once and expires {ago(expires)}.
+        On the Windows PC, copy <code>proxbackup-agent.exe</code> to a folder (e.g. <code>C:\Program Files\proxbackup</code>) and run in an elevated prompt. The
+        token can be used once and expires {ago(expires)}.
       </p>
       <pre className="copy" onClick={(ev) => navigator.clipboard?.writeText((ev.target as HTMLElement).innerText)}>
         {command}

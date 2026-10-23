@@ -62,7 +62,7 @@ PROXBACKUP_HOSTNAMES=$hosts
 # Web UI and agent API (comma separated for several addresses).
 PROXBACKUP_LISTEN=:$PORT
 
-# Running on this PBS: register its datastores and accept PBS admin logins.
+# Running on this PBS: register its datastores as targets.
 PROXBACKUP_LOCAL_PBS=1
 # PBS address the agents back up to (default: host of PROXBACKUP_PUBLIC_URL, port 8007).
 #PROXBACKUP_PBS_PUBLIC_HOST=$fqdn:8007
@@ -84,8 +84,9 @@ url=$(sed -n 's/^PROXBACKUP_PUBLIC_URL=//p' "$ENV_FILE")
 cat <<EOF
 
 ProxBackup Console: $url
-Sign in with a PBS administrator account (e.g. root@pam). A local "admin"
-account is also created; its initial password is in: journalctl -u proxbackup-server
+Sign in as "admin". On a new install its initial password is in:
+  journalctl -u proxbackup-server
+Add more users and roles under Users. PBS accounts can't sign in to the console.
 
 EOF
 exit 0

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,10 +20,24 @@ import (
 )
 
 const schema = `
-CREATE TABLE IF NOT EXISTS admins (
-  id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, pw_hash TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, pw_hash TEXT NOT NULL, created_at INTEGER NOT NULL,
+  must_change_pw INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, last_login INTEGER NOT NULL DEFAULT 0,
+  auth_source TEXT NOT NULL DEFAULT 'local', external_id TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS roles (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, description TEXT NOT NULL DEFAULT '',
+  permissions TEXT NOT NULL DEFAULT '[]', builtin TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS roles_builtin ON roles(builtin) WHERE builtin<>'';
+CREATE TABLE IF NOT EXISTS user_roles (
+  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, role_id INTEGER NOT NULL, all_clients INTEGER NOT NULL DEFAULT 0,
+  clients TEXT NOT NULL DEFAULT '[]', tags TEXT NOT NULL DEFAULT '[]');
+CREATE INDEX IF NOT EXISTS user_roles_user ON user_roles(user_id);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, user_id INTEGER NOT NULL DEFAULT 0, username TEXT NOT NULL DEFAULT '',
+  action TEXT NOT NULL, target TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', status INTEGER NOT NULL DEFAULT 0,
+  ip TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS sessions (
-  token_hash TEXT PRIMARY KEY, admin_id INTEGER NOT NULL, expires INTEGER NOT NULL);
+  token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS targets (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, host TEXT NOT NULL, fingerprint TEXT NOT NULL DEFAULT '',
   datastore TEXT NOT NULL, root_ns TEXT NOT NULL DEFAULT '', admin_auth_id TEXT NOT NULL, admin_secret_enc BLOB NOT NULL,
@@ -109,6 +124,7 @@ func (s *Store) migrate() error {
 		{"clients", "config_rev", "TEXT NOT NULL DEFAULT ''"},
 		{"clients", "schedule_state", "TEXT NOT NULL DEFAULT '[]'"},
 		{"clients", "time_zone", "TEXT NOT NULL DEFAULT ''"},
+		// Only on installs from before users replaced admins (see migrateUsers).
 		{"admins", "must_change_pw", "INTEGER NOT NULL DEFAULT 0"},
 		{"enrollments", "command_enc", "BLOB"},
 		// Existing file jobs move to pxar v2 too; their first run reads everything.
@@ -149,6 +165,11 @@ func (s *Store) migrate() error {
 		{"group_jobs", "wake_to_run", "INTEGER NOT NULL DEFAULT 1"},
 	}
 	for _, c := range cols {
+		if ok, err := s.tableExists(c.table); err != nil {
+			return err
+		} else if !ok {
+			continue
+		}
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, c.table, c.name).Scan(&n); err != nil {
 			return err
@@ -169,6 +190,12 @@ func (s *Store) migrate() error {
 		return err
 	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS jobs_group ON jobs(group_id)`); err != nil {
+		return err
+	}
+	if err := s.seedRoles(); err != nil {
+		return err
+	}
+	if err := s.migrateUsers(); err != nil {
 		return err
 	}
 	if err := s.migrateGroupJobs(); err != nil {
@@ -354,88 +381,6 @@ type LogLine struct {
 	Time  int64  `json:"ts"`
 	Level string `json:"level"`
 	Msg   string `json:"msg"`
-}
-
-// ---- admins & sessions ----
-
-func (s *Store) AdminCount(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admins`).Scan(&n)
-	return n, err
-}
-
-// UpsertAdmin sets a local account's password. mustChange makes the user pick
-// a new one at the next sign-in (for generated passwords).
-func (s *Store) UpsertAdmin(ctx context.Context, user, hash string, mustChange bool) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO admins(username, pw_hash, created_at, must_change_pw) VALUES(?,?,?,?)
-		ON CONFLICT(username) DO UPDATE SET pw_hash=excluded.pw_hash, must_change_pw=excluded.must_change_pw`, user, hash, now(), mustChange)
-	return err
-}
-
-// SessionUser is the account behind an admin session.
-type SessionUser struct {
-	ID         int64
-	Name       string
-	External   bool // signed in through PBS; no local password
-	MustChange bool
-}
-
-// EnsureExternalAdmin returns the admin row for an account authenticated
-// elsewhere (a PBS user@realm), creating it with an unusable local password.
-func (s *Store) EnsureExternalAdmin(ctx context.Context, user string) (int64, error) {
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO admins(username, pw_hash, created_at) VALUES(?,'external:pbs',?)
-		ON CONFLICT(username) DO NOTHING`, user, now()); err != nil {
-		return 0, err
-	}
-	id, _, err := s.AdminByName(ctx, user)
-	return id, err
-}
-
-func (s *Store) AdminByName(ctx context.Context, user string) (int64, string, error) {
-	var id int64
-	var hash string
-	err := s.db.QueryRowContext(ctx, `SELECT id, pw_hash FROM admins WHERE username=?`, user).Scan(&id, &hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		err = errNotFound
-	}
-	return id, hash, err
-}
-
-func (s *Store) CreateSession(ctx context.Context, tokenHash string, adminID int64, ttl time.Duration) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions(token_hash, admin_id, expires) VALUES(?,?,?)`, tokenHash, adminID, time.Now().Add(ttl).Unix())
-	return err
-}
-
-func (s *Store) SessionAdmin(ctx context.Context, tokenHash string) (*SessionUser, error) {
-	u := &SessionUser{}
-	var hash string
-	err := s.db.QueryRowContext(ctx, `SELECT a.id, a.username, a.pw_hash, a.must_change_pw FROM sessions s JOIN admins a ON a.id=s.admin_id
-		WHERE s.token_hash=? AND s.expires>?`, tokenHash, now()).Scan(&u.ID, &u.Name, &hash, &u.MustChange)
-	if errors.Is(err, sql.ErrNoRows) {
-		err = errNotFound
-	}
-	u.External = strings.HasPrefix(hash, "external:")
-	return u, err
-}
-
-// SetAdminPassword changes a local account's password, clears the
-// must-change flag and ends the account's other sessions.
-func (s *Store) SetAdminPassword(ctx context.Context, id int64, hash, keepSession string) error {
-	if _, err := s.db.ExecContext(ctx, `UPDATE admins SET pw_hash=?, must_change_pw=0 WHERE id=?`, hash, id); err != nil {
-		return err
-	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE admin_id=? AND token_hash<>?`, id, keepSession)
-	return err
-}
-
-func (s *Store) AdminPasswordHash(ctx context.Context, id int64) (string, error) {
-	var hash string
-	err := s.db.QueryRowContext(ctx, `SELECT pw_hash FROM admins WHERE id=?`, id).Scan(&hash)
-	return hash, err
-}
-
-func (s *Store) DeleteSession(ctx context.Context, tokenHash string) {
-	s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash=? OR expires<?`, tokenHash, now())
 }
 
 // ---- targets ----
@@ -987,6 +932,10 @@ type RunFilter struct {
 	ClientID, JobID, GroupID int64
 	Active                   bool
 	Limit                    int
+	// Scoped limits the runs to those of ClientIDs (users allowed to see only
+	// some clients).
+	Scoped    bool
+	ClientIDs []int64
 }
 
 func (s *Store) Runs(ctx context.Context, f RunFilter) ([]*Run, error) {
@@ -1006,6 +955,13 @@ func (s *Store) Runs(ctx context.Context, f RunFilter) ([]*Run, error) {
 	}
 	if f.Active {
 		q += ` AND r.state IN ('queued','dispatched','running')`
+	}
+	if f.Scoped {
+		ids := make([]string, len(f.ClientIDs))
+		for i, id := range f.ClientIDs {
+			ids[i] = strconv.FormatInt(id, 10)
+		}
+		q += ` AND r.client_id IN (` + strings.Join(ids, ",") + `)`
 	}
 	if f.Limit <= 0 || f.Limit > 500 {
 		f.Limit = 100

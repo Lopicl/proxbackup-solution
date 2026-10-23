@@ -11,6 +11,7 @@ PC backups are ordinary PBS snapshots: deduplicated, verifiable, syncable and pr
 - **Client-side encryption** with key escrow in the console
 - **Immutable backups** and tamper-resistant retention
 - **Per-file restore** from file backups and volume images, in the console or from the PC's tray icon
+- **Console users and roles**: built-in and custom roles, optionally limited to clients or tags, and an audit log
 - **Automatic updates** of the console and agents
 
 See [docs/architecture.md](docs/architecture.md) for the design, security model and roadmap.
@@ -42,8 +43,8 @@ apt install ./proxbackup-server_<version>_amd64.deb
 ```
 
 The package creates the API token `root@pam!proxbackup-console`, registers every local datastore
-as a target and starts the console on `https://<pbs-host>:8077`. Sign in with a PBS administrator
-(e.g. `root@pam`).
+as a target and starts the console on `https://<pbs-host>:8077`. Sign in as `admin` with the
+initial password from `journalctl -u proxbackup-server`; you must replace it at the first sign-in.
 
 - Settings (public URL, host names): `/etc/proxbackup/proxbackup.env`
 - `apt purge` removes the console and its token; backups stay in PBS.
@@ -55,8 +56,8 @@ as a target and starts the console on `https://<pbs-host>:8077`. Sign in with a 
 1. Create a PBS API token with the Admin role on `/`.
 2. Run `proxbackup-server -public-url https://backup.example.lan:8077 -hostnames backup.example.lan`
    and open port 8077.
-3. Sign in as `admin` (initial password in the log, or set `PROXBACKUP_ADMIN_PASSWORD`; change it
-   with `proxbackup-server passwd`).
+3. Sign in as `admin` (initial password in the log, or set `PROXBACKUP_ADMIN_PASSWORD`). Lost it?
+   `proxbackup-server passwd [user]` sets a new one.
 4. Add the PBS under *PBS servers → Add*.
 
 ### 3. Check the target
@@ -106,6 +107,12 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
   Administrators can restore anything; other users only their own profile folder, written with
   their own Windows permissions.
 
+### 7. Users
+
+*Users* (top bar) adds console users and gives them roles: Administrator, Operator, Restore-only,
+Read-only or custom ones, each for all clients or only chosen clients and tags. *Audit log* lists
+sign-ins and every change. Users change their own password under the profile menu.
+
 ### Troubleshooting
 
 The agent service logs to `%ProgramData%\proxbackup\logs\agent.log` (rotated at 5 MiB, 3 old files
@@ -127,8 +134,8 @@ Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**.
 
 | Phase 2 | Items |
 | --- | --- |
-| Done | Group jobs, client-side encryption with key escrow, immutable backups, tamper-resistant retention, file restore from volume images, per-file restore browser, new top bar (profile menu, Console Settings), tray app with self-service restore, NTFS ACLs and alternate data streams in file backups |
-| Open | Console user management with granular permissions, bandwidth and metered-network/battery limits |
+| Done | Group jobs, client-side encryption with key escrow, immutable backups, tamper-resistant retention, file restore from volume images, per-file restore browser, new top bar (profile menu, Console Settings), tray app with self-service restore, NTFS ACLs and alternate data streams in file backups, console users with roles (client/tag scopes) and an audit log |
+| Open | Bandwidth and metered-network/battery limits |
 | Moved | Guided pull-sync to a second PBS (immutable off-host copy) and SMB/NFS share backups → phase 5 |
 
 ### Verified
@@ -159,8 +166,6 @@ and the agent as a Windows service installed by enrollment or the setup `.exe`.
 - **NTFS ACLs and alternate data streams** are kept by file backups (owner, group and DACL, no
   auditing SACL; streams up to 64 KiB), not by file restores from volume images. Restoring with
   `proxmox-backup-client` onto ext4 may need `--ignore-xattrs`.
-- **Console sign-in** is a local `admin` or PBS administrator; roles and an audit log come later in
-  phase 2.
 - **Whole-volume restore** writes a `.img` file. Bare-metal recovery via a Linux rescue image is
   planned for phase 4; Macs will get data restore onto a fresh macOS install.
 - **macOS/Linux agents** are development builds: no snapshots, no Unix owners/permissions/xattrs/ACLs

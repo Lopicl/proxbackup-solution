@@ -87,17 +87,11 @@ func (s *Server) ensureClientKey(ctx context.Context, c *Client) error {
 // handleClientKey downloads the client's key as a PBS key file, for restores
 // with proxmox-backup-client --keyfile or the agent's -keyfile.
 func (s *Server) handleClientKey(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		httpError(w, 400, err)
+	c, ok := s.pathClient(w, r, PermRestore)
+	if !ok {
 		return
 	}
 	ctx := r.Context()
-	c, err := s.store.Client(ctx, id)
-	if err != nil {
-		httpError(w, statusFor(err), err)
-		return
-	}
 	k, err := s.clientKey(ctx, c)
 	if err != nil {
 		httpError(w, 500, err)
@@ -117,7 +111,7 @@ func (s *Server) handleClientKey(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
-	u := ctx.Value(sessionUserKey).(*SessionUser)
+	u := sessionUser(r)
 	s.log.Warn("client encryption key downloaded", "client", c.Name, "fingerprint", k.Fingerprint, "by", u.Name)
 	name, _, _ := strings.Cut(c.Name, "#") // revoked clients are renamed "<name>#revoked-<id>"
 	w.Header().Set("Content-Type", "application/json")

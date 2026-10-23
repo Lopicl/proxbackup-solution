@@ -12,5 +12,4 @@ Description: ProxBackup Console - manage Windows PC backups to this PBS
  namespaces and API tokens, pushes backup schedules to the agents, applies
  retention and shows run history, logs and restores.
  .
- Web UI and agent API on port 8077. PBS administrators (e.g. root@pam) can
- sign in with their PBS credentials.
+ Web UI and agent API on port 8077, with its own users, roles and audit log.

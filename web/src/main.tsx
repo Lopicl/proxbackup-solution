@@ -12,6 +12,8 @@ import { RunDetail } from './pages/RunDetail'
 import { Targets } from './pages/Targets'
 import { Settings } from './pages/Settings'
 import { SelfRestore } from './pages/SelfRestore'
+import { Users } from './pages/Users'
+import { can, MeContext } from './perms'
 import './styles.css'
 
 function useHashRoute(): string {
@@ -29,10 +31,6 @@ function Login({ onLogin }: { onLogin: () => void }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [pbsLogin, setPbsLogin] = useState(false)
-  useEffect(() => {
-    api.loginInfo().then((r) => setPbsLogin(r.pbs_login), () => {})
-  }, [])
   return (
     <div className="login">
       <form
@@ -53,7 +51,7 @@ function Login({ onLogin }: { onLogin: () => void }) {
         <h1>
           <span className="logo">▣</span> ProxBackup Console
         </h1>
-        <Field label="Username" hint={pbsLogin ? 'A console account, or a PBS administrator such as root@pam.' : undefined}>
+        <Field label="Username">
           <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
         </Field>
         <Field label="Password">
@@ -116,22 +114,46 @@ function PasswordForm({ forced, onDone, onCancel }: { forced?: boolean; onDone: 
   )
 }
 
-const nav = [
-  { to: '/', label: 'Dashboard' },
-  { to: '/clients', label: 'Clients' },
-  { to: '/jobs', label: 'Jobs' },
-  { to: '/targets', label: 'PBS servers' },
+const nav: { to: string; label: string; show: (me: Me) => boolean }[] = [
+  { to: '/', label: 'Dashboard', show: (me) => can(me, 'clients.view') },
+  { to: '/clients', label: 'Clients', show: (me) => can(me, 'clients.view') },
+  { to: '/jobs', label: 'Jobs', show: (me) => can(me, 'clients.view') },
+  { to: '/targets', label: 'PBS servers', show: (me) => can(me, 'clients.view') || can(me, 'targets.manage') },
+  { to: '/users', label: 'Users', show: (me) => can(me, 'users.manage') || can(me, 'audit.view') },
 ]
 
+/** Whether the user may change any console setting. */
+const canSettings = (me: Me) => can(me, 'notifications.manage') || can(me, 'updates.manage') || can(me, 'encryption.manage')
+
 const UserIcon = () => (
-  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    viewBox="0 0 24 24"
+    width="18"
+    height="18"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <circle cx="12" cy="8" r="4" />
     <path d="M4 21c0-4 3.6-7 8-7s8 3 8 7" />
   </svg>
 )
 
 const GearIcon = () => (
-  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+  <svg
+    viewBox="0 0 24 24"
+    width="18"
+    height="18"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
     <circle cx="12" cy="12" r="3" />
     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
   </svg>
@@ -159,7 +181,13 @@ function ProfileMenu({ me, onSettings, onLogout }: { me: Me; onSettings: () => v
   }
   return (
     <div className="menu" ref={ref}>
-      <button className={'icon-btn profile' + (open ? ' open' : '')} onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open} title={me.username}>
+      <button
+        className={'icon-btn profile' + (open ? ' open' : '')}
+        onClick={() => setOpen(!open)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={me.username}
+      >
         <UserIcon />
         <span className="name">{me.username}</span>
       </button>
@@ -236,49 +264,57 @@ function App() {
   else if (parts[0] === 'runs' && parts[1]) page = <RunDetail id={Number(parts[1])} />
   else if (parts[0] === 'targets') page = <Targets />
   else if (parts[0] === 'settings') page = <Settings />
-  else page = <Dashboard />
+  else if (parts[0] === 'users') page = <Users tab={parts[1] ?? (can(me, 'users.manage') ? 'users' : 'audit')} />
+  else if (can(me, 'clients.view')) page = <Dashboard />
+  else page = <div className="empty">Your account has no permissions yet. Ask an administrator to assign you a role.</div>
 
   const active = '/' + (parts[0] ?? '')
   return (
-    <div className="shell">
-      <header className="topbar">
-        <div className="brand">
-          <span className="logo">▣</span> ProxBackup Console
-        </div>
-        <nav>
-          {nav.map((n) => (
-            <a key={n.to} href={'#' + n.to} className={active === n.to || (n.to === '/clients' && active === '/runs') ? 'active' : ''}>
-              {n.label}
+    <MeContext.Provider value={me}>
+      <div className="shell">
+        <header className="topbar">
+          <div className="brand">
+            <span className="logo">▣</span> ProxBackup Console
+          </div>
+          <nav>
+            {nav
+              .filter((n) => n.show(me))
+              .map((n) => (
+                <a key={n.to} href={'#' + n.to} className={active === n.to || (n.to === '/clients' && active === '/runs') ? 'active' : ''}>
+                  {n.label}
+                </a>
+              ))}
+          </nav>
+          {version && <div className="version">v{version}</div>}
+          {canSettings(me) && (
+            <a href="#/settings" className={'icon-btn' + (active === '/settings' ? ' active' : '')} title="Console Settings" aria-label="Console Settings">
+              <GearIcon />
             </a>
-          ))}
-        </nav>
-        {version && <div className="version">v{version}</div>}
-        <a href="#/settings" className={'icon-btn' + (active === '/settings' ? ' active' : '')} title="Console Settings" aria-label="Console Settings">
-          <GearIcon />
-        </a>
-        <ProfileMenu
-          me={me}
-          onSettings={() => setProfileOpen(true)}
-          onLogout={async () => {
-            await api.logout()
-            setMe(null)
-          }}
-        />
-      </header>
-      <main>{page}</main>
-      {profileOpen && (
-        <Modal title="Profile Settings" onClose={() => setProfileOpen(false)}>
-          <h3>Change password</h3>
-          {me.local_account ? (
-            <PasswordForm onDone={() => setProfileOpen(false)} onCancel={() => setProfileOpen(false)} />
-          ) : (
-            <p className="muted-text">
-              <b>{me.username}</b> signs in through Proxmox Backup Server. Change its password on the PBS server.
-            </p>
           )}
-        </Modal>
-      )}
-    </div>
+          <ProfileMenu
+            me={me}
+            onSettings={() => setProfileOpen(true)}
+            onLogout={async () => {
+              await api.logout()
+              setMe(null)
+            }}
+          />
+        </header>
+        <main>{page}</main>
+        {profileOpen && (
+          <Modal title="Profile Settings" onClose={() => setProfileOpen(false)}>
+            <h3>Change password</h3>
+            {me.local_account ? (
+              <PasswordForm onDone={() => setProfileOpen(false)} onCancel={() => setProfileOpen(false)} />
+            ) : (
+              <p className="muted-text">
+                <b>{me.username}</b> signs in through an external identity provider. Change its password there.
+              </p>
+            )}
+          </Modal>
+        )}
+      </div>
+    </MeContext.Provider>
   )
 }
 

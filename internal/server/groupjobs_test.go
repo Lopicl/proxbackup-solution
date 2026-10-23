@@ -180,7 +180,7 @@ func TestGroupJobMembers(t *testing.T) {
 
 	// Run now for the whole group: only enabled members get a run.
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/group-jobs/1/run", nil)
+	req := asAdmin(httptest.NewRequest("POST", "/api/group-jobs/1/run", nil))
 	req.SetPathValue("id", "1")
 	s.handleRunGroupJob(rec, req)
 	var res struct {
@@ -202,7 +202,7 @@ func TestGroupJobMembers(t *testing.T) {
 	}
 	del := func(id int64) int {
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("DELETE", "/api/jobs/x", nil)
+		req := asAdmin(httptest.NewRequest("DELETE", "/api/jobs/x", nil))
 		req.SetPathValue("id", jsonNum(id))
 		s.handleDeleteJob(rec, req)
 		return rec.Code

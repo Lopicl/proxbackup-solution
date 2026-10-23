@@ -147,14 +147,8 @@ type catalogEntry struct {
 // handleCatalog lists one directory of a snapshot's catalog:
 // GET /api/clients/{id}/catalog?ns=&backup_id=&backup_time=&path=/archive/dir
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		httpError(w, 400, err)
-		return
-	}
-	c, err := s.store.Client(r.Context(), id)
-	if err != nil {
-		httpError(w, statusFor(err), err)
+	c, ok := s.pathClient(w, r, PermRestore)
+	if !ok {
 		return
 	}
 	out, code, err := s.catalogDir(r.Context(), c, r.URL.Query())

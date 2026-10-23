@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,13 +26,18 @@ import (
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	a := access(r)
 	clients, err := s.store.Clients(ctx)
 	if err != nil {
 		httpError(w, 500, err)
 		return
 	}
-	runs, _ := s.store.Runs(ctx, RunFilter{Limit: 20})
-	active, _ := s.store.Runs(ctx, RunFilter{Active: true, Limit: 100})
+	clients = slices.DeleteFunc(clients, func(c *Client) bool { return !a.Client(PermViewClients, c) })
+	recent, current := RunFilter{Limit: 20}, RunFilter{Active: true, Limit: 100}
+	s.scopeRuns(ctx, a, &recent)
+	s.scopeRuns(ctx, a, &current)
+	runs, _ := s.store.Runs(ctx, recent)
+	active, _ := s.store.Runs(ctx, current)
 	last := s.store.LastSuccess(ctx)
 	var online, stale, failedRecent int
 	for _, c := range clients {
@@ -103,6 +109,7 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	auditTarget(r, "PBS server "+req.Name)
 	req.RootNS = strings.Trim(req.RootNS, "/")
 	if req.PBSUser == "" {
 		req.PBSUser = "proxbackup@pbs"
@@ -168,6 +175,9 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
+	if t, terr := s.store.Target(r.Context(), id); err == nil && terr == nil {
+		auditTarget(r, "PBS server "+t.Name)
+	}
 	if err == nil {
 		err = s.store.DeleteTarget(r.Context(), id)
 	}
@@ -236,6 +246,8 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
+	a := access(r)
+	cs = slices.DeleteFunc(cs, func(c *Client) bool { return !a.Client(PermViewClients, c) })
 	last := s.store.LastSuccess(ctx)
 	for _, c := range cs {
 		c.LastSuccess = last[c.ID]
@@ -250,17 +262,11 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		httpError(w, 400, err)
+	c, ok := s.pathClient(w, r, PermViewClients)
+	if !ok {
 		return
 	}
 	ctx := r.Context()
-	c, err := s.store.Client(ctx, id)
-	if err != nil {
-		httpError(w, statusFor(err), err)
-		return
-	}
 	c.LastSuccess = s.store.LastSuccess(ctx)[c.ID]
 	jobs, _ := s.store.Jobs(ctx, c.ID)
 	applyAgentState(c, jobs)
@@ -273,17 +279,11 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRevokeClient(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		httpError(w, 400, err)
+	c, ok := s.pathClient(w, r, PermManageClients)
+	if !ok {
 		return
 	}
-	ctx := r.Context()
-	c, err := s.store.Client(ctx, id)
-	if err != nil {
-		httpError(w, statusFor(err), err)
-		return
-	}
+	ctx, id := r.Context(), c.ID
 	if c.Revoked {
 		httpError(w, http.StatusConflict, errors.New("client is already revoked"))
 		return
@@ -320,6 +320,8 @@ func (s *Server) handleRevokedClients(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
+	a := access(r)
+	cs = slices.DeleteFunc(cs, func(c *Client) bool { return !a.Client(PermViewClients, c) })
 	writeJSON(w, orEmpty(cs))
 }
 
@@ -327,17 +329,11 @@ func (s *Server) handleRevokedClients(w http.ResponseWriter, r *http.Request) {
 // PBS token is created and its agent, which still holds its certificate,
 // reconnects with its jobs and history.
 func (s *Server) handleUnrevokeClient(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		httpError(w, 400, err)
+	c, ok := s.pathClient(w, r, PermManageClients)
+	if !ok {
 		return
 	}
-	ctx := r.Context()
-	c, err := s.store.Client(ctx, id)
-	if err != nil {
-		httpError(w, statusFor(err), err)
-		return
-	}
+	ctx, id := r.Context(), c.ID
 	if !c.Revoked {
 		httpError(w, http.StatusConflict, errors.New("client is not revoked"))
 		return
@@ -394,14 +390,8 @@ func (s *Server) handleUnrevokeClient(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		httpError(w, 400, err)
-		return
-	}
-	c, err := s.store.Client(r.Context(), id)
-	if err != nil {
-		httpError(w, statusFor(err), err)
+	c, ok := s.pathClient(w, r, PermRestore)
+	if !ok {
 		return
 	}
 	snaps, code, err := s.clientSnapshots(r.Context(), c)
@@ -459,11 +449,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	c, err := s.store.Client(ctx, id)
-	if err != nil {
-		httpError(w, statusFor(err), err)
+	c, ok := s.allowClient(w, r, PermRestore, id)
+	if !ok {
 		return
 	}
+	auditDetail(r, "%s from %s/%d to %s", req.Archive, req.BackupID, req.BackupTime, req.TargetDir)
 	if err := validateRestore(&req, c); err != nil {
 		httpError(w, 400, err)
 		return
@@ -504,6 +494,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		httpError(w, 400, errors.New("client name must contain letters or digits"))
 		return
 	}
+	auditTarget(r, "client "+name)
 	if s.store.ClientNameTaken(ctx, name) {
 		httpError(w, 400, fmt.Errorf("client %q already exists or is waiting to enroll", name))
 		return
@@ -731,6 +722,8 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
+	visible := s.clientFilter(r.Context(), access(r), PermViewClients)
+	jobs = slices.DeleteFunc(jobs, func(j *Job) bool { return !visible(j.ClientID) })
 	clients := map[int64]*Client{}
 	for _, j := range jobs {
 		c := clients[j.ClientID]
@@ -769,6 +762,10 @@ func (s *Server) handleSaveMember(w http.ResponseWriter, r *http.Request) {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	if _, ok := s.allowClient(w, r, PermManageJobs, j.ClientID); !ok {
+		return
+	}
+	auditDetail(r, "job %s: enabled=%t", j.Name, req.Enabled)
 	if err := s.store.SetMemberOverrides(ctx, id, req.Enabled, cleanList(req.ExtraExcludes)); err != nil {
 		httpError(w, statusFor(err), err)
 		return
@@ -806,6 +803,10 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	if _, ok := s.allowClient(w, r, PermManageJobs, j.ClientID); !ok {
+		return
+	}
+	auditDetail(r, "job %s", j.Name)
 	if j.GroupID == 0 {
 		err = s.store.DeleteJob(ctx, id)
 	} else {
@@ -829,6 +830,15 @@ func (s *Server) handleRunJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	j, err := s.store.Job(r.Context(), id)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	if _, ok := s.allowClient(w, r, PermRunBackups, j.ClientID); !ok {
+		return
+	}
+	auditDetail(r, "job %s", j.Name)
 	runID, err := s.queueJob(r.Context(), id, "manual")
 	if err != nil {
 		httpError(w, 400, err)
@@ -858,6 +868,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 	f.ClientID, _ = strconv.ParseInt(q.Get("client_id"), 10, 64)
 	f.JobID, _ = strconv.ParseInt(q.Get("job_id"), 10, 64)
 	f.Limit, _ = strconv.Atoi(q.Get("limit"))
+	s.scopeRuns(r.Context(), access(r), &f)
 	runs, err := s.store.Runs(r.Context(), f)
 	if err != nil {
 		httpError(w, 500, err)
@@ -877,6 +888,10 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	if !s.clientFilter(r.Context(), access(r), PermViewClients)(run.ClientID) {
+		httpError(w, http.StatusForbidden, errClientDenied)
+		return
+	}
 	writeJSON(w, run)
 }
 
@@ -884,6 +899,15 @@ func (s *Server) handleRunLogs(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
 		httpError(w, 400, err)
+		return
+	}
+	run, err := s.store.Run(r.Context(), id)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	if !s.clientFilter(r.Context(), access(r), PermViewClients)(run.ClientID) {
+		httpError(w, http.StatusForbidden, errClientDenied)
 		return
 	}
 	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
@@ -907,6 +931,16 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	// Restores are canceled with the restore permission, backups with backups.run.
+	p := PermRunBackups
+	if run.Kind == api.KindRestore {
+		p = PermRestore
+	}
+	if !s.clientFilter(ctx, access(r), p)(run.ClientID) {
+		httpError(w, http.StatusForbidden, errClientDenied)
+		return
+	}
+	auditTarget(r, fmt.Sprintf("run %d of %s", run.ID, run.ClientName))
 	if err := s.store.RequestCancel(ctx, id); err != nil {
 		httpError(w, 500, err)
 		return
@@ -916,14 +950,8 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePushAgentUpdate(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		httpError(w, 400, err)
-		return
-	}
-	c, err := s.store.Client(r.Context(), id)
-	if err != nil {
-		httpError(w, statusFor(err), err)
+	c, ok := s.pathClient(w, r, PermManageClients)
+	if !ok {
 		return
 	}
 	if c.Revoked {

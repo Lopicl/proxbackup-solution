@@ -6,14 +6,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -23,9 +19,9 @@ import (
 
 // LocalPBS describes the Proxmox Backup Server this console runs on (the .deb
 // install). The console then needs no manual setup: it registers the PBS
-// datastores as targets with the admin token the package created, keeps their
-// certificate fingerprint current, and PBS administrators can log in to the
-// console with their PBS accounts.
+// datastores as targets with the admin token the package created and keeps
+// their certificate fingerprint current. Console users are its own (see
+// users.go), not PBS accounts.
 type LocalPBS struct {
 	APIAddr    string // this host's PBS API, normally "127.0.0.1:8007"
 	PublicHost string // PBS address agents connect to, e.g. "pbs.example.lan:8007"
@@ -180,85 +176,4 @@ func (s *Server) localSecretFor(authID string) string {
 		return secret
 	}
 	return ""
-}
-
-// errPBSLoginDenied means the PBS credentials were valid but the account is
-// not a PBS administrator.
-var errPBSLoginDenied = errors.New("this PBS account is not an administrator (needs Sys.Modify on /)")
-
-// pbsLogin checks user@realm credentials against the local PBS and requires
-// administrator rights there (Sys.Modify on /).
-func (s *Server) pbsLogin(ctx context.Context, user, password string) error {
-	l := s.cfg.LocalPBS
-	fp, err := l.fingerprint(ctx)
-	if err != nil {
-		return err
-	}
-	hc := pinnedClient(fp)
-	base := "https://" + l.APIAddr + "/api2/json/"
-
-	form := url.Values{"username": {user}, "password": {password}}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"access/ticket", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	var tk struct {
-		Data *struct {
-			Ticket string `json:"ticket"`
-		} `json:"data"`
-	}
-	if err := doJSON(hc, req, &tk); err != nil {
-		return err
-	}
-	if tk.Data == nil || tk.Data.Ticket == "" {
-		return errInvalidLogin
-	}
-	if strings.Contains(tk.Data.Ticket, "!tfa!") {
-		return errors.New("PBS accounts with two-factor authentication can't log in here yet; use a local console account")
-	}
-
-	req, _ = http.NewRequestWithContext(ctx, http.MethodGet, base+"access/permissions?path=/", nil)
-	req.AddCookie(&http.Cookie{Name: "PBSAuthCookie", Value: tk.Data.Ticket})
-	var perms struct {
-		Data map[string]map[string]bool `json:"data"`
-	}
-	if err := doJSON(hc, req, &perms); err != nil {
-		return err
-	}
-	if !perms.Data["/"]["Sys.Modify"] {
-		return errPBSLoginDenied
-	}
-	return nil
-}
-
-// pinnedClient talks to the local PBS, accepting only the certificate with fp.
-func pinnedClient(fp string) *http.Client {
-	want := pbs.NormalizeFingerprint(fp)
-	return &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		InsecureSkipVerify: true, // replaced by fingerprint pinning
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			if len(raw) == 0 {
-				return errors.New("local PBS sent no certificate")
-			}
-			if got := sha256.Sum256(raw[0]); hex.EncodeToString(got[:]) != want {
-				return errors.New("local PBS certificate changed")
-			}
-			return nil
-		},
-	}}}
-}
-
-var errInvalidLogin = errors.New("invalid username or password")
-
-func doJSON(hc *http.Client, req *http.Request, out any) error {
-	resp, err := hc.Do(req)
-	if err != nil {
-		return fmt.Errorf("local PBS: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusUnauthorized {
-		return errInvalidLogin
-	}
-	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("local PBS: HTTP %d", resp.StatusCode)
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
 }

@@ -283,12 +283,82 @@ export class ApiError extends Error {
   }
 }
 
+/** A permission a role grants (see internal/server/users.go). */
+export type Perm =
+  | 'clients.view'
+  | 'clients.manage'
+  | 'jobs.manage'
+  | 'backups.run'
+  | 'restore'
+  | 'targets.manage'
+  | 'notifications.manage'
+  | 'updates.manage'
+  | 'encryption.manage'
+  | 'users.manage'
+  | 'audit.view'
+
+/** The clients a permission applies to: all, or the listed ones and those with one of the tags. */
+export interface PermScope {
+  all: boolean
+  clients: number[]
+  tags: string[]
+}
+
 export interface Me {
+  id: number
   username: string
   version: string
   must_change_password: boolean
   local_account: boolean
+  permissions: Partial<Record<Perm, PermScope>>
   local_pbs?: { auth_id: string; host: string }
+}
+
+export interface PermInfo {
+  id: Perm
+  label: string
+  description: string
+  client_level: boolean
+}
+
+export interface Role {
+  id: number
+  name: string
+  description: string
+  permissions: Perm[]
+  builtin?: string
+  users: number
+}
+
+export interface RoleAssignment {
+  role_id: number
+  role_name?: string
+  all_clients: boolean
+  clients: number[]
+  tags: string[]
+}
+
+export interface User {
+  id: number
+  username: string
+  enabled: boolean
+  must_change_password: boolean
+  last_login: number
+  created_at: number
+  auth_source: string
+  roles: RoleAssignment[]
+}
+
+export interface AuditEntry {
+  id: number
+  time: number
+  user_id: number
+  username: string
+  action: string
+  target: string
+  detail: string
+  status: number
+  ip: string
 }
 
 export interface Enrollment {
@@ -376,7 +446,6 @@ async function request<T>(method: string, path: string, body?: unknown, headers?
 export const api = {
   login: (username: string, password: string) => request<{ username: string }>('POST', '/login', { username, password }),
   logout: () => request('POST', '/logout'),
-  loginInfo: () => request<{ pbs_login: boolean }>('GET', '/login-info'),
   me: () => request<Me>('GET', '/me'),
   changePassword: (current_password: string, new_password: string) => request('POST', '/password', { current_password, new_password }),
   dashboard: () => request<Dashboard>('GET', '/dashboard'),
@@ -399,8 +468,7 @@ export const api = {
   catalog: (id: number, snap: Snapshot, path: string) =>
     request<CatalogEntry[]>(
       'GET',
-      `/clients/${id}/catalog?` +
-        new URLSearchParams({ ns: snap.ns, backup_id: snap['backup-id'], backup_time: String(snap['backup-time']), path }).toString(),
+      `/clients/${id}/catalog?` + new URLSearchParams({ ns: snap.ns, backup_id: snap['backup-id'], backup_time: String(snap['backup-time']), path }).toString(),
     ),
   restore: (id: number, spec: RestoreSpec) => request<{ run_id: number }>('POST', `/clients/${id}/restore`, spec),
   // The client's encryption key as a PBS key file (proxmox-backup-client --keyfile).
@@ -457,6 +525,27 @@ export const api = {
   saveUpdateSettings: (s: UpdateSettings) => request<Updates>('PUT', '/settings/updates', s),
   checkUpdates: () => request<Updates>('POST', '/updates/check'),
   installUpdate: () => request<Updates>('POST', '/updates/install'),
+
+  permissions: () => request<PermInfo[]>('GET', '/permissions'),
+  users: () => request<User[]>('GET', '/users'),
+  createUser: (u: { username: string; password: string; enabled: boolean; must_change_password: boolean; roles: RoleAssignment[] }) =>
+    request<User>('POST', '/users', u),
+  updateUser: (id: number, u: { enabled: boolean; roles: RoleAssignment[] }) => request<User>('PUT', `/users/${id}`, u),
+  deleteUser: (id: number) => request('DELETE', `/users/${id}`),
+  resetPassword: (id: number, password: string, must_change_password: boolean) => request('POST', `/users/${id}/password`, { password, must_change_password }),
+  roles: () => request<Role[]>('GET', '/roles'),
+  saveRole: (r: { id?: number; name: string; description: string; permissions: Perm[] }) => {
+    const body = { name: r.name, description: r.description, permissions: r.permissions }
+    return r.id ? request<Role>('PUT', `/roles/${r.id}`, body) : request<Role>('POST', '/roles', body)
+  },
+  deleteRole: (id: number) => request('DELETE', `/roles/${id}`),
+  audit: (q: { before?: number; user?: string; limit?: number } = {}) => {
+    const p = new URLSearchParams()
+    if (q.before) p.set('before', String(q.before))
+    if (q.user) p.set('user', q.user)
+    if (q.limit) p.set('limit', String(q.limit))
+    return request<AuditEntry[]>('GET', `/audit?${p}`)
+  },
 }
 
 function strip<T extends object>(o: T, keys: string[]): Partial<T> {

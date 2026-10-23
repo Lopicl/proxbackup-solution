@@ -2,14 +2,16 @@
 
 import { useState } from 'react'
 import { api, type Target } from '../api'
+import { usePerms } from '../perms'
 import { Card, Empty, ErrorBox, Field, Modal, useLoad } from '../ui'
 
 type Form = Partial<Target> & { admin_secret?: string }
 
 export function Targets() {
   const { data, error, reload } = useLoad(api.targets, [])
-  const { data: me } = useLoad(api.me, [])
+  const { me, can } = usePerms()
   const local = me?.local_pbs
+  const canManage = can('targets.manage')
   const [edit, setEdit] = useState<Form | null>(null)
   return (
     <>
@@ -18,16 +20,18 @@ export function Targets() {
       <Card
         title="Backup targets"
         actions={
-          <button
-            className="primary"
-            onClick={() => setEdit({ pbs_user: 'proxbackup@pbs', root_ns: 'pcs', ...(local && { host: local.host, admin_auth_id: local.auth_id }) })}
-          >
-            Add PBS server
-          </button>
+          canManage && (
+            <button
+              className="primary"
+              onClick={() => setEdit({ pbs_user: 'proxbackup@pbs', root_ns: 'pcs', ...(local && { host: local.host, admin_auth_id: local.auth_id }) })}
+            >
+              Add PBS server
+            </button>
+          )
         }
       >
         {data && data.length === 0 ? (
-          <Empty>Add the Proxmox Backup Server that PCs should back up to.</Empty>
+          <Empty>{canManage ? 'Add the Proxmox Backup Server that PCs should back up to.' : 'No PBS servers yet.'}</Empty>
         ) : (
           <table>
             <thead>
@@ -62,9 +66,11 @@ export function Targets() {
                     <code>{t.pbs_user}</code>
                   </td>
                   <td className="row-actions">
-                    <button className="small ghost" onClick={() => setEdit(t)}>
-                      Edit
-                    </button>
+                    {canManage && (
+                      <button className="small ghost" onClick={() => setEdit(t)}>
+                        Edit
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -75,12 +81,12 @@ export function Targets() {
       <Card title="How agents are provisioned">
         <p className="muted-text">
           When a PC enrolls, the server uses the admin token to create namespace <code>&lt;root namespace&gt;/&lt;client&gt;</code>, an API token{' '}
-          <code>&lt;agent user&gt;!&lt;client&gt;</code> and grants it <b>DatastoreBackup</b> on that namespace only. Agents can create and restore their own snapshots, but
-          cannot delete, prune or read other clients' backups. Retention (prune) is run by this server.
+          <code>&lt;agent user&gt;!&lt;client&gt;</code> and grants it <b>DatastoreBackup</b> on that namespace only. Agents can create and restore their own
+          snapshots, but cannot delete, prune or read other clients' backups. Retention (prune) is run by this server.
         </p>
         <p className="muted-text">
-          The admin token needs permission to manage users, tokens, ACLs, namespaces and to prune and delete snapshots — e.g. a token of <code>root@pam</code> without privilege separation, or a
-          dedicated user with the <b>Admin</b> role on <code>/</code>.
+          The admin token needs permission to manage users, tokens, ACLs, namespaces and to prune and delete snapshots — e.g. a token of <code>root@pam</code>{' '}
+          without privilege separation, or a dedicated user with the <b>Admin</b> role on <code>/</code>.
         </p>
       </Card>
       {edit && (
@@ -138,7 +144,10 @@ function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?
           <Field label="Datastore">
             <input value={t.datastore ?? ''} onChange={(e) => set({ datastore: e.target.value })} required />
           </Field>
-          <Field label="Root namespace" hint="Each client gets a child namespace below this one. Changing it creates it on PBS and moves existing clients there; their older snapshots stay restorable.">
+          <Field
+            label="Root namespace"
+            hint="Each client gets a child namespace below this one. Changing it creates it on PBS and moves existing clients there; their older snapshots stay restorable."
+          >
             <input value={t.root_ns ?? ''} onChange={(e) => set({ root_ns: e.target.value })} placeholder="pcs" />
           </Field>
         </div>
@@ -148,9 +157,21 @@ function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?
           </Field>
           <Field
             label="Admin API token secret"
-            hint={isLocal ? 'Not needed: this is the token created when the console was installed on this PBS.' : t.id ? 'Leave empty to keep the stored secret.' : 'Stored encrypted.'}
+            hint={
+              isLocal
+                ? 'Not needed: this is the token created when the console was installed on this PBS.'
+                : t.id
+                  ? 'Leave empty to keep the stored secret.'
+                  : 'Stored encrypted.'
+            }
           >
-            <input type="password" value={t.admin_secret ?? ''} onChange={(e) => set({ admin_secret: e.target.value })} required={!t.id && !isLocal} autoComplete="off" />
+            <input
+              type="password"
+              value={t.admin_secret ?? ''}
+              onChange={(e) => set({ admin_secret: e.target.value })}
+              required={!t.id && !isLocal}
+              autoComplete="off"
+            />
           </Field>
         </div>
         <Field label="PBS user owning the agent tokens" hint="Created automatically if missing (no password, cannot log in).">

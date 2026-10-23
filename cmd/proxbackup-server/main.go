@@ -50,7 +50,7 @@ func main() {
 	flag.StringVar(&cfg.AgentAddr, "agent-addr", os.Getenv("PROXBACKUP_AGENT_ADDR"), "optional separate listen address(es, comma separated) for the agent API (mTLS)")
 	flag.StringVar(&cfg.PublicURL, "public-url", os.Getenv("PROXBACKUP_PUBLIC_URL"), "agent-facing URL, e.g. https://backup.example.com:8077")
 	flag.StringVar(&hosts, "hostnames", os.Getenv("PROXBACKUP_HOSTNAMES"), "comma separated host names/IPs for the server certificate")
-	flag.BoolVar(&localPBS, "local-pbs", os.Getenv("PROXBACKUP_LOCAL_PBS") == "1", "running on the PBS host: register its datastores and allow PBS admin logins")
+	flag.BoolVar(&localPBS, "local-pbs", os.Getenv("PROXBACKUP_LOCAL_PBS") == "1", "running on the PBS host: register its datastores as targets")
 	flag.StringVar(&local.APIAddr, "local-pbs-api", envOr("PROXBACKUP_LOCAL_PBS_API", "127.0.0.1:8007"), "local PBS API address")
 	flag.StringVar(&local.AuthID, "local-pbs-auth-id", envOr("PROXBACKUP_LOCAL_PBS_AUTH_ID", "root@pam!proxbackup-console"), "local PBS admin token id")
 	flag.StringVar(&local.SecretFile, "local-pbs-secret-file", envOr("PROXBACKUP_LOCAL_PBS_SECRET_FILE", credentialPath("pbs-token")), "file with the local PBS admin token secret")
@@ -58,7 +58,7 @@ func main() {
 	flag.StringVar(&cfg.UpdateRepo, "update-repo", os.Getenv("PROXBACKUP_UPDATE_REPO"), "GitHub repository (owner/name) to take updates from (default "+update.DefaultRepo+")")
 	cfg.UpdateMode = os.Getenv("PROXBACKUP_UPDATE_MODE") // "deb", set by the package's unit file
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: proxbackup-server [flags]\n       proxbackup-server passwd [username]   set an admin password\n       proxbackup-server version\n       proxbackup-server apply-update        install a requested update (run as root by proxbackup-server-update.service)\n\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "Usage: proxbackup-server [flags]\n       proxbackup-server passwd [username]   set a user password (creates an administrator if new)\n       proxbackup-server version\n       proxbackup-server apply-update        install a requested update (run as root by proxbackup-server-update.service)\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -96,10 +96,11 @@ func main() {
 		fmt.Printf("New password for %s: ", user)
 		pw, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 		pw = strings.TrimSpace(pw)
-		if len(pw) < 8 {
-			fatal(fmt.Errorf("password must be at least 8 characters"))
+		if len(pw) < 10 {
+			fatal(fmt.Errorf("password must be at least 10 characters"))
 		}
-		if err := srv.Store().UpsertAdmin(ctx, user, server.HashPassword(pw), false); err != nil {
+		// Recovery: enables the account; a new one becomes an administrator.
+		if err := srv.Store().SetLocalPassword(ctx, user, server.HashPassword(pw), false); err != nil {
 			fatal(err)
 		}
 		fmt.Println("password updated")

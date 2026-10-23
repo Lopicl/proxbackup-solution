@@ -69,7 +69,7 @@ func TestClientEncryptionKey(t *testing.T) {
 	// Escrow download: a PBS key file with the same key.
 	req := httptest.NewRequest("GET", "/api/clients/1/encryption-key", nil)
 	req.SetPathValue("id", "1")
-	req = req.WithContext(context.WithValue(req.Context(), sessionUserKey, &SessionUser{Name: "admin"}))
+	req = asAdmin(req)
 	rec := httptest.NewRecorder()
 	s.handleClientKey(rec, req)
 	if rec.Code != 200 {

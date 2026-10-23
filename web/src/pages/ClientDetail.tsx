@@ -5,6 +5,7 @@ import { ALL_CLIENTS, api, clientName, type GroupJob, type GroupMember, type Sna
 import { adminBackend, RestoreBrowser } from './RestoreBrowser'
 import { RunsTable } from './RunsTable'
 import { GroupJobEditor, JobTags, keepText, MemberEditor, newGroupJob, ScheduleText } from './Jobs'
+import { usePerms } from '../perms'
 import { ago, bytes, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
 
 export function ClientDetail({ id, tab }: { id: number; tab: string }) {
@@ -14,9 +15,15 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
   const [member, setMember] = useState<{ m: GroupMember; group: string } | null>(null)
   const [editingTags, setEditingTags] = useState(false)
   const [msg, setMsg] = useState('')
+  const perms = usePerms()
   if (error) return <ErrorBox error={error} />
   if (!data) return null
   const c = data.client
+  const canManage = perms.can('clients.manage', c)
+  const canRun = perms.can('backups.run', c)
+  const canRestore = perms.can('restore', c)
+  const canMember = perms.can('jobs.manage', c)
+  const canEditJobs = perms.all('jobs.manage')
   const reloadAll = () => {
     reload()
     groups.reload()
@@ -24,18 +31,14 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
   // The group jobs this client is a member of.
   const memberships = (groups.data ?? []).flatMap((g) => g.members.filter((m) => m.client_id === id).map((m) => ({ g, m })))
 
-  const tabs = [
-    ['jobs', `Jobs (${data.jobs.length})`],
-    ['runs', 'History'],
-    ['snapshots', 'Snapshots & restore'],
-  ]
+  const tabs = [['jobs', `Jobs (${data.jobs.length})`], ['runs', 'History'], ...(canRestore ? [['snapshots', 'Snapshots & restore']] : [])]
   return (
     <>
       <div className="title-row">
         <h1>
           <OnlineDot online={c.online} /> {clientName(c)} {c.revoked && <span className="badge bad">revoked {ago(c.revoked_at)}</span>}
         </h1>
-        {c.revoked ? (
+        {!canManage ? null : c.revoked ? (
           c.restorable && (
             <button
               className="primary"
@@ -83,21 +86,23 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
                 update to {c.agent_update} pushed{c.online ? '' : ' — applied when the PC connects'}
               </b>
             ) : (
-              <button
-                className="small"
-                title="Install the console's agent version on this PC now, even with automatic agent updates off. It waits for running backups to finish."
-                onClick={async () => {
-                  try {
-                    const r = await api.pushAgentUpdate(id)
-                    setMsg(`Agent update to ${r.version} pushed${c.online ? '' : ' — it is installed when the PC comes online'}.`)
-                    reload()
-                  } catch (e) {
-                    setMsg((e as Error).message)
-                  }
-                }}
-              >
-                Update agent to {c.agent_update}
-              </button>
+              canManage && (
+                <button
+                  className="small"
+                  title="Install the console's agent version on this PC now, even with automatic agent updates off. It waits for running backups to finish."
+                  onClick={async () => {
+                    try {
+                      const r = await api.pushAgentUpdate(id)
+                      setMsg(`Agent update to ${r.version} pushed${c.online ? '' : ' — it is installed when the PC comes online'}.`)
+                      reload()
+                    } catch (e) {
+                      setMsg((e as Error).message)
+                    }
+                  }}
+                >
+                  Update agent to {c.agent_update}
+                </button>
+              )
             ))}
         </span>
         <span>
@@ -111,9 +116,11 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
           ) : (
             <b>none</b>
           )}{' '}
-          <button className="small ghost" title="Tags group clients: jobs can target every client with a tag" onClick={() => setEditingTags(true)}>
-            Edit
-          </button>
+          {perms.all('clients.manage') && (
+            <button className="small ghost" title="Tags group clients: jobs can target every client with a tag" onClick={() => setEditingTags(true)}>
+              Edit
+            </button>
+          )}
         </span>
         <span>
           Namespace <code>{c.namespace}</code>
@@ -131,21 +138,30 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
           Encryption{' '}
           {c.encryption_fingerprint ? (
             <>
-              <code title={`Key fingerprint ${c.encryption_fingerprint}, created ${dateTime(c.encryption_created)}`}>{c.encryption_fingerprint.slice(0, 23)}…</code>{' '}
-              <button
-                className="small"
-                title="The key is escrowed by this console. Keep a copy offline to restore with proxmox-backup-client --keyfile if the console is lost."
-                onClick={async () => {
-                  if (!confirm(`Download the encryption key of ${c.name}? Anyone with this file and read access to the datastore can decrypt its backups. Store it safely.`)) return
-                  try {
-                    await api.downloadClientKey(c)
-                  } catch (e) {
-                    setMsg((e as Error).message)
-                  }
-                }}
-              >
-                Download key
-              </button>
+              <code title={`Key fingerprint ${c.encryption_fingerprint}, created ${dateTime(c.encryption_created)}`}>
+                {c.encryption_fingerprint.slice(0, 23)}…
+              </code>{' '}
+              {canRestore && (
+                <button
+                  className="small"
+                  title="The key is escrowed by this console. Keep a copy offline to restore with proxmox-backup-client --keyfile if the console is lost."
+                  onClick={async () => {
+                    if (
+                      !confirm(
+                        `Download the encryption key of ${c.name}? Anyone with this file and read access to the datastore can decrypt its backups. Store it safely.`,
+                      )
+                    )
+                      return
+                    try {
+                      await api.downloadClientKey(c)
+                    } catch (e) {
+                      setMsg((e as Error).message)
+                    }
+                  }}
+                >
+                  Download key
+                </button>
+              )}
             </>
           ) : (
             <b>off</b>
@@ -172,7 +188,9 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
           {c.config_synced ? (
             <b className="ok-text">in sync</b>
           ) : (
-            <b className="warn-text" title="The agent picks up the new configuration the next time it connects">pending — applied when the PC connects</b>
+            <b className="warn-text" title="The agent picks up the new configuration the next time it connects">
+              pending — applied when the PC connects
+            </b>
           )}
         </span>
       </div>
@@ -189,9 +207,11 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         <Card
           title="Backup jobs"
           actions={
-            <button className="primary" onClick={() => setEditing(newGroupJob([id]))}>
-              New job
-            </button>
+            canEditJobs && (
+              <button className="primary" onClick={() => setEditing(newGroupJob([id]))}>
+                New job
+              </button>
+            )
           }
         >
           {memberships.length === 0 ? (
@@ -242,32 +262,40 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
                     <td>
                       <ScheduleText j={g} />
                     </td>
-                    <td>
-                      {m.catch_up_pending ? <span className="badge info">catch-up pending</span> : m.next_run ? dateTime(m.next_run) : '—'}
-                    </td>
+                    <td>{m.catch_up_pending ? <span className="badge info">catch-up pending</span> : m.next_run ? dateTime(m.next_run) : '—'}</td>
                     <td>{m.last_run ? <StateBadge state={m.last_run.state} /> : '—'}</td>
                     <td>{keepText(g.retention)}</td>
                     <td className="row-actions">
-                      <button
-                        className="small"
-                        onClick={async () => {
-                          try {
-                            const r = await api.runJob(m.id)
-                            setMsg(`Run #${r.run_id} queued${c.online ? '' : ' — it starts when the PC comes online'}.`)
-                            reloadAll()
-                          } catch (e) {
-                            setMsg((e as Error).message)
-                          }
-                        }}
-                      >
-                        Run now
-                      </button>
-                      <button className="small ghost" onClick={() => setMember({ m, group: g.name })} title="Settings of this job on this client">
-                        Settings
-                      </button>
-                      <button className="small ghost" onClick={() => setEditing(g)} title={g.members.length > 1 ? `Changes apply to all ${g.members.length} clients` : ''}>
-                        Edit job
-                      </button>
+                      {canRun && (
+                        <button
+                          className="small"
+                          onClick={async () => {
+                            try {
+                              const r = await api.runJob(m.id)
+                              setMsg(`Run #${r.run_id} queued${c.online ? '' : ' — it starts when the PC comes online'}.`)
+                              reloadAll()
+                            } catch (e) {
+                              setMsg((e as Error).message)
+                            }
+                          }}
+                        >
+                          Run now
+                        </button>
+                      )}
+                      {canMember && (
+                        <button className="small ghost" onClick={() => setMember({ m, group: g.name })} title="Settings of this job on this client">
+                          Settings
+                        </button>
+                      )}
+                      {canEditJobs && (
+                        <button
+                          className="small ghost"
+                          onClick={() => setEditing(g)}
+                          title={g.members.length > 1 ? `Changes apply to all ${g.members.length} clients` : ''}
+                        >
+                          Edit job
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -283,12 +311,8 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         </Card>
       )}
 
-      {tab === 'snapshots' && (
-        <Snapshots
-          clientId={id}
-          online={c.online}
-          onQueued={(runs) => (location.hash = runs.length === 1 ? `/runs/${runs[0]}` : `/clients/${id}/runs`)}
-        />
+      {tab === 'snapshots' && canRestore && (
+        <Snapshots clientId={id} online={c.online} onQueued={(runs) => (location.hash = runs.length === 1 ? `/runs/${runs[0]}` : `/clients/${id}/runs`)} />
       )}
 
       {editing && (
@@ -462,7 +486,10 @@ function RestoreDialog({
               ns: snap.ns,
               archive,
               target_dir: target,
-              paths: paths.split('\n').map((p) => p.trim()).filter(Boolean),
+              paths: paths
+                .split('\n')
+                .map((p) => p.trim())
+                .filter(Boolean),
               overwrite,
             })
             onQueued(r.run_id)
@@ -486,8 +513,8 @@ function RestoreDialog({
           hint={
             isImage ? (
               <>
-                Paths on the NTFS volume, one per line, e.g. <code>Users/alice/Documents</code>; <code>/</code> restores every file. Only the
-                selected files are downloaded. Empty restores the raw image.
+                Paths on the NTFS volume, one per line, e.g. <code>Users/alice/Documents</code>; <code>/</code> restores every file. Only the selected files are
+                downloaded. Empty restores the raw image.
               </>
             ) : (
               <>

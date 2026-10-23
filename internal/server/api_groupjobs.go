@@ -31,7 +31,10 @@ type memberView struct {
 	LastRun  *Run     `json:"last_run,omitempty"`
 }
 
-func (s *Server) groupViews(ctx context.Context, groups []*GroupJob) ([]groupJobView, error) {
+// groupViews resolves the members of groups. With a scoped viewer (all false),
+// only members visible passes are listed, and groups without any are left out.
+func (s *Server) groupViews(ctx context.Context, groups []*GroupJob, a *Access) ([]groupJobView, error) {
+	all := a.Global(PermViewClients)
 	clients, err := s.store.Clients(ctx)
 	if err != nil {
 		return nil, err
@@ -56,6 +59,9 @@ func (s *Server) groupViews(ctx context.Context, groups []*GroupJob) ([]groupJob
 			if c == nil {
 				continue // revoked
 			}
+			if !all && !a.Client(PermViewClients, c) {
+				continue
+			}
 			applyAgentState(c, []*Job{j})
 			m := memberView{Job: j, ClientName: c.Name, Online: c.Online, Explicit: slices.Contains(g.Clients, c.ID),
 				ViaTags: []string{}, LastRun: last[j.ID]}
@@ -65,6 +71,9 @@ func (s *Server) groupViews(ctx context.Context, groups []*GroupJob) ([]groupJob
 				}
 			}
 			v.Members = append(v.Members, m)
+		}
+		if !all && len(v.Members) == 0 {
+			continue
 		}
 		slices.SortFunc(v.Members, func(a, b memberView) int { return cmp.Compare(a.ClientName, b.ClientName) })
 		out = append(out, v)
@@ -78,7 +87,7 @@ func (s *Server) handleGroupJobs(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 500, err)
 		return
 	}
-	views, err := s.groupViews(r.Context(), groups)
+	views, err := s.groupViews(r.Context(), groups, access(r))
 	if err != nil {
 		httpError(w, 500, err)
 		return
@@ -98,12 +107,18 @@ func (s *Server) handleGroupJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, statusFor(err), err)
 		return
 	}
-	views, err := s.groupViews(ctx, []*GroupJob{g})
+	views, err := s.groupViews(ctx, []*GroupJob{g}, access(r))
 	if err != nil {
 		httpError(w, 500, err)
 		return
 	}
-	runs, _ := s.store.Runs(ctx, RunFilter{GroupID: id, Limit: 100})
+	if len(views) == 0 {
+		httpError(w, http.StatusForbidden, errors.New("you don't have the permission for any client of this job"))
+		return
+	}
+	f := RunFilter{GroupID: id, Limit: 100}
+	s.scopeRuns(ctx, access(r), &f)
+	runs, _ := s.store.Runs(ctx, f)
 	writeJSON(w, map[string]any{"job": views[0], "runs": orEmpty(runs)})
 }
 
@@ -194,6 +209,7 @@ func (s *Server) handleSaveGroupJob(w http.ResponseWriter, r *http.Request) {
 		g.ID, g.CreatedAt = id, old.CreatedAt
 		turningOn = g.Encrypt && !old.Encrypt
 	}
+	auditTarget(r, "job "+g.Name)
 	if err := validateGroupJob(&g); err != nil {
 		httpError(w, 400, err)
 		return
@@ -251,6 +267,9 @@ func (s *Server) handleDeleteGroupJob(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	if g, err := s.store.GroupJob(r.Context(), id); err == nil {
+		auditTarget(r, "job "+g.Name)
+	}
 	affected, err := s.store.DeleteGroupJob(r.Context(), id)
 	if err != nil {
 		httpError(w, statusFor(err), err)
@@ -271,21 +290,30 @@ func (s *Server) handleRunGroupJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	if _, err := s.store.GroupJob(ctx, id); err != nil {
+	g, err := s.store.GroupJob(ctx, id)
+	if err != nil {
 		httpError(w, statusFor(err), err)
 		return
 	}
+	auditTarget(r, "job "+g.Name)
 	jobs, err := s.store.GroupMembers(ctx, id)
 	if err != nil {
 		httpError(w, 500, err)
 		return
 	}
-	queued, skipped := []int64{}, 0
+	// Users allowed to run backups on some clients start the job on those.
+	a := access(r)
+	queued, skipped, denied := []int64{}, 0, 0
 	for _, j := range jobs {
 		if !j.Enabled {
 			continue
 		}
-		if c, err := s.store.Client(ctx, j.ClientID); err != nil || c.Revoked {
+		c, err := s.store.Client(ctx, j.ClientID)
+		if err != nil || c.Revoked {
+			continue
+		}
+		if !a.Client(PermRunBackups, c) {
+			denied++
 			continue
 		}
 		runID, err := s.queueJob(ctx, j.ID, api.TriggerManual)
@@ -296,8 +324,15 @@ func (s *Server) handleRunGroupJob(w http.ResponseWriter, r *http.Request) {
 		queued = append(queued, runID)
 	}
 	if len(queued) == 0 && skipped == 0 {
+		if denied > 0 {
+			httpError(w, http.StatusForbidden, errors.New("you don't have the permission to run backups on the clients of this job"))
+			return
+		}
 		httpError(w, 400, errors.New("the job has no enabled members"))
 		return
+	}
+	if denied > 0 {
+		auditDetail(r, "%d client(s) outside the user's scope skipped", denied)
 	}
 	writeJSON(w, map[string]any{"run_ids": queued, "skipped": skipped})
 }
@@ -326,6 +361,10 @@ func (s *Server) handleClientTags(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ctx := r.Context()
+	if c, err := s.store.Client(ctx, id); err == nil {
+		auditTarget(r, "client "+c.Name)
+	}
+	auditDetail(r, "tags: %v", tags)
 	affected, err := s.store.SetClientTags(ctx, id, tags)
 	if err != nil {
 		httpError(w, statusFor(err), err)

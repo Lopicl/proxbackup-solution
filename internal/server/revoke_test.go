@@ -45,7 +45,7 @@ func TestRevokeAndUnrevoke(t *testing.T) {
 		t.Fatalf("second revoke: %v", err)
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("DELETE", "/api/clients/1", nil)
+	req := asAdmin(httptest.NewRequest("DELETE", "/api/clients/1", nil))
 	req.SetPathValue("id", strconv.FormatInt(c.ID, 10))
 	s.handleRevokeClient(rec, req)
 	if rec.Code != 409 {

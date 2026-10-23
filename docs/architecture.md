@@ -304,15 +304,41 @@ read on every run.
   `root@pam!proxbackup-console` with `proxmox-backup-manager`, and runs the console as the system
   user `proxbackup`, which can read the token secret. With `-local-pbs` the console registers
   every local datastore as a target on first start, re-reads the PBS certificate fingerprint over
-  loopback hourly (so ACME renewals need no reconfiguration), and lets PBS administrators
-  (`Sys.Modify` on `/`, e.g. `root@pam`) sign in with their PBS credentials. Accounts with
-  two-factor auth must use a local console account for now. Phase 2 replaces PBS sign-in with
-  the console's own users and roles.
-* **Admin accounts.** Local accounts use argon2id hashes. The generated initial `admin`
-  password must be changed at first sign-in; until then the API only answers `/api/me` and
-  `/api/password`. Changing a password signs out the account's other sessions. Users change
-  their own password under the profile menu → *Profile Settings*; PBS-credential users are
-  told to change it on PBS.
+  loopback hourly (so ACME renewals need no reconfiguration). PBS accounts can't sign in to the
+  console: it has its own users (below) on every install.
+* **Users and roles** (`internal/server/users.go`). Console users have argon2id password
+  hashes, can be disabled, and record their last sign-in. The first start creates `admin`
+  (Administrator) with a generated password that must be changed at the first sign-in; until
+  then the API only answers `/api/me` and `/api/password`. Changing or resetting a password
+  signs out the account's other sessions; disabling or deleting a user ends all of them.
+  `proxbackup-server passwd [user]` is the recovery path (re-enables the account, creates a new
+  one as Administrator). Rights come from **roles**, which are sets of permissions:
+
+  | Permission | Allows | Scopable |
+  | --- | --- | --- |
+  | `clients.view` | clients, jobs, runs, logs, dashboard | ✓ |
+  | `clients.manage` | revoke/un-revoke, push agent updates; enrollment and tags need all clients | ✓ |
+  | `jobs.manage` | member job settings; group job definitions need all clients | ✓ |
+  | `backups.run` | start and cancel backups | ✓ |
+  | `restore` | snapshots, file browser, restores, client key download | ✓ |
+  | `targets.manage`, `notifications.manage`, `updates.manage`, `encryption.manage`, `users.manage`, `audit.view` | console settings, users and roles, audit log | — |
+
+  Built-in roles (kept in sync at startup, not editable): Administrator (all), Operator
+  (client permissions), Restore-only (view + restore), Read-only (view); custom roles pick any
+  set. A user gets one or more roles, each for **all clients** or for chosen clients and
+  **tags** (clients tagged later are included). Console permissions only count from roles for
+  all clients; any client permission implies seeing that client. Enrollment, client tags and
+  group job definitions need the permission for all clients, because they decide who is in a
+  scope. Every API route states the permission it needs; handlers check the client they act
+  on and filter lists, and the UI hides what the user can't do (from the scopes in `/api/me`).
+  The console refuses changes that would leave no enabled user with `users.manage` for all
+  clients. `auth_source`/`external_id` on users leave room for OIDC (phase 5) mapping external
+  identities onto the same users and roles.
+* **Audit log.** Sign-ins (also failed ones), sign-outs and every change made through the API
+  (plus key downloads and showing enrollment/setup tokens) are recorded with user, action,
+  target, details, result and IP, kept 2 years, and shown under *Users → Audit log*.
+  Upgrading from 0.1 drops accounts and sessions of PBS users; local accounts become
+  Administrators.
 * **Web UI layout.** A horizontal top bar holds the brand, the page links (Dashboard,
   Clients, Jobs, PBS servers) and the version, with *Console Settings* (gear icon) and the
   profile menu (*Profile Settings*, *Logout*) on the right. On narrow screens only the icons
@@ -604,10 +630,9 @@ sequenceDiagram
     this setup and checks it, with sync freshness from sync-job awareness (both phase 5). Tape
     via PBS tape backup is the offline alternative.
 * **Admin UI:** session cookie plus a custom request header (`X-PROXBACKUP-Request`) against
-  CSRF. Local admin accounts (argon2id, forced change of the generated initial password), PBS
-  administrators via their PBS credentials on the PBS host (until phase 2 replaces them with
-  console users and granular, client-scoped roles plus an audit log), optional OIDC in phase 5
-  (SSO with MFA for the MSP console in phase 6).
+  CSRF. Console users (argon2id, forced change of the generated initial password) with
+  granular, client-scoped roles, enforced on every API route, and an audit log; optional OIDC
+  in phase 5 (SSO with MFA for the MSP console in phase 6).
 * **Updates:** the console and its root helper only install release assets whose SHA-256
   matches the release's `SHA256SUMS`, and never downgrade. Agents verify the binary's size,
   hash and reported version and only fetch it from the console over mTLS. Releases are not
@@ -643,7 +668,7 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, pxar v2 split archives with metadata change detection (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)), buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
-| 2 — alpha 0.2 (in progress; ✅ = implemented) | Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, ✅ tray app (status, back up now, pause, recent runs, self-service restore page scoped to the user's profile for non-admins), ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, bandwidth limits, metered-network/battery awareness, immutable backups (✅ lock via the PBS `protected` flag while retention keeps a snapshot, ✅ tamper-resistant retention; see [Security model](#security-model)), ✅ no `catalog.pcat1.didx` for pxar v2 file backups (browsed through the `.mpxar`) |
+| 2 — alpha 0.2 (in progress; ✅ = implemented) | ✅ Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, ✅ tray app (status, back up now, pause, recent runs, self-service restore page scoped to the user's profile for non-admins), ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, bandwidth limits, metered-network/battery awareness, immutable backups (✅ lock via the PBS `protected` flag while retention keeps a snapshot, ✅ tamper-resistant retention; see [Security model](#security-model)), ✅ no `catalog.pcat1.didx` for pxar v2 file backups (browsed through the `.mpxar`) |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness, immutable off-host copy (guided pull-sync to a second PBS; see [Security model](#security-model)) |

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { api, type LogLine } from '../api'
+import { usePerms } from '../perms'
 import { bytes, Card, dateTime, duration, ErrorBox, Link, ProgressBar, StateBadge, useLoad } from '../ui'
 
 export function RunDetail({ id }: { id: number }) {
@@ -9,6 +10,7 @@ export function RunDetail({ id }: { id: number }) {
   const [logs, setLogs] = useState<LogLine[]>([])
   const lastId = useRef(0)
   const box = useRef<HTMLPreElement>(null)
+  const perms = usePerms()
 
   useEffect(() => {
     lastId.current = 0
@@ -49,7 +51,7 @@ export function RunDetail({ id }: { id: number }) {
         <h1>
           Run #{r.id} <StateBadge state={r.state} />
         </h1>
-        {active && !r.cancel_requested && (
+        {active && !r.cancel_requested && perms.can(r.kind === 'restore' ? 'restore' : 'backups.run', { id: r.client_id }) && (
           <button
             className="danger"
             onClick={async () => {

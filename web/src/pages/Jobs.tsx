@@ -3,6 +3,7 @@
 import { useState, type ReactNode } from 'react'
 import { ALL_CLIENTS, api, type GroupJob, type GroupJobView, type GroupMember, type Job, type Keep } from '../api'
 import { RunsTable } from './RunsTable'
+import { usePerms } from '../perms'
 import { ago, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
 
 // Every backup job is a group job: one definition, any number of member
@@ -13,6 +14,9 @@ export function Jobs() {
   const { data, error, reload } = useLoad(api.groupJobs, [], 10000)
   const [editing, setEditing] = useState<Partial<GroupJob> | null>(null)
   const [msg, setMsg] = useState('')
+  const perms = usePerms()
+  // A job's definition applies to clients by tag: editing needs all clients.
+  const canEdit = perms.all('jobs.manage')
   return (
     <>
       <h1>Jobs</h1>
@@ -21,9 +25,11 @@ export function Jobs() {
       <Card
         title={`${data?.length ?? 0} backup jobs`}
         actions={
-          <button className="primary" onClick={() => setEditing(newGroupJob([]))}>
-            New job
-          </button>
+          canEdit && (
+            <button className="primary" onClick={() => setEditing(newGroupJob([]))}>
+              New job
+            </button>
+          )
         }
       >
         {!data ? null : data.length === 0 ? (
@@ -64,12 +70,16 @@ export function Jobs() {
                     <RunSummary members={g.members} />
                   </td>
                   <td className="row-actions">
-                    <button className="small" disabled={g.members.length === 0} onClick={() => runGroup(g, setMsg, reload)}>
-                      Run now
-                    </button>
-                    <button className="small ghost" onClick={() => setEditing(g)}>
-                      Edit
-                    </button>
+                    {perms.can('backups.run') && (
+                      <button className="small" disabled={g.members.length === 0} onClick={() => runGroup(g, setMsg, reload)}>
+                        Run now
+                      </button>
+                    )}
+                    {canEdit && (
+                      <button className="small ghost" onClick={() => setEditing(g)}>
+                        Edit
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -110,6 +120,7 @@ export function JobDetail({ id }: { id: number }) {
   const [editing, setEditing] = useState(false)
   const [member, setMember] = useState<GroupMember | null>(null)
   const [msg, setMsg] = useState('')
+  const perms = usePerms()
   if (error) return <ErrorBox error={error} />
   if (!data) return null
   const g = data.job
@@ -121,12 +132,16 @@ export function JobDetail({ id }: { id: number }) {
           <JobTags j={g} />
         </h1>
         <div>
-          <button onClick={() => runGroup(g, setMsg, reload)} disabled={g.members.length === 0}>
-            Run now on all members
-          </button>{' '}
-          <button className="primary" onClick={() => setEditing(true)}>
-            Edit job
-          </button>
+          {perms.can('backups.run') && (
+            <button onClick={() => runGroup(g, setMsg, reload)} disabled={g.members.length === 0}>
+              {perms.all('backups.run') ? 'Run now on all members' : 'Run now on your clients'}
+            </button>
+          )}{' '}
+          {perms.all('jobs.manage') && (
+            <button className="primary" onClick={() => setEditing(true)}>
+              Edit job
+            </button>
+          )}
         </div>
       </div>
       <div className="facts">
@@ -206,7 +221,11 @@ export function JobDetail({ id }: { id: number }) {
                   </td>
                   <td>
                     {m.catch_up_pending ? <span className="badge info">catch-up pending</span> : m.next_run ? dateTime(m.next_run) : '—'}
-                    {m.schedule && m.start_delay > 0 && <span className="tag" title="Start offset within the job's spread">{delayText(m.start_delay)}</span>}
+                    {m.schedule && m.start_delay > 0 && (
+                      <span className="tag" title="Start offset within the job's spread">
+                        {delayText(m.start_delay)}
+                      </span>
+                    )}
                   </td>
                   <td>
                     {m.last_run ? (
@@ -219,23 +238,27 @@ export function JobDetail({ id }: { id: number }) {
                     )}
                   </td>
                   <td className="row-actions">
-                    <button
-                      className="small"
-                      onClick={async () => {
-                        try {
-                          const r = await api.runJob(m.id)
-                          setMsg(`Run #${r.run_id} on ${m.client_name} queued${m.online ? '' : ' — it starts when the PC comes online'}.`)
-                          reload()
-                        } catch (e) {
-                          setMsg((e as Error).message)
-                        }
-                      }}
-                    >
-                      Run now
-                    </button>
-                    <button className="small ghost" onClick={() => setMember(m)}>
-                      Settings
-                    </button>
+                    {perms.can('backups.run', { id: m.client_id }) && (
+                      <button
+                        className="small"
+                        onClick={async () => {
+                          try {
+                            const r = await api.runJob(m.id)
+                            setMsg(`Run #${r.run_id} on ${m.client_name} queued${m.online ? '' : ' — it starts when the PC comes online'}.`)
+                            reload()
+                          } catch (e) {
+                            setMsg((e as Error).message)
+                          }
+                        }}
+                      >
+                        Run now
+                      </button>
+                    )}
+                    {perms.can('jobs.manage', { id: m.client_id }) && (
+                      <button className="small ghost" onClick={() => setMember(m)}>
+                        Settings
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -487,7 +510,11 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
                 label="Backup ID (PBS backup group)"
                 hint={`Empty = the client's name${j.kind === 'image' ? ' plus “-image”' : ''}. Every client has its own namespace, so members never share a group.`}
               >
-                <input value={j.backup_id ?? ''} onChange={(e) => set({ backup_id: e.target.value })} placeholder={j.kind === 'image' ? '<client>-image' : '<client>'} />
+                <input
+                  value={j.backup_id ?? ''}
+                  onChange={(e) => set({ backup_id: e.target.value })}
+                  placeholder={j.kind === 'image' ? '<client>-image' : '<client>'}
+                />
               </Field>
               <div className="options">
                 <Option checked={!!j.enabled} onChange={(v) => set({ enabled: v })} title="Enabled">
@@ -500,8 +527,8 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
           {tab === 'clients' && (
             <>
               <p className="muted-text intro">
-                Pick PCs by tag and/or by name. Clients tagged later join automatically, and new PCs join jobs for all clients. Each PC keeps its own backup group
-                and history.
+                Pick PCs by tag and/or by name. Clients tagged later join automatically, and new PCs join jobs for all clients. Each PC keeps its own backup
+                group and history.
               </p>
               <h3>By tag</h3>
               <div className="chips">
@@ -558,7 +585,8 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
                     label="Exclude patterns"
                     hint={
                       <>
-                        One per line, e.g. <code>*.iso</code>, <code>**/Downloads</code>. Temp folders, pagefile etc. are always excluded. Members can add their own.
+                        One per line, e.g. <code>*.iso</code>, <code>**/Downloads</code>. Temp folders, pagefile etc. are always excluded. Members can add their
+                        own.
                       </>
                     }
                   >
@@ -608,10 +636,25 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
                   <h3>Timing</h3>
                   <div className="grid3">
                     <Field label="Start window (minutes)" hint="A run may start up to this long after its time and still count as on time.">
-                      <input type="number" min={1} max={10080} value={j.window_minutes ?? 60} onChange={(e) => set({ window_minutes: Number(e.target.value) })} />
+                      <input
+                        type="number"
+                        min={1}
+                        max={10080}
+                        value={j.window_minutes ?? 60}
+                        onChange={(e) => set({ window_minutes: Number(e.target.value) })}
+                      />
                     </Field>
-                    <Field label="Start spread (minutes)" hint="Each member starts at its own fixed offset within this range, so PCs don't all hit PBS at once. 0 = all at once.">
-                      <input type="number" min={0} max={1440} value={j.spread_minutes ?? 0} onChange={(e) => set({ spread_minutes: Number(e.target.value) || 0 })} />
+                    <Field
+                      label="Start spread (minutes)"
+                      hint="Each member starts at its own fixed offset within this range, so PCs don't all hit PBS at once. 0 = all at once."
+                    >
+                      <input
+                        type="number"
+                        min={0}
+                        max={1440}
+                        value={j.spread_minutes ?? 0}
+                        onChange={(e) => set({ spread_minutes: Number(e.target.value) || 0 })}
+                      />
                     </Field>
                     <Field label="If the PC misses the window" hint="Because it was off, asleep or busy.">
                       <select value={j.catch_up ? 'catch' : 'skip'} onChange={(e) => set({ catch_up: e.target.value === 'catch' })}>
@@ -641,8 +684,8 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
           {tab === 'retention' && (
             <>
               <p className="muted-text intro">
-                Applied by this console once a day to each member's backup group, never because a PC reported a run. Snapshots still inside their lock period, and
-                ones an operator protected on PBS, are kept on top of these counts.
+                Applied by this console once a day to each member's backup group, never because a PC reported a run. Snapshots still inside their lock period,
+                and ones an operator protected on PBS, are kept on top of these counts.
               </p>
               <h3>Snapshots to keep</h3>
               <div className="keep">
@@ -675,13 +718,14 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
               </div>
               {needsMasterKey && (
                 <p className="warn-text small">
-                  Set up an RSA master key in <Link to="/settings">Console Settings</Link> first. It keeps encrypted backups recoverable even if this console is lost.
+                  Set up an RSA master key in <Link to="/settings">Console Settings</Link> first. It keeps encrypted backups recoverable even if this console is
+                  lost.
                 </p>
               )}
               {!!j.id && !!j.encrypt !== !!job.encrypt && (
                 <div className="notice">
-                  {j.encrypt ? 'The next run encrypts everything' : 'The next run stores everything unencrypted'}: it reads every file and uploads all data again,
-                  since chunks can't be shared between encrypted and unencrypted snapshots. Existing snapshots stay as they are and remain restorable.
+                  {j.encrypt ? 'The next run encrypts everything' : 'The next run stores everything unencrypted'}: it reads every file and uploads all data
+                  again, since chunks can't be shared between encrypted and unencrypted snapshots. Existing snapshots stay as they are and remain restorable.
                 </div>
               )}
               <h3>Ransomware protection</h3>
@@ -704,15 +748,22 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
                     </span>
                   }
                 >
-                  Each new snapshot is protected on PBS for this long, then for as long as retention keeps it: until then nothing can prune or delete it, not even
-                  the PC or an operator by mistake. Set it longer than you'd take to notice an attack.
+                  Each new snapshot is protected on PBS for this long, then for as long as retention keeps it: until then nothing can prune or delete it, not
+                  even the PC or an operator by mistake. Set it longer than you'd take to notice an attack.
                 </Option>
               </div>
               <Field
                 label="Backups per day"
                 hint="Only this many backups of a member per day are locked and count for retention; extra ones are removed by retention and reported as a possible ransomware sign. 0 = automatic (the scheduled runs plus 3)."
               >
-                <input type="number" min={0} max={100} className="narrow" value={j.daily_cap ?? 0} onChange={(e) => set({ daily_cap: Number(e.target.value) || 0 })} />
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  className="narrow"
+                  value={j.daily_cap ?? 0}
+                  onChange={(e) => set({ daily_cap: Number(e.target.value) || 0 })}
+                />
               </Field>
             </>
           )}
@@ -748,7 +799,15 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
 }
 
 // MemberEditor changes one client's settings in a group job.
-export function MemberEditor({ member, groupName, onClose }: { member: Job & { explicit?: boolean; via_tags?: string[] }; groupName: string; onClose: () => void }) {
+export function MemberEditor({
+  member,
+  groupName,
+  onClose,
+}: {
+  member: Job & { explicit?: boolean; via_tags?: string[] }
+  groupName: string
+  onClose: () => void
+}) {
   const [enabled, setEnabled] = useState(member.member_enabled)
   const [extra, setExtra] = useState(member.extra_excludes.join('\n'))
   const [error, setError] = useState('')
@@ -767,8 +826,8 @@ export function MemberEditor({ member, groupName, onClose }: { member: Job & { e
         }}
       >
         <p className="muted-text">
-          The job definition is shared by all its clients; <Link to={`/jobs/${member.group_id}`}>edit it on the job page</Link>. These settings only apply to this
-          client.
+          The job definition is shared by all its clients; <Link to={`/jobs/${member.group_id}`}>edit it on the job page</Link>. These settings only apply to
+          this client.
         </p>
         {member.kind === 'files' && (
           <Field
