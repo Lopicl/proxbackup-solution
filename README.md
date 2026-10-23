@@ -109,8 +109,8 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 
 ### 7. Users
 
-*Users* (top bar) adds console users and gives them roles: Administrator, Operator, Restore-only,
-Read-only or custom ones, each for all clients or only chosen clients and tags. *Audit log* lists
+*Console Settings* (gear icon) → *Users* adds console users and gives them roles: Administrator, Operator, Restore-only,
+Read-only or custom ones, each for all clients or only chosen clients and tags. Its *Audit log* tab lists
 sign-ins and every change. Users change their own password under the profile menu.
 
 ### Troubleshooting

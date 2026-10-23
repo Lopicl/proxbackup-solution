@@ -5,29 +5,8 @@ import { api, type AuditEntry, type Client, type Perm, type PermInfo, type Role,
 import { usePerms } from '../perms'
 import { ago, Card, dateTime, Empty, ErrorBox, Field, Modal, useLoad } from '../ui'
 
-// Console users, the roles that give them permissions, and the audit log.
-
-export function Users({ tab }: { tab: string }) {
-  const { can } = usePerms()
-  const tabs: [string, string][] = []
-  if (can('users.manage')) tabs.push(['users', 'Users'], ['roles', 'Roles'])
-  if (can('audit.view')) tabs.push(['audit', 'Audit log'])
-  return (
-    <>
-      <h1>Users</h1>
-      <nav className="tabs">
-        {tabs.map(([k, label]) => (
-          <a key={k} href={`#/users/${k}`} className={tab === k ? 'active' : ''}>
-            {label}
-          </a>
-        ))}
-      </nav>
-      {tab === 'users' && can('users.manage') && <UserList />}
-      {tab === 'roles' && can('users.manage') && <RoleList />}
-      {tab === 'audit' && can('audit.view') && <AuditLog />}
-    </>
-  )
-}
+// Console users, the roles that give them permissions, and the audit log,
+// shown as tabs of Console Settings.
 
 /** Clients for scope pickers; empty if the user can't list them. */
 function useClients() {
@@ -40,7 +19,7 @@ function scopeText(a: RoleAssignment, clients: Client[] | null) {
   return [...names, ...a.tags.map((t) => '#' + t)].join(', ')
 }
 
-function UserList() {
+export function UserList() {
   const { me } = usePerms()
   const { data, error, reload } = useLoad(api.users, [])
   const roles = useLoad(api.roles, [])
@@ -346,7 +325,7 @@ function ResetPassword({ user, onClose }: { user: User; onClose: () => void }) {
   )
 }
 
-function RoleList() {
+export function RoleList() {
   const { data, error, reload } = useLoad(api.roles, [])
   const perms = useLoad(api.permissions, [])
   const [editing, setEditing] = useState<Partial<Role> | null>(null)
@@ -489,7 +468,7 @@ function RoleEditor({ role, perms, onClose }: { role: Partial<Role>; perms: Perm
 
 const PAGE = 100
 
-function AuditLog() {
+export function AuditLog() {
   const [user, setUser] = useState('')
   const [filter, setFilter] = useState('')
   const [older, setOlder] = useState<AuditEntry[]>([])

@@ -12,7 +12,6 @@ import { RunDetail } from './pages/RunDetail'
 import { Targets } from './pages/Targets'
 import { Settings } from './pages/Settings'
 import { SelfRestore } from './pages/SelfRestore'
-import { Users } from './pages/Users'
 import { can, MeContext } from './perms'
 import './styles.css'
 
@@ -119,11 +118,11 @@ const nav: { to: string; label: string; show: (me: Me) => boolean }[] = [
   { to: '/clients', label: 'Clients', show: (me) => can(me, 'clients.view') },
   { to: '/jobs', label: 'Jobs', show: (me) => can(me, 'clients.view') },
   { to: '/targets', label: 'PBS servers', show: (me) => can(me, 'clients.view') || can(me, 'targets.manage') },
-  { to: '/users', label: 'Users', show: (me) => can(me, 'users.manage') || can(me, 'audit.view') },
 ]
 
-/** Whether the user may change any console setting. */
-const canSettings = (me: Me) => can(me, 'notifications.manage') || can(me, 'updates.manage') || can(me, 'encryption.manage')
+/** Whether the user may open Console Settings (settings, users or the audit log). */
+const canSettings = (me: Me) =>
+  can(me, 'notifications.manage') || can(me, 'updates.manage') || can(me, 'encryption.manage') || can(me, 'users.manage') || can(me, 'audit.view')
 
 const UserIcon = () => (
   <svg
@@ -263,8 +262,9 @@ function App() {
   else if (parts[0] === 'jobs') page = <Jobs />
   else if (parts[0] === 'runs' && parts[1]) page = <RunDetail id={Number(parts[1])} />
   else if (parts[0] === 'targets') page = <Targets />
-  else if (parts[0] === 'settings') page = <Settings />
-  else if (parts[0] === 'users') page = <Users tab={parts[1] ?? (can(me, 'users.manage') ? 'users' : 'audit')} />
+  else if (parts[0] === 'settings') page = <Settings tab={parts[1]} />
+  // Users used to have its own page; old links open its Console Settings tab.
+  else if (parts[0] === 'users') page = <Settings tab={parts[1] ?? 'users'} />
   else if (can(me, 'clients.view')) page = <Dashboard />
   else page = <div className="empty">Your account has no permissions yet. Ask an administrator to assign you a role.</div>
 
@@ -287,7 +287,7 @@ function App() {
           </nav>
           {version && <div className="version">v{version}</div>}
           {canSettings(me) && (
-            <a href="#/settings" className={'icon-btn' + (active === '/settings' ? ' active' : '')} title="Console Settings" aria-label="Console Settings">
+            <a href="#/settings" className={'icon-btn' + (active === '/settings' || active === '/users' ? ' active' : '')} title="Console Settings" aria-label="Console Settings">
               <GearIcon />
             </a>
           )}

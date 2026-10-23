@@ -1,30 +1,61 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useEffect, useState } from 'react'
-import { api, type EncryptionSettings, type NotifySettings } from '../api'
+import { api, type EncryptionSettings, type NotifySettings, type Perm } from '../api'
 import { generateMasterKeyPair } from '../masterkey'
 import { Card, ErrorBox, Field } from '../ui'
 import { usePerms } from '../perms'
 import { UpdatesCard } from './Updates'
+import { AuditLog, RoleList, UserList } from './Users'
 
-export function Settings() {
+/** The Console Settings tabs the user may open, in display order. */
+export function settingsTabs(can: (p: Perm) => boolean): [string, string][] {
+  const tabs: [string, string][] = []
+  if (can('notifications.manage')) tabs.push(['notifications', 'Notifications'])
+  if (can('encryption.manage')) tabs.push(['encryption', 'Encryption'])
+  if (can('updates.manage')) tabs.push(['updates', 'Updates'])
+  if (can('users.manage')) tabs.push(['users', 'Users'], ['roles', 'Roles'])
+  if (can('audit.view')) tabs.push(['audit', 'Audit log'])
+  tabs.push(['certificate', 'Certificate'])
+  return tabs
+}
+
+export function Settings({ tab }: { tab?: string }) {
   const { can } = usePerms()
+  const tabs = settingsTabs(can)
+  const current = tabs.find(([k]) => k === tab)?.[0] ?? tabs[0][0]
   return (
     <>
       <h1>Console Settings</h1>
-      {can('notifications.manage') && <NotificationsCard />}
-      {can('encryption.manage') && <EncryptionCard />}
-      {can('updates.manage') && <UpdatesCard />}
-      <Card title="Server certificate authority">
-        <p className="muted-text">
-          Agents trust this server through its internal CA (pinned at enrollment). Import the CA into your browser or OS trust store to remove the certificate
-          warning for this web UI.
-        </p>
-        <a className="button" href="/api/ca.pem" download="proxbackup-ca.pem">
-          Download CA certificate
-        </a>
-      </Card>
+      <nav className="tabs">
+        {tabs.map(([k, label]) => (
+          <a key={k} href={`#/settings/${k}`} className={current === k ? 'active' : ''}>
+            {label}
+          </a>
+        ))}
+      </nav>
+      {current === 'notifications' && <NotificationsCard />}
+      {current === 'encryption' && <EncryptionCard />}
+      {current === 'updates' && <UpdatesCard />}
+      {current === 'users' && <UserList />}
+      {current === 'roles' && <RoleList />}
+      {current === 'audit' && <AuditLog />}
+      {current === 'certificate' && <CertificateCard />}
     </>
+  )
+}
+
+function CertificateCard() {
+  return (
+    <Card title="Server certificate authority">
+      <p className="muted-text">
+        Agents trust this server through its internal CA (pinned at enrollment). Import the CA into your browser or OS trust store to remove the certificate
+        warning for this web UI.
+      </p>
+      <a className="button" href="/api/ca.pem" download="proxbackup-ca.pem">
+        Download CA certificate
+      </a>
+    </Card>
   )
 }
 
