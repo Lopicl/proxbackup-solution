@@ -203,3 +203,35 @@ func DatastoreACLPath(store, ns string) string {
 	}
 	return p
 }
+
+// DatastoreStatus is the current space usage of a datastore, in bytes.
+type DatastoreStatus struct {
+	Total uint64 `json:"total"`
+	Used  uint64 `json:"used"`
+	Avail uint64 `json:"avail"`
+}
+
+// DatastoreStatus returns the current space usage of store.
+func (c *Client) DatastoreStatus(ctx context.Context, store string) (*DatastoreStatus, error) {
+	var out DatastoreStatus
+	err := c.Call(ctx, http.MethodGet, "admin/datastore/"+url.PathEscape(store)+"/status", nil, &out)
+	return &out, err
+}
+
+// RRDPoint is a sample of a datastore's usage history. PBS leaves the values
+// out where it has no data, hence the pointers.
+type RRDPoint struct {
+	Time      int64    `json:"time"`
+	Total     *float64 `json:"total"`
+	Used      *float64 `json:"used"`
+	Available *float64 `json:"available"`
+}
+
+// DatastoreRRD returns the usage history of store over timeframe (hour, day,
+// week, month or year), averaged per sample.
+func (c *Client) DatastoreRRD(ctx context.Context, store, timeframe string) ([]RRDPoint, error) {
+	var out []RRDPoint
+	err := c.Call(ctx, http.MethodGet, "admin/datastore/"+url.PathEscape(store)+"/rrd",
+		map[string]any{"timeframe": timeframe, "cf": "AVERAGE"}, &out)
+	return out, err
+}

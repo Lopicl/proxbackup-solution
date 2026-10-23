@@ -12,6 +12,7 @@ PC backups are ordinary PBS snapshots: deduplicated, verifiable, syncable and pr
 - **Immutable backups** and tamper-resistant retention
 - **Per-file restore** from file backups and volume images, in the console or from the PC's tray icon
 - **Console users and roles**: built-in and custom roles, optionally limited to clients or tags, and an audit log
+- **Storage dashboard**: datastore usage now and over time, and the data each client keeps
 - **Automatic updates** of the console and agents
 
 See [docs/architecture.md](docs/architecture.md) for the design, security model and roadmap.
@@ -112,6 +113,11 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 *Console Settings* (gear icon) → *Users* adds console users and gives them roles: Administrator, Operator, Restore-only,
 Read-only or custom ones, each for all clients or only chosen clients and tags. Its *Audit log* tab lists
 sign-ins and every change. Users change their own password under the profile menu.
+
+### 8. Monitor
+
+The *Dashboard* shows each PBS server's datastore usage (now and over the last day, week, month or
+year) and how much data each client's latest backups hold. *Runs* lists active and recent runs.
 
 ### Troubleshooting
 

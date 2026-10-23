@@ -207,6 +207,27 @@ export interface Dashboard {
   active: Run[]
 }
 
+export type StorageTimeframe = 'day' | 'week' | 'month' | 'year'
+
+export interface ClientUsage {
+  id: number
+  name: string
+  protected: number
+  uploaded_30d: number
+}
+
+export interface TargetStorage {
+  id: number
+  name: string
+  datastore: string
+  total: number
+  used: number
+  avail: number
+  history: { t: number; used: number; total: number }[]
+  error?: string
+  clients: ClientUsage[]
+}
+
 export interface NotifySettings {
   webhook_url: string
   smtp_host: string
@@ -449,6 +470,7 @@ export const api = {
   me: () => request<Me>('GET', '/me'),
   changePassword: (current_password: string, new_password: string) => request('POST', '/password', { current_password, new_password }),
   dashboard: () => request<Dashboard>('GET', '/dashboard'),
+  storage: (timeframe: StorageTimeframe) => request<TargetStorage[]>('GET', `/storage?timeframe=${timeframe}`),
 
   targets: () => request<Target[]>('GET', '/targets'),
   saveTarget: (t: Partial<Target> & { admin_secret?: string }) =>

@@ -60,6 +60,7 @@ type Server struct {
 
 	versions pbsVersions
 	catalogs catalogCache // snapshot catalogs open in the restore browser
+	storage  storageCache // datastore usage shown on the dashboard
 }
 
 // New opens the data directory and prepares the server.
@@ -182,6 +183,7 @@ func (s *Server) uiRoutes() http.Handler {
 	api.HandleFunc("GET /api/me", signedIn(s.handleMe))
 	api.HandleFunc("POST /api/password", signedIn(s.handleChangePassword))
 	api.HandleFunc("GET /api/dashboard", s.need(view, s.handleDashboard))
+	api.HandleFunc("GET /api/storage", s.need(view, s.handleStorage))
 	api.HandleFunc("GET /api/targets", s.needAny(s.handleTargets, view, PermTargets))
 	api.HandleFunc("POST /api/targets", s.need(PermTargets, s.handleSaveTarget))
 	api.HandleFunc("PUT /api/targets/{id}", s.need(PermTargets, s.handleSaveTarget))

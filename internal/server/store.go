@@ -1291,3 +1291,45 @@ func (s *Store) SetSetting(ctx context.Context, key string, v any) error {
 	_, err = s.db.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, string(b))
 	return err
 }
+
+// ClientStorage is how much data a client keeps on its PBS server.
+type ClientStorage struct {
+	Protected uint64 // sum of the latest successful backup of each job
+	Uploaded  uint64 // new data uploaded since the given time
+}
+
+// ClientStorage returns the protected and recently uploaded data per client.
+func (s *Store) ClientStorage(ctx context.Context, since int64) (map[int64]*ClientStorage, error) {
+	out := map[int64]*ClientStorage{}
+	get := func(id int64) *ClientStorage {
+		if out[id] == nil {
+			out[id] = &ClientStorage{}
+		}
+		return out[id]
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT r.client_id, CAST(json_extract(r.result, '$.bytes_total') AS INTEGER) FROM runs r
+		JOIN (SELECT job_id, MAX(id) AS id FROM runs WHERE state IN ('success','warning') AND kind<>'restore' GROUP BY job_id) l ON l.id=r.id`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id int64
+		var n uint64
+		rows.Scan(&id, &n)
+		get(id).Protected += n
+	}
+	rows.Close()
+	rows, err = s.db.QueryContext(ctx, `SELECT client_id, SUM(CAST(json_extract(result, '$.bytes_uploaded') AS INTEGER)) FROM runs
+		WHERE state IN ('success','warning') AND kind<>'restore' AND finished_at>=? GROUP BY client_id`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var n uint64
+		rows.Scan(&id, &n)
+		get(id).Uploaded += n
+	}
+	return out, rows.Err()
+}

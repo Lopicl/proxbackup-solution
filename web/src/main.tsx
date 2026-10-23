@@ -9,6 +9,7 @@ import { Clients } from './pages/Clients'
 import { ClientDetail } from './pages/ClientDetail'
 import { JobDetail, Jobs } from './pages/Jobs'
 import { RunDetail } from './pages/RunDetail'
+import { Runs } from './pages/Runs'
 import { Targets } from './pages/Targets'
 import { Settings } from './pages/Settings'
 import { SelfRestore } from './pages/SelfRestore'
@@ -117,6 +118,7 @@ const nav: { to: string; label: string; show: (me: Me) => boolean }[] = [
   { to: '/', label: 'Dashboard', show: (me) => can(me, 'clients.view') },
   { to: '/clients', label: 'Clients', show: (me) => can(me, 'clients.view') },
   { to: '/jobs', label: 'Jobs', show: (me) => can(me, 'clients.view') },
+  { to: '/runs', label: 'Runs', show: (me) => can(me, 'clients.view') },
   { to: '/targets', label: 'PBS servers', show: (me) => can(me, 'clients.view') || can(me, 'targets.manage') },
 ]
 
@@ -261,6 +263,7 @@ function App() {
   else if (parts[0] === 'jobs' && parts[1]) page = <JobDetail id={Number(parts[1])} />
   else if (parts[0] === 'jobs') page = <Jobs />
   else if (parts[0] === 'runs' && parts[1]) page = <RunDetail id={Number(parts[1])} />
+  else if (parts[0] === 'runs') page = <Runs />
   else if (parts[0] === 'targets') page = <Targets />
   else if (parts[0] === 'settings') page = <Settings tab={parts[1]} />
   // Users used to have its own page; old links open its Console Settings tab.
@@ -280,7 +283,7 @@ function App() {
             {nav
               .filter((n) => n.show(me))
               .map((n) => (
-                <a key={n.to} href={'#' + n.to} className={active === n.to || (n.to === '/clients' && active === '/runs') ? 'active' : ''}>
+                <a key={n.to} href={'#' + n.to} className={active === n.to ? 'active' : ''}>
                   {n.label}
                 </a>
               ))}
