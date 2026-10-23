@@ -180,7 +180,7 @@ function UserEditor({ user, self, roles, clients, onClose }: { user: User | null
         </div>
         <h3>Roles</h3>
         <p className="muted-text">
-          A role applies to all clients or only to some clients and tags. Console permissions (PBS servers, settings, users, audit log) only come with roles for
+          A role applies to all clients or only to some clients and tags. Console permissions (datastores, settings, users, audit log) only come with roles for
           all clients.
         </p>
         {assignments.length === 0 && <Empty>No roles: the user can sign in but sees nothing.</Empty>}

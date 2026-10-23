@@ -13,7 +13,7 @@ type ClientRef = { id: number; tags?: string[] }
 
 /**
  * Whether the user has perm: for client, or without one for at least some
- * clients. Console permissions (PBS servers, settings, users) are only ever
+ * clients. Console permissions (datastores, settings, users) are only ever
  * granted for all clients.
  */
 export function can(me: Me | null, perm: Perm, client?: ClientRef): boolean {

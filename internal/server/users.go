@@ -16,7 +16,7 @@ import (
 // Console users sign in with a local password. Their rights come from roles,
 // which are sets of permissions. A role is assigned to a user for all clients
 // or only for some clients and client tags; permissions that aren't about
-// clients (PBS servers, settings, users) are only granted by assignments for
+// clients (datastores, settings, users) are only granted by assignments for
 // all clients. auth_source and external_id leave room for external identities
 // (OIDC) mapped onto the same users and roles.
 
@@ -29,7 +29,7 @@ const (
 	PermManageJobs    Perm = "jobs.manage"    // group jobs and member settings
 	PermRunBackups    Perm = "backups.run"    // start and cancel backups
 	PermRestore       Perm = "restore"        // browse snapshots, restore, download client keys
-	PermTargets       Perm = "targets.manage" // PBS servers
+	PermTargets       Perm = "targets.manage" // datastores
 	PermNotifications Perm = "notifications.manage"
 	PermUpdates       Perm = "updates.manage" // console update settings and installs
 	PermEncryption    Perm = "encryption.manage"
@@ -53,7 +53,7 @@ var permissions = []PermInfo{
 	{PermManageJobs, "Manage jobs", "Change member job settings. Creating and editing group jobs needs all clients.", true},
 	{PermRunBackups, "Run backups", "Start and cancel backups.", true},
 	{PermRestore, "Restore", "Browse snapshots, restore files and download client encryption keys.", true},
-	{PermTargets, "Manage PBS servers", "Add, change and remove PBS servers and datastores.", false},
+	{PermTargets, "Manage datastores", "Add, change and remove the PBS datastores clients back up to.", false},
 	{PermNotifications, "Manage notifications", "Email and webhook notification settings.", false},
 	{PermUpdates, "Manage updates", "Console update settings and installing updates.", false},
 	{PermEncryption, "Manage encryption", "The master key for client-side encryption.", false},

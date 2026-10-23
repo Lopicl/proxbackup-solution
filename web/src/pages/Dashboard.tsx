@@ -40,7 +40,7 @@ export function Dashboard() {
         </div>
       </div>
       <ErrorBox error={storage.error} />
-      {storage.data?.length === 0 && <Empty>No PBS servers yet.</Empty>}
+      {storage.data?.length === 0 && <Empty>No datastores yet.</Empty>}
       {storage.data?.map((t) => <TargetStorageCard key={t.id} t={t} timeframe={tf} />)}
     </>
   )

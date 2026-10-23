@@ -7,6 +7,7 @@ import { Card, Empty, ErrorBox, Field, Modal, useLoad } from '../ui'
 
 type Form = Partial<Target> & { admin_secret?: string }
 
+/** The Datastores tab of Console Settings: the PBS datastores clients back up to. */
 export function Targets() {
   const { data, error, reload } = useLoad(api.targets, [])
   const { me, can } = usePerms()
@@ -15,23 +16,22 @@ export function Targets() {
   const [edit, setEdit] = useState<Form | null>(null)
   return (
     <>
-      <h1>PBS servers</h1>
       <ErrorBox error={error} />
       <Card
-        title="Backup targets"
+        title="Datastores"
         actions={
           canManage && (
             <button
               className="primary"
               onClick={() => setEdit({ pbs_user: 'proxbackup@pbs', root_ns: 'pcs', ...(local && { host: local.host, admin_auth_id: local.auth_id }) })}
             >
-              Add PBS server
+              Add datastore
             </button>
           )
         }
       >
         {data && data.length === 0 ? (
-          <Empty>{canManage ? 'Add the Proxmox Backup Server that PCs should back up to.' : 'No PBS servers yet.'}</Empty>
+          <Empty>{canManage ? 'Add the Proxmox Backup Server datastore that PCs should back up to.' : 'No datastores yet.'}</Empty>
         ) : (
           <table>
             <thead>
@@ -110,7 +110,7 @@ function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?
   const [test, setTest] = useState('')
   const set = (p: Form) => setT({ ...t, ...p })
   return (
-    <Modal title={t.id ? `Edit ${init.name}` : 'Add PBS server'} onClose={onClose} wide>
+    <Modal title={t.id ? `Edit ${init.name}` : 'Add datastore'} onClose={onClose} wide>
       <form
         onSubmit={async (e) => {
           e.preventDefault()
@@ -185,7 +185,7 @@ function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?
               type="button"
               className="danger left"
               onClick={async () => {
-                if (!confirm('Delete this PBS server?')) return
+                if (!confirm('Delete this datastore?')) return
                 try {
                   await api.deleteTarget(t.id!)
                   onClose()

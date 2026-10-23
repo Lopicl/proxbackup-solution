@@ -134,7 +134,7 @@ export function Clients() {
           <table>
             <thead>
               <tr>
-                <th>PBS server</th>
+                <th>Datastore</th>
                 <th>Created</th>
                 <th>Expires</th>
                 <th>PCs enrolled</th>
@@ -289,7 +289,7 @@ function AddClient({ onClose }: { onClose: () => void }) {
     return (
       <Modal title="Add client" onClose={onClose}>
         <p>
-          Configure a <Link to="/targets">PBS server</Link> first. New clients get their own namespace and a backup-only API token on it.
+          Add a <Link to="/settings/datastores">datastore</Link> first. New clients get their own namespace and a backup-only API token on it.
         </p>
       </Modal>
     )
@@ -310,7 +310,7 @@ function AddClient({ onClose }: { onClose: () => void }) {
           <Field label="Client name" hint="Used as PBS namespace, backup ID and token name. Lowercase letters, digits, - and _.">
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. office-pc-07" autoFocus required />
           </Field>
-          <Field label="PBS server">
+          <Field label="Datastore">
             <select value={tid} onChange={(e) => setTargetId(Number(e.target.value))}>
               {targets.data?.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -420,7 +420,7 @@ function CreateSetup({ targets, onClose }: { targets?: Target[] | null; onClose:
     return (
       <Modal title="Create agent setup" onClose={onClose}>
         <p>
-          Configure a <Link to="/targets">PBS server</Link> first. New clients get their own namespace and a backup-only API token on it.
+          Add a <Link to="/settings/datastores">datastore</Link> first. New clients get their own namespace and a backup-only API token on it.
         </p>
       </Modal>
     )
@@ -439,7 +439,7 @@ function CreateSetup({ targets, onClose }: { targets?: Target[] | null; onClose:
           }}
         >
           <p>A setup enrolls any number of PCs with a temporary token. Each PC chooses its own client name during setup.</p>
-          <Field label="PBS server">
+          <Field label="Datastore">
             <select value={tid} onChange={(e) => setTargetId(Number(e.target.value))}>
               {targets?.map((t) => (
                 <option key={t.id} value={t.id}>

@@ -59,11 +59,11 @@ initial password from `journalctl -u proxbackup-server`; you must replace it at 
    and open port 8077.
 3. Sign in as `admin` (initial password in the log, or set `PROXBACKUP_ADMIN_PASSWORD`). Lost it?
    `proxbackup-server passwd [user]` sets a new one.
-4. Add the PBS under *PBS servers → Add*.
+4. Add the PBS datastore under *Console Settings* (gear icon) → *Datastores* → *Add datastore*.
 
 ### 3. Check the target
 
-Under *PBS servers*, adjust the root namespace if needed (default `pcs`). Clients live in
+Under *Datastores*, adjust the root namespace if needed (default `pcs`). Clients live in
 `<root>/<client>`; changing the root creates the new namespace and moves enrolled clients, while
 older snapshots stay listed and restorable.
 
@@ -116,7 +116,7 @@ sign-ins and every change. Users change their own password under the profile men
 
 ### 8. Monitor
 
-The *Dashboard* shows each PBS server's datastore usage (now and over the last day, week, month or
+The *Dashboard* shows the usage of each datastore (now and over the last day, week, month or
 year) and how much data each client's latest backups hold. *Runs* lists active and recent runs.
 
 ### Troubleshooting
