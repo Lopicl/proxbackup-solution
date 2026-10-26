@@ -247,7 +247,8 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 		return nil, err
 	}
 	cfg := &api.AgentConfig{
-		Crypt: key,
+		Crypt:     key,
+		Bandwidth: c.Bandwidth,
 		Target: api.PBSTarget{Host: t.Host, Fingerprint: t.Fingerprint, Datastore: t.Datastore, Namespace: c.Namespace,
 			AuthID: c.TokenID, Secret: secret},
 		Jobs: []api.JobConfig{},
@@ -261,7 +262,7 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 			ChangeDetection: s.changeDetection(ctx, t, j),
 			Schedule:        j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp, Encrypt: j.Encrypt,
 			StartDelay: j.StartDelay, PreventSleep: j.PreventSleep,
-			WakeToRun: j.WakeToRun})
+			WakeToRun: j.WakeToRun, Bandwidth: j.Bandwidth})
 	}
 	b, _ := json.Marshal(cfg)
 	sum := sha256.Sum256(b)
@@ -345,6 +346,7 @@ func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSp
 		spec.BackupID, spec.Sources, spec.Excludes, spec.Volumes, spec.UseVSS = j.BackupID, j.Sources, j.AllExcludes(), j.Volumes, j.UseVSS
 		spec.ChangeDetection = s.changeDetection(ctx, t, j)
 		spec.Encrypt, spec.PreventSleep = j.Encrypt, j.PreventSleep
+		spec.Bandwidth, spec.ClientBandwidth = j.Bandwidth, c.Bandwidth
 	}
 	return spec, nil
 }

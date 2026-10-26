@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState, type ReactNode } from 'react'
-import { ALL_CLIENTS, api, type GroupJob, type GroupJobView, type GroupMember, type Job, type Keep } from '../api'
+import { ALL_CLIENTS, api, type Bandwidth, type GroupJob, type GroupJobView, type GroupMember, type Job, type Keep } from '../api'
 import { RunsTable } from './RunsTable'
 import { usePerms } from '../perms'
 import { ago, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
@@ -167,6 +167,11 @@ export function JobDetail({ id }: { id: number }) {
         <span>
           Retention <b>{keepText(g.retention)}</b>
         </span>
+        {bandwidthLimited(g.bandwidth) && (
+          <span>
+            Upload limit <b>{bandwidthText(g.bandwidth)}</b>
+          </span>
+        )}
         <span>
           Backup group <code>host/{g.backup_id || (g.kind === 'image' ? '<client>-image' : '<client>')}</code>
         </span>
@@ -387,6 +392,7 @@ export function newGroupJob(clients: number[]): Partial<GroupJob> {
     spread_minutes: 0,
     prevent_sleep: true,
     wake_to_run: true,
+    bandwidth: {},
     enabled: true,
     clients,
     tags: [],
@@ -411,8 +417,105 @@ const lines = (s: string) =>
 
 type EditorTab = 'general' | 'clients' | 'source' | 'schedule' | 'retention' | 'security'
 
+const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+const weekOrder = [1, 2, 3, 4, 5, 6, 0]
+
+export function rateText(kbit?: number): string {
+  if (!kbit) return 'unlimited'
+  return kbit >= 1000 ? `${kbit / 1000} Mbit/s` : `${kbit} kbit/s`
+}
+
+export const bandwidthLimited = (b?: Bandwidth) => !!b && (!!b.rate || (!!b.window_start && !!b.window_rate))
+
+export function bandwidthText(b?: Bandwidth): string {
+  if (!b) return 'unlimited'
+  let s = rateText(b.rate)
+  if (b.window_start) {
+    const days = b.window_days?.length ? ' ' + weekOrder.filter((d) => b.window_days!.includes(d)).map((d) => weekdays[d]).join(', ') : ''
+    s += `; ${rateText(b.window_rate)} ${b.window_start}–${b.window_end}${days}`
+  }
+  return s
+}
+
+// RateInput edits a rate in Mbit/s, stored in kbit/s (0 = unlimited).
+function RateInput({ kbit, onChange }: { kbit?: number; onChange: (kbit: number) => void }) {
+  const [text, setText] = useState(kbit ? String(kbit / 1000) : '')
+  return (
+    <input
+      type="number"
+      min={0}
+      step="any"
+      placeholder="unlimited"
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value)
+        onChange(Math.max(0, Math.round(Number(e.target.value) * 1000)) || 0)
+      }}
+    />
+  )
+}
+
+// BandwidthFields edits an upload limit, with an optional time window.
+export function BandwidthFields({ b, onChange }: { b: Bandwidth; onChange: (b: Bandwidth) => void }) {
+  const set = (p: Partial<Bandwidth>) => onChange({ ...b, ...p })
+  const days = b.window_days ?? []
+  return (
+    <>
+      <div className="grid3">
+        <Field label="Upload limit (Mbit/s)" hint="Empty = unlimited.">
+          <RateInput kbit={b.rate} onChange={(rate) => set({ rate })} />
+        </Field>
+      </div>
+      <div className="options">
+        <Option
+          checked={!!b.window_start}
+          onChange={(on) =>
+            onChange(
+              on
+                ? { ...b, window_start: '08:00', window_end: '18:00', window_days: [1, 2, 3, 4, 5], window_rate: b.window_rate || 10000 }
+                : { rate: b.rate },
+            )
+          }
+          title="A different limit at certain times"
+        >
+          In the PC's local time, e.g. a tighter limit during office hours or none at night.
+        </Option>
+      </div>
+      {b.window_start && (
+        <>
+          <div className="grid3">
+            <Field label="From">
+              <input type="time" value={b.window_start} onChange={(e) => set({ window_start: e.target.value })} />
+            </Field>
+            <Field label="To" hint="Before “From” = until the next day.">
+              <input type="time" value={b.window_end ?? ''} onChange={(e) => set({ window_end: e.target.value })} />
+            </Field>
+            <Field label="Limit then (Mbit/s)" hint="Empty = unlimited.">
+              <RateInput kbit={b.window_rate} onChange={(window_rate) => set({ window_rate })} />
+            </Field>
+          </div>
+          <Field label="On" hint="The days the window starts on; none selected = every day.">
+            <div className="chips">
+              {weekOrder.map((d) => (
+                <button
+                  type="button"
+                  key={d}
+                  className={`chip ${days.includes(d) ? 'on' : ''}`}
+                  onClick={() => set({ window_days: days.includes(d) ? days.filter((x) => x !== d) : [...days, d] })}
+                >
+                  {weekdays[d]}
+                </button>
+              ))}
+            </div>
+          </Field>
+        </>
+      )}
+    </>
+  )
+}
+
 // Option is a checkbox with a title and a one-line explanation under it.
-function Option({
+export function Option({
   checked,
   onChange,
   title,
@@ -678,6 +781,9 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
                   </Option>
                 )}
               </div>
+              <h3>Bandwidth</h3>
+              <p className="muted-text">Caps how fast each member uploads to PBS. A limit set on the client applies too; the lower one wins.</p>
+              <BandwidthFields b={j.bandwidth ?? {}} onChange={(bandwidth) => set({ bandwidth })} />
             </>
           )}
 

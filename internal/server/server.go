@@ -201,6 +201,7 @@ func (s *Server) uiRoutes() http.Handler {
 	api.HandleFunc("GET /api/clients/{id}/encryption-key", s.need(restore, s.handleClientKey))
 	// Tags decide which clients scoped roles cover: only for all clients.
 	api.HandleFunc("PUT /api/clients/{id}/tags", s.needGlobal(manage, s.handleClientTags))
+	api.HandleFunc("PUT /api/clients/{id}/bandwidth", s.need(manage, s.handleClientBandwidth))
 	// New clients aren't in anyone's scope yet: enrolling needs all clients.
 	api.HandleFunc("GET /api/enrollments", s.needGlobal(manage, s.handleEnrollments))
 	api.HandleFunc("POST /api/enrollments", s.needGlobal(manage, s.handleCreateEnrollment))

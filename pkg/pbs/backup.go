@@ -61,6 +61,8 @@ type BackupOptions struct {
 	// OnUpload, if set, is called with the encoded size of every chunk sent,
 	// as it is sent (for live progress; Stats only arrive when an archive closes).
 	OnUpload func(encodedBytes int)
+	// RateLimit, if set, caps the upload bandwidth of the session.
+	RateLimit *RateLimiter
 }
 
 // FileInfo is one entry in the snapshot manifest.
@@ -113,6 +115,7 @@ func (c *Client) StartBackup(ctx context.Context, ref SnapshotRef, opts BackupOp
 	if err != nil {
 		return nil, err
 	}
+	s.limit = opts.RateLimit
 	return &BackupSession{sess: s, ref: ref, opts: opts, known: map[[32]byte]struct{}{}, zeroDigests: map[int][32]byte{}}, nil
 }
 

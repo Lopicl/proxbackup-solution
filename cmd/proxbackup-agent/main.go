@@ -263,6 +263,7 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 	overwrite := fs.String("overwrite", "skip", "restore: skip | overwrite | if-newer")
 	keyFile := fs.String("keyfile", "", "PBS key file (kdf none, e.g. downloaded from the console): backups are encrypted with it, restores decrypt with it")
 	masterPub := fs.String("master-pubkey", "", "backup with -keyfile: RSA master public key (PEM); the key is stored in the snapshot encrypted with it")
+	bwlimit := fs.Int("bwlimit", 0, "backup/image: upload limit in kbit/s (0 = unlimited)")
 	fs.Var(&sources, "source", "backup: path to back up (repeatable); image: volume, e.g. C:")
 	fs.Var(&excludes, "exclude", "backup: exclude pattern (repeatable)")
 	fs.Var(&paths, "path", "restore: only restore this archive path (repeatable); for an .img.fidx archive, a file or folder on its NTFS volume (/ for all), restored without writing the whole image")
@@ -292,6 +293,10 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 		BackupID: *id,
 		UseVSS:   *vssFlag,
 		Excludes: excludes,
+	}
+	spec.Bandwidth.Rate = *bwlimit
+	if err := spec.Bandwidth.Validate(); err != nil {
+		return err
 	}
 	if *keyFile != "" {
 		b, err := os.ReadFile(*keyFile)

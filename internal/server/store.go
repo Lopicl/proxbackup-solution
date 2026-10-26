@@ -163,6 +163,9 @@ func (s *Store) migrate() error {
 		{"group_jobs", "prevent_sleep", "INTEGER NOT NULL DEFAULT 1"},
 		// Wake the PC from sleep for scheduled backups.
 		{"group_jobs", "wake_to_run", "INTEGER NOT NULL DEFAULT 1"},
+		// Upload bandwidth limits (api.Bandwidth as JSON).
+		{"group_jobs", "bandwidth", "TEXT NOT NULL DEFAULT '{}'"},
+		{"clients", "bandwidth", "TEXT NOT NULL DEFAULT '{}'"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -292,6 +295,8 @@ type Client struct {
 	PausedBy    string `json:"paused_by"`
 	// TrayError: the agent can't start the tray app on the PC ("" = fine).
 	TrayError string `json:"tray_error"`
+	// Bandwidth limits the uploads of all the client's jobs.
+	Bandwidth api.Bandwidth `json:"bandwidth"`
 	// AgentUpdate is the version the agent can be updated to (the console's), and
 	// AgentUpdatePushed whether an admin pushed it and the agent hasn't fetched it yet.
 	AgentUpdate       string `json:"agent_update,omitempty"`
@@ -348,6 +353,8 @@ type Job struct {
 	PreventSleep bool `json:"prevent_sleep"`
 	// WakeToRun wakes the PC from sleep or hibernation for scheduled runs.
 	WakeToRun bool `json:"wake_to_run"`
+	// Bandwidth limits the job's uploads.
+	Bandwidth api.Bandwidth `json:"bandwidth"`
 	// Reported by the agent (it owns the schedule).
 	NextRun        int64 `json:"next_run,omitempty"`
 	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
@@ -447,15 +454,15 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
 	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags, paused_until, paused_by,
-	tray_error, revoked_at, revoked_serial, revoked_jobs`
+	tray_error, revoked_at, revoked_serial, revoked_jobs, bandwidth`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
-	var sched, oldNS, tags, revJobs string
+	var sched, oldNS, tags, revJobs, bw string
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
 		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags, &c.PausedUntil, &c.PausedBy,
-		&c.TrayError, &c.RevokedAt, &c.revokedSerial, &revJobs)
+		&c.TrayError, &c.RevokedAt, &c.revokedSerial, &revJobs, &bw)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -467,6 +474,7 @@ func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	json.Unmarshal([]byte(tags), &c.Tags)
 	c.Tags = nonNil(c.Tags)
 	json.Unmarshal([]byte(revJobs), &c.revokedJobs)
+	json.Unmarshal([]byte(bw), &c.Bandwidth)
 	c.Restorable = c.Revoked && c.revokedSerial != ""
 	c.Online = !c.Revoked && time.Since(time.Unix(c.LastSeen, 0)) < 2*time.Minute
 	return c, err
@@ -801,15 +809,16 @@ const jobCols = `j.id, j.client_id, j.group_id, COALESCE(g.name, j.name), COALES
 	COALESCE(g.use_vss, j.use_vss), COALESCE(g.schedule, j.schedule), COALESCE(g.retention, j.retention), j.enabled,
 	COALESCE(g.enabled, 1), j.created_at, COALESCE(g.window_minutes, j.window_minutes), COALESCE(g.catch_up, j.catch_up),
 	COALESCE(g.change_detection, j.change_detection), COALESCE(g.encrypt, j.encrypt), COALESCE(g.lock_days, j.lock_days),
-	COALESCE(g.spread_minutes, 0), COALESCE(g.daily_cap, 0), COALESCE(g.prevent_sleep, 1), COALESCE(g.wake_to_run, 1)`
+	COALESCE(g.spread_minutes, 0), COALESCE(g.daily_cap, 0), COALESCE(g.prevent_sleep, 1), COALESCE(g.wake_to_run, 1),
+	COALESCE(g.bandwidth, '{}')`
 const jobFrom = ` FROM jobs j LEFT JOIN group_jobs g ON g.id=j.group_id`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	j := &Job{}
-	var src, exc, extra, vol, ret string
+	var src, exc, extra, vol, ret, bw string
 	err := sc.Scan(&j.ID, &j.ClientID, &j.GroupID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &extra, &vol, &j.UseVSS, &j.Schedule, &ret,
 		&j.MemberEnabled, &j.GroupEnabled, &j.CreatedAt, &j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.LockDays,
-		&j.SpreadMinutes, &j.DailyCap, &j.PreventSleep, &j.WakeToRun)
+		&j.SpreadMinutes, &j.DailyCap, &j.PreventSleep, &j.WakeToRun, &bw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -818,6 +827,7 @@ func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	json.Unmarshal([]byte(extra), &j.ExtraExcludes)
 	json.Unmarshal([]byte(vol), &j.Volumes)
 	json.Unmarshal([]byte(ret), &j.Retention)
+	json.Unmarshal([]byte(bw), &j.Bandwidth)
 	j.Sources, j.Excludes, j.ExtraExcludes, j.Volumes = nonNil(j.Sources), nonNil(j.Excludes), nonNil(j.ExtraExcludes), nonNil(j.Volumes)
 	j.Enabled = j.MemberEnabled && j.GroupEnabled
 	j.StartDelay = startDelay(j.GroupID, j.ClientID, j.SpreadMinutes)

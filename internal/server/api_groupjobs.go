@@ -126,6 +126,9 @@ var backupIDRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
 
 // validateGroupJob normalizes g and checks it.
 func validateGroupJob(g *GroupJob) error {
+	if err := g.Bandwidth.Clean(); err != nil {
+		return err
+	}
 	g.Sources, g.Excludes, g.Volumes = cleanList(g.Sources), cleanList(g.Excludes), cleanList(g.Volumes)
 	tags := []string{}
 	for _, t := range cleanList(g.Tags) {
@@ -335,6 +338,48 @@ func (s *Server) handleRunGroupJob(w http.ResponseWriter, r *http.Request) {
 		auditDetail(r, "%d client(s) outside the user's scope skipped", denied)
 	}
 	writeJSON(w, map[string]any{"run_ids": queued, "skipped": skipped})
+}
+
+func (s *Server) handleClientBandwidth(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.pathClient(w, r, PermManageClients)
+	if !ok {
+		return
+	}
+	var b api.Bandwidth
+	if err := decodeJSON(r, &b); err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	if err := b.Clean(); err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	auditTarget(r, "client "+c.Name)
+	auditDetail(r, "bandwidth: %s", describeBandwidth(b))
+	if err := s.store.SetClientBandwidth(r.Context(), c.ID, b); err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	s.wakeClient(c.ID)
+	writeJSON(w, b)
+}
+
+// describeBandwidth summarises a limit for the audit log.
+func describeBandwidth(b api.Bandwidth) string {
+	rate := func(k int) string {
+		if k == 0 {
+			return "unlimited"
+		}
+		return fmt.Sprintf("%d kbit/s", k)
+	}
+	out := rate(b.Rate)
+	if b.WindowStart != "" {
+		out += fmt.Sprintf(", %s %s-%s", rate(b.WindowRate), b.WindowStart, b.WindowEnd)
+		if len(b.WindowDays) > 0 {
+			out += fmt.Sprintf(" on days %v", b.WindowDays)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleClientTags(w http.ResponseWriter, r *http.Request) {

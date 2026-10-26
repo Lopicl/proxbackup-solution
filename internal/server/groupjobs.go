@@ -52,6 +52,7 @@ type GroupJob struct {
 	DailyCap        int             `json:"daily_cap"`
 	PreventSleep    bool            `json:"prevent_sleep"`
 	WakeToRun       bool            `json:"wake_to_run"`
+	Bandwidth       api.Bandwidth   `json:"bandwidth"`
 	// Members: these clients, plus every client with one of Tags.
 	Clients   []int64  `json:"clients"`
 	Tags      []string `json:"tags"`
@@ -80,13 +81,13 @@ func startDelay(groupID, clientID int64, spreadMinutes int) int {
 }
 
 const groupCols = `id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, window_minutes, catch_up, retention,
-	enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at, daily_cap, prevent_sleep, wake_to_run`
+	enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at, daily_cap, prevent_sleep, wake_to_run, bandwidth`
 
 func scanGroupJob(sc interface{ Scan(...any) error }) (*GroupJob, error) {
 	g := &GroupJob{}
-	var src, exc, vol, ret, tags string
+	var src, exc, vol, ret, tags, bw string
 	err := sc.Scan(&g.ID, &g.Name, &g.Kind, &g.BackupID, &src, &exc, &vol, &g.UseVSS, &g.Schedule, &g.WindowMinutes, &g.CatchUp, &ret,
-		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.SpreadMinutes, &tags, &g.CreatedAt, &g.DailyCap, &g.PreventSleep, &g.WakeToRun)
+		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.SpreadMinutes, &tags, &g.CreatedAt, &g.DailyCap, &g.PreventSleep, &g.WakeToRun, &bw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -95,6 +96,7 @@ func scanGroupJob(sc interface{ Scan(...any) error }) (*GroupJob, error) {
 	json.Unmarshal([]byte(vol), &g.Volumes)
 	json.Unmarshal([]byte(ret), &g.Retention)
 	json.Unmarshal([]byte(tags), &g.Tags)
+	json.Unmarshal([]byte(bw), &g.Bandwidth)
 	g.Sources, g.Excludes, g.Volumes, g.Tags = nonNil(g.Sources), nonNil(g.Excludes), nonNil(g.Volumes), nonNil(g.Tags)
 	g.Clients = []int64{}
 	return g, err
@@ -168,15 +170,16 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 	vol, _ := json.Marshal(nonNil(g.Volumes))
 	ret, _ := json.Marshal(g.Retention)
 	tags, _ := json.Marshal(nonNil(g.Tags))
+	bw, _ := json.Marshal(g.Bandwidth)
 	if g.ID == 0 {
 		if g.CreatedAt == 0 {
 			g.CreatedAt = now()
 		}
 		res, err := db.ExecContext(ctx, `INSERT INTO group_jobs(name, kind, backup_id, sources, excludes, volumes, use_vss, schedule,
 			window_minutes, catch_up, retention, enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at,
-			daily_cap, prevent_sleep, wake_to_run) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			daily_cap, prevent_sleep, wake_to_run, bandwidth) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
-			g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.CreatedAt, g.DailyCap, g.PreventSleep, g.WakeToRun)
+			g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.CreatedAt, g.DailyCap, g.PreventSleep, g.WakeToRun, bw)
 		if err != nil {
 			return err
 		}
@@ -185,9 +188,9 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 	}
 	_, err := db.ExecContext(ctx, `UPDATE group_jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?,
 		schedule=?, window_minutes=?, catch_up=?, retention=?, enabled=?, change_detection=?, encrypt=?, lock_days=?, spread_minutes=?,
-		member_tags=?, daily_cap=?, prevent_sleep=?, wake_to_run=? WHERE id=?`,
+		member_tags=?, daily_cap=?, prevent_sleep=?, wake_to_run=?, bandwidth=? WHERE id=?`,
 		g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
-		g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.DailyCap, g.PreventSleep, g.WakeToRun, g.ID)
+		g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.DailyCap, g.PreventSleep, g.WakeToRun, bw, g.ID)
 	return err
 }
 
@@ -261,6 +264,19 @@ func (s *Store) RemoveGroupClient(ctx context.Context, groupID, clientID int64) 
 		return nil, err
 	}
 	return affected, tx.Commit()
+}
+
+// SetClientBandwidth changes a client's upload limit.
+func (s *Store) SetClientBandwidth(ctx context.Context, clientID int64, b api.Bandwidth) error {
+	v, _ := json.Marshal(b)
+	res, err := s.db.ExecContext(ctx, `UPDATE clients SET bandwidth=? WHERE id=? AND revoked=0`, string(v), clientID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	return nil
 }
 
 // SetClientTags changes a client's tags and re-syncs every group job.

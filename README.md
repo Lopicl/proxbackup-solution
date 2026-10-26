@@ -95,6 +95,7 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 | Encryption | Client-side; the console escrows the key. Needs an RSA master key first (Console Settings can generate one), so backups stay recoverable without the console. |
 | Keep awake | On by default. The PC doesn't go to sleep on idle while a backup or restore runs (sleep the user asks for still happens). |
 | Wake for backups | On by default. A sleeping or hibernated PC wakes up for its scheduled backup, then sleeps again. Needs *Allow wake timers* in the power plan; a PC that is shut down stays off. |
+| Bandwidth | Off by default. An upload limit (Mbit/s) per job and/or per client (client page); the lower one wins. Each can have a time window in PC local time with its own limit, e.g. tighter during office hours; it switches mid-run. |
 | Immutable backups | On by default. Snapshots are protected against prune and deletion for a minimum period (default 14 days), then for as long as retention keeps them. |
 | Retention | Runs on the console once a day. Only a capped number of backups per job and day count, so a compromised PC can't flood its group to push good snapshots out. |
 
@@ -130,7 +131,7 @@ Handy for testing:
 
 ```bat
 proxbackup-agent.exe backup -pbs pbs.lan -fingerprint aa:bb:... -auth-id "user@pbs!pc" -secret-file token.txt ^
-                       -store ds1 -ns pcs/test -source C:\Users\alice
+                       -store ds1 -ns pcs/test -source C:\Users\alice [-bwlimit 20000]
 proxbackup-agent.exe restore ... -id <backup-id> -time <unix-time> -archive c-users-alice.mpxar.didx -target C:\Restore
 ```
 
@@ -140,8 +141,8 @@ Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**.
 
 | Phase 2 | Items |
 | --- | --- |
-| Done | Group jobs, client-side encryption with key escrow, immutable backups, tamper-resistant retention, file restore from volume images, per-file restore browser, new top bar (profile menu, Console Settings), tray app with self-service restore, NTFS ACLs and alternate data streams in file backups, console users with roles (client/tag scopes) and an audit log |
-| Open | Bandwidth and metered-network/battery limits |
+| Done | Group jobs, client-side encryption with key escrow, immutable backups, tamper-resistant retention, file restore from volume images, per-file restore browser, new top bar (profile menu, Console Settings), tray app with self-service restore, NTFS ACLs and alternate data streams in file backups, console users with roles (client/tag scopes) and an audit log, upload bandwidth limits (per job/client, time-of-day) |
+| Open | Metered-network/battery limits |
 | Moved | Guided pull-sync to a second PBS (immutable off-host copy) and SMB/NFS share backups → phase 5 |
 
 ### Verified

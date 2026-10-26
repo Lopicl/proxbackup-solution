@@ -246,6 +246,8 @@ func encodeQuery(params map[string]any) string {
 type h2Session struct {
 	conn net.Conn
 	cc   *http2.ClientConn
+	// limit, if set, paces every request body (backup uploads).
+	limit *RateLimiter
 }
 
 type bufferedConn struct {
@@ -320,6 +322,9 @@ func (s *h2Session) newRequest(ctx context.Context, method, path string, params 
 	var r io.Reader
 	if body != nil {
 		r = bytes.NewReader(body)
+		if s.limit != nil {
+			r = &limitedReader{ctx: ctx, r: r, l: s.limit}
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u, r)
 	if err != nil {

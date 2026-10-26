@@ -109,6 +109,10 @@ type JobSpec struct {
 	Crypt   *CryptKey `json:"crypt,omitempty"`
 	// PreventSleep keeps the PC awake while the run is going.
 	PreventSleep bool `json:"prevent_sleep,omitempty"`
+	// Bandwidth limits uploads to PBS: the job's own limit and the client's
+	// (both apply; the lower rate wins).
+	Bandwidth       Bandwidth `json:"bandwidth,omitzero"`
+	ClientBandwidth Bandwidth `json:"client_bandwidth,omitzero"`
 }
 
 // JobConfig is a backup job as pushed to the agent. The agent owns the
@@ -140,6 +144,8 @@ type JobConfig struct {
 	PreventSleep bool `json:"prevent_sleep,omitempty"`
 	// WakeToRun wakes the PC from sleep or hibernation for scheduled runs.
 	WakeToRun bool `json:"wake_to_run,omitempty"`
+	// Bandwidth limits this job's uploads (see JobSpec).
+	Bandwidth Bandwidth `json:"bandwidth,omitzero"`
 }
 
 // AgentConfig is everything the agent needs to run scheduled backups on its
@@ -150,13 +156,16 @@ type AgentConfig struct {
 	Jobs   []JobConfig `json:"jobs"`
 	// Crypt is the client's encryption key, once one exists.
 	Crypt *CryptKey `json:"crypt,omitempty"`
+	// Bandwidth limits uploads of every job of the client.
+	Bandwidth Bandwidth `json:"bandwidth,omitzero"`
 }
 
 // Spec turns a job config into an executable job spec.
 func (c *AgentConfig) Spec(j JobConfig) JobSpec {
 	return JobSpec{JobID: j.ID, Kind: j.Kind, Target: c.Target, BackupID: j.BackupID,
 		Sources: j.Sources, Excludes: j.Excludes, Volumes: j.Volumes, UseVSS: j.UseVSS, ChangeDetection: j.ChangeDetection,
-		Encrypt: j.Encrypt, Crypt: c.Crypt, PreventSleep: j.PreventSleep}
+		Encrypt: j.Encrypt, Crypt: c.Crypt, PreventSleep: j.PreventSleep,
+		Bandwidth: j.Bandwidth, ClientBandwidth: c.Bandwidth}
 }
 
 // JobState is the agent's view of a job's schedule, reported on every poll.

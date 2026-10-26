@@ -129,11 +129,42 @@ func chunkWorkers() int { return min(max(runtime.NumCPU(), 4), 8) }
 func (j *job) startSession(ctx context.Context, c *pbs.Client) (*pbs.BackupSession, error) {
 	t := time.Now().Unix()
 	s, err := c.StartBackup(ctx, j.snapshotRef(t), pbs.BackupOptions{Crypt: j.backupCrypt(), Compress: true, Concurrency: chunkWorkers(),
-		OnUpload: func(n int) { j.uploaded.Add(uint64(n)) }})
+		OnUpload: func(n int) { j.uploaded.Add(uint64(n)) }, RateLimit: j.rateLimit()})
 	if err != nil {
 		return nil, fmt.Errorf("start backup session: %w", err)
 	}
 	return s, nil
+}
+
+// rateLimit applies the job's and the client's bandwidth limits (nil = none).
+// The rate is re-evaluated as the backup goes, so a time-of-day window that
+// opens or closes mid-run takes effect right away.
+func (j *job) rateLimit() *pbs.RateLimiter {
+	limits := []api.Bandwidth{j.spec.Bandwidth, j.spec.ClientBandwidth}
+	if !limits[0].Limited() && !limits[1].Limited() {
+		return nil
+	}
+	var last atomic.Int64
+	last.Store(-1)
+	return pbs.NewRateLimiter(func() int64 {
+		kbit := int64(api.MinRate(time.Now(), limits...))
+		if old := last.Swap(kbit); old != kbit {
+			if kbit > 0 {
+				j.logf("info", "upload bandwidth limited to %s", formatRate(kbit))
+			} else if old >= 0 {
+				j.logf("info", "upload bandwidth no longer limited")
+			}
+		}
+		return kbit * 1000 / 8
+	})
+}
+
+// formatRate renders kbit/s like the console does.
+func formatRate(kbit int64) string {
+	if kbit >= 1000 {
+		return fmt.Sprintf("%g Mbit/s", float64(kbit)/1000)
+	}
+	return fmt.Sprintf("%d kbit/s", kbit)
 }
 
 func (j *job) finishSession(ctx context.Context, s *pbs.BackupSession, res *api.Result) error {

@@ -335,3 +335,51 @@ func (s *Store) mustMember(t *testing.T, groupID int64) int64 {
 	}
 	return jobs[0].ID
 }
+
+func TestBandwidthLimits(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	cs := groupTestClients(t, s, "pc-1")
+	c := cs[0]
+	g := &GroupJob{Name: "Users", Kind: api.KindFiles, Sources: []string{`C:\Users`}, Enabled: true, ChangeDetection: "metadata",
+		Clients: []int64{c.ID}}
+	if _, err := s.store.SaveGroupJob(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.agentConfig(ctx, c)
+
+	g.Bandwidth = api.Bandwidth{Rate: 50000, WindowRate: 8000, WindowStart: "08:00", WindowEnd: "18:00", WindowDays: []int{5, 1, 3, 2, 4, 1}}
+	if err := validateGroupJob(g); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(g.Bandwidth.WindowDays, []int{1, 2, 3, 4, 5}) {
+		t.Fatalf("days = %v", g.Bandwidth.WindowDays)
+	}
+	if _, err := s.store.SaveGroupJob(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.SetClientBandwidth(ctx, c.ID, api.Bandwidth{Rate: 20000}); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = s.store.Client(ctx, c.ID)
+	cfg, err := s.agentConfig(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Rev == before.Rev || cfg.Bandwidth.Rate != 20000 || cfg.Jobs[0].Bandwidth.WindowRate != 8000 {
+		t.Fatalf("config = %+v", cfg)
+	}
+	spec := cfg.Spec(cfg.Jobs[0])
+	if spec.Bandwidth.Rate != 50000 || spec.ClientBandwidth.Rate != 20000 {
+		t.Fatalf("spec = %+v / %+v", spec.Bandwidth, spec.ClientBandwidth)
+	}
+	// Without limits nothing is added to the config (no needless pushes after upgrading).
+	if b, _ := json.Marshal(before); strings.Contains(string(b), "bandwidth") {
+		t.Fatalf("unlimited config mentions bandwidth: %s", b)
+	}
+	bad := *g
+	bad.Bandwidth = api.Bandwidth{WindowStart: "08:00"}
+	if validateGroupJob(&bad) == nil {
+		t.Fatal("window without an end accepted")
+	}
+}

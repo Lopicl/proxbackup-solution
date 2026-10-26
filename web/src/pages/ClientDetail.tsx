@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useMemo, useState } from 'react'
-import { ALL_CLIENTS, api, clientName, type GroupJob, type GroupMember, type Snapshot } from '../api'
+import { ALL_CLIENTS, api, clientName, type Bandwidth, type GroupJob, type GroupMember, type Snapshot } from '../api'
 import { adminBackend, RestoreBrowser } from './RestoreBrowser'
 import { RunsTable } from './RunsTable'
-import { GroupJobEditor, JobTags, keepText, MemberEditor, newGroupJob, ScheduleText } from './Jobs'
+import { BandwidthFields, bandwidthText, GroupJobEditor, JobTags, keepText, MemberEditor, newGroupJob, ScheduleText } from './Jobs'
 import { usePerms } from '../perms'
 import { ago, bytes, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
 
@@ -14,6 +14,7 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
   const [editing, setEditing] = useState<Partial<GroupJob> | null>(null)
   const [member, setMember] = useState<{ m: GroupMember; group: string } | null>(null)
   const [editingTags, setEditingTags] = useState(false)
+  const [editingBandwidth, setEditingBandwidth] = useState(false)
   const [msg, setMsg] = useState('')
   const perms = usePerms()
   if (error) return <ErrorBox error={error} />
@@ -118,6 +119,14 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
           )}{' '}
           {perms.all('clients.manage') && (
             <button className="small ghost" title="Tags group clients: jobs can target every client with a tag" onClick={() => setEditingTags(true)}>
+              Edit
+            </button>
+          )}
+        </span>
+        <span>
+          Upload limit <b>{bandwidthText(c.bandwidth)}</b>{' '}
+          {canManage && !c.revoked && (
+            <button className="small ghost" title="Caps the uploads of all this client's jobs" onClick={() => setEditingBandwidth(true)}>
               Edit
             </button>
           )}
@@ -334,6 +343,16 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
           }}
         />
       )}
+      {editingBandwidth && (
+        <BandwidthEditor
+          clientId={id}
+          bandwidth={c.bandwidth}
+          onClose={() => {
+            setEditingBandwidth(false)
+            reloadAll()
+          }}
+        />
+      )}
       {editingTags && (
         <TagsEditor
           clientId={id}
@@ -345,6 +364,36 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         />
       )}
     </>
+  )
+}
+
+function BandwidthEditor({ clientId, bandwidth, onClose }: { clientId: number; bandwidth?: Bandwidth; onClose: () => void }) {
+  const [b, setB] = useState<Bandwidth>(bandwidth ?? {})
+  const [error, setError] = useState('')
+  return (
+    <Modal title="Client upload limit" onClose={onClose}>
+      <form
+        onSubmit={async (e) => {
+          e.preventDefault()
+          try {
+            await api.setClientBandwidth(clientId, b)
+            onClose()
+          } catch (err) {
+            setError((err as Error).message)
+          }
+        }}
+      >
+        <p className="muted-text">Applies to every backup of this PC. A job's own limit applies too; the lower one wins. Takes effect from the next run.</p>
+        <BandwidthFields b={b} onChange={setB} />
+        <ErrorBox error={error} />
+        <div className="buttons">
+          <button type="button" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="primary">Save</button>
+        </div>
+      </form>
+    </Modal>
   )
 }
 

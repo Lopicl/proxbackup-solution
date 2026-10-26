@@ -58,6 +58,16 @@ export interface Run {
   group_id: number
 }
 
+// An upload limit in kbit/s (0 = unlimited). During the optional window (PC
+// local time, on window_days or every day) window_rate applies instead.
+export interface Bandwidth {
+  rate?: number
+  window_rate?: number
+  window_start?: string // "HH:MM"; an end before the start runs past midnight
+  window_end?: string
+  window_days?: number[] // 0 = Sunday; empty = every day
+}
+
 export interface Client {
   id: number
   name: string
@@ -82,6 +92,7 @@ export interface Client {
   paused_until: number // scheduled backups paused from the tray app until then (unix s; compare with now)
   paused_by: string
   tray_error: string // the agent can't start the tray app on the PC ('' = fine)
+  bandwidth: Bandwidth // upload limit for all the client's jobs
   revoked: boolean
   revoked_at: number
   restorable: boolean // revoked and can be un-revoked (its agent reconnects)
@@ -119,6 +130,7 @@ export interface JobDefinition {
   spread_minutes: number // members' start times are spread over this many minutes
   prevent_sleep: boolean // keep the PC from going to sleep while a run is going
   wake_to_run: boolean // wake the PC from sleep or hibernation for scheduled runs
+  bandwidth: Bandwidth // upload limit of the job (the client's own limit applies too)
   enabled: boolean
 }
 
@@ -524,6 +536,7 @@ export const api = {
   deleteGroupJob: (id: number) => request('DELETE', `/group-jobs/${id}`),
   runGroupJob: (id: number) => request<{ run_ids: number[]; skipped: number }>('POST', `/group-jobs/${id}/run`),
   setClientTags: (id: number, tags: string[]) => request<{ tags: string[] }>('PUT', `/clients/${id}/tags`, { tags }),
+  setClientBandwidth: (id: number, b: Bandwidth) => request<Bandwidth>('PUT', `/clients/${id}/bandwidth`, b),
 
   runs: (q: { client_id?: number; active?: boolean; limit?: number } = {}) => {
     const p = new URLSearchParams()
