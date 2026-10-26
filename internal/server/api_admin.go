@@ -124,20 +124,22 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	case req.RootNS != "" && !nsRe.MatchString(req.RootNS):
 		httpError(w, 400, errors.New("invalid namespace"))
 		return
-	case t.ID == 0 && req.AdminSecret == "" && s.localSecretFor(req.AdminAuthID) == "":
-		httpError(w, 400, errors.New("admin token secret is required"))
-		return
+	}
+	fp := strings.TrimSpace(req.Fingerprint)
+	if fp == "" {
+		fp = s.localFingerprintFor(ctx, req.AdminAuthID)
+	}
+	// The stored secret only stays with the PBS and token it was entered for.
+	if req.AdminSecret == "" && (t.ID == 0 || !t.sameEndpoint(req.Host, fp, req.AdminAuthID)) {
+		if req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, fp); req.AdminSecret == "" {
+			httpError(w, 400, errors.New("admin token secret is required (enter it again when host, fingerprint or token id change)"))
+			return
+		}
 	}
 	// A new root namespace must exist on PBS before agents are pointed at it.
 	nsChanged := t.ID != 0 && t.RootNS != req.RootNS
 	t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser =
-		req.Name, req.Host, strings.TrimSpace(req.Fingerprint), req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser
-	if req.AdminSecret == "" && t.ID == 0 {
-		req.AdminSecret = s.localSecretFor(req.AdminAuthID)
-	}
-	if t.Fingerprint == "" {
-		t.Fingerprint = s.localFingerprintFor(ctx, req.AdminAuthID)
-	}
+		req.Name, req.Host, fp, req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser
 	if req.AdminSecret != "" {
 		t.adminSecretEnc = s.sealer.Seal(req.AdminSecret)
 	}
@@ -194,22 +196,28 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 		targetReq
 		ID int64 `json:"id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	// The form sends the whole target, so unknown fields are allowed here.
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		httpError(w, 400, err)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
+	if req.Fingerprint = strings.TrimSpace(req.Fingerprint); req.Fingerprint == "" {
+		req.Fingerprint = s.localFingerprintFor(ctx, req.AdminAuthID)
+	}
+	// Stored and local secrets are only sent to the PBS they belong to.
 	if req.AdminSecret == "" && req.ID > 0 {
-		if t, err := s.store.Target(ctx, req.ID); err == nil {
+		if t, err := s.store.Target(ctx, req.ID); err == nil && t.sameEndpoint(req.Host, req.Fingerprint, req.AdminAuthID) {
 			req.AdminSecret, _ = s.sealer.Open(t.adminSecretEnc)
 		}
 	}
 	if req.AdminSecret == "" {
-		req.AdminSecret = s.localSecretFor(req.AdminAuthID)
+		req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, req.Fingerprint)
 	}
-	if strings.TrimSpace(req.Fingerprint) == "" {
-		req.Fingerprint = s.localFingerprintFor(ctx, req.AdminAuthID)
+	if req.AdminSecret == "" {
+		httpError(w, 400, errors.New("admin token secret is required (enter it again when host, fingerprint or token id change)"))
+		return
 	}
 	pc, err := pbs.NewClient(pbs.Config{Host: req.Host, Fingerprint: req.Fingerprint, AuthID: req.AdminAuthID, Secret: req.AdminSecret})
 	if err != nil {

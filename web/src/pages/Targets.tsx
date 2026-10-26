@@ -161,7 +161,7 @@ function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?
               isLocal
                 ? 'Not needed: this is the token created when the console was installed on this PBS.'
                 : t.id
-                  ? 'Leave empty to keep the stored secret.'
+                  ? 'Leave empty to keep the stored secret (enter it again when changing host, fingerprint or token ID).'
                   : 'Stored encrypted.'
             }
           >

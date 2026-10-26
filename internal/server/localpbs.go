@@ -169,11 +169,37 @@ func (s *Server) localFingerprintFor(ctx context.Context, authID string) string 
 }
 
 // localSecretFor fills in the local admin token secret when a target form uses
-// the local token id without a secret (the admin never sees that secret).
-func (s *Server) localSecretFor(authID string) string {
-	if l := s.cfg.LocalPBS; l != nil && authID == l.AuthID {
-		secret, _ := l.secret()
-		return secret
+// the local token id without a secret (the admin never sees that secret). It is
+// only handed out for this PBS's address and certificate fingerprint, so a form
+// cannot send the root token to another host.
+func (s *Server) localSecretFor(ctx context.Context, authID, host, fp string) string {
+	l := s.cfg.LocalPBS
+	if l == nil || authID != l.AuthID || !sameHost(host, l.PublicHost) && !sameHost(host, l.APIAddr) {
+		return ""
 	}
-	return ""
+	local, err := l.fingerprint(ctx)
+	if err != nil || pbs.NormalizeFingerprint(fp) != pbs.NormalizeFingerprint(local) {
+		return ""
+	}
+	secret, _ := l.secret()
+	return secret
+}
+
+// sameHost compares PBS addresses, with the PBS default port when none is given.
+func sameHost(a, b string) bool {
+	norm := func(h string) string {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if _, _, err := net.SplitHostPort(h); err != nil {
+			h = net.JoinHostPort(strings.Trim(h, "[]"), "8007")
+		}
+		return h
+	}
+	return a != "" && norm(a) == norm(b)
+}
+
+// sameEndpoint reports whether a target form still points at the PBS and token
+// the stored secret belongs to, so the stored secret may be reused.
+func (t *Target) sameEndpoint(host, fp, authID string) bool {
+	return sameHost(t.Host, host) && authID == t.AdminAuthID &&
+		pbs.NormalizeFingerprint(t.Fingerprint) == pbs.NormalizeFingerprint(fp)
 }
