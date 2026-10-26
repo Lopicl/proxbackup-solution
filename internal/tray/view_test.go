@@ -33,6 +33,11 @@ func TestBuildView(t *testing.T) {
 	if v = buildView(st, now); v.state != stateRunning || v.tooltip != "ProxBackup: Backing up Documents (25%)…" {
 		t.Errorf("running view = %+v", v)
 	}
+	st.Running, st.Waiting = nil, "on battery power"
+	if v = buildView(st, now); v.state != stateFailed || v.next != "Backup waits: the PC is on battery power" || v.tooltip != "ProxBackup: "+v.next {
+		t.Errorf("waiting view = %+v", v)
+	}
+	st.Waiting = ""
 	st.Running, st.PausedUntil, st.Online = nil, now.Add(time.Hour).Unix(), false
 	if v = buildView(st, now); !v.paused || v.state != stateIdle || v.tooltip != "ProxBackup: Backups paused until today 16:00 (console unreachable)" {
 		t.Errorf("paused view = %+v", v)

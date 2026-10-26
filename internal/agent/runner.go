@@ -38,6 +38,12 @@ type Runner struct {
 	queue      chan task
 	wakeAt     time.Time // armed wake time (scheduleLoop only)
 	wakeWarned bool
+	active     *activeRun // scheduled run in progress
+
+	cond       conditions // power and network state (condMu)
+	condMu     sync.Mutex
+	condRead   bool // cond was read at least once (scheduleLoop only)
+	condWarned bool
 
 	updating       bool // self-update in progress (selfupdate.go)
 	updateFailed   string
@@ -59,6 +65,15 @@ type task struct {
 	trigger string
 	slot    time.Time
 	by      string // user who started it from the tray
+}
+
+// activeRun is a scheduled run in progress, which a battery or
+// metered-network policy may stop.
+type activeRun struct {
+	job     api.JobConfig
+	slot    time.Time
+	cancel  context.CancelFunc
+	stopped string // why it was stopped ("" = it wasn't)
 }
 
 // NewRunner creates a runner from an enrolled configuration.
@@ -83,6 +98,7 @@ func NewRunner(cfg *Config, version string, log *slog.Logger) (*Runner, error) {
 	r.sched.missed = r.reportMissed
 	r.sched.pausedBy = r.pausedBy
 	r.sched.conn = r.connection
+	r.sched.cond = r.conditions
 	r.loadLocal()
 	r.sched.logf = func(level, format string, args ...any) { r.log.Info(fmt.Sprintf(format, args...), "level", level) }
 	return r, nil
@@ -116,13 +132,60 @@ func (r *Runner) scheduleLoop(ctx context.Context) {
 	t := time.NewTicker(20 * time.Second)
 	defer t.Stop()
 	for {
+		r.refreshConditions()
 		r.sched.Tick()
+		r.enforceConditions()
 		r.armWake()
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// refreshConditions reads the PC's power and network state, logging changes.
+func (r *Runner) refreshConditions() {
+	c, err := readConditions()
+	if err != nil && !r.condWarned {
+		r.log.Warn("can't read the power or network state; battery and metered-network policies may not apply", "err", err)
+		r.condWarned = true
+	}
+	r.condMu.Lock()
+	old := r.cond
+	r.cond = c
+	r.condMu.Unlock()
+	if r.condRead && c.Battery != old.Battery {
+		r.log.Info("power source changed", "battery", c.Battery)
+	}
+	if r.condRead && c.Metered != old.Metered {
+		r.log.Info("network cost changed", "metered", c.Metered)
+	}
+	r.condRead = true
+}
+
+// conditions is the Scheduler's power and network state hook.
+func (r *Runner) conditions() conditions {
+	r.condMu.Lock()
+	defer r.condMu.Unlock()
+	return r.cond
+}
+
+// enforceConditions stops the scheduled run in progress if its job's policy
+// says so for the PC's current power or network state. The run is repeated
+// once the condition ends (execute hands it to Scheduler.Defer).
+func (r *Runner) enforceConditions() {
+	c := r.conditions()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a := r.active
+	if a == nil || a.stopped != "" {
+		return
+	}
+	if reason, stop := c.blockedBy(a.job); stop {
+		r.log.Info("stopping scheduled run", "job", a.job.Name, "reason", reason)
+		a.stopped = reason
+		a.cancel()
 	}
 }
 
@@ -427,10 +490,17 @@ func (r *Runner) execute(parent context.Context, t task) {
 	defer cancel()
 
 	var rep *reporter
+	scheduled := t.local && t.by == ""
 	if t.local {
 		trigger, err := lateStart(t.job, t.trigger, t.slot, time.Now())
 		if err != nil {
 			r.reportMissed(t.job, t.slot, err.Error())
+			return
+		}
+		// It waited in the queue: the PC may have gone on battery meanwhile.
+		if reason, _ := r.conditions().blockedBy(t.job); scheduled && reason != "" {
+			r.log.Info("scheduled run waits", "job", t.job.Name, "reason", reason)
+			r.sched.Defer(t.job.ID, t.slot, reason)
 			return
 		}
 		t.trigger = trigger
@@ -464,9 +534,13 @@ func (r *Runner) execute(parent context.Context, t task) {
 		}
 	}
 	r.runStarted(name, t.spec.Kind, t.trigger)
-	scheduled := t.local && t.by == ""
+	var active *activeRun
 	if scheduled {
 		r.sched.RunStarted(t.job.ID, t.slot)
+		active = &activeRun{job: t.job, slot: t.slot, cancel: cancel}
+		r.mu.Lock()
+		r.active = active
+		r.mu.Unlock()
 	}
 	started := time.Now()
 	var res api.Result
@@ -476,8 +550,23 @@ func (r *Runner) execute(parent context.Context, t task) {
 		res = Run(ctx, t.spec, tapReporter{rep, r})
 	}
 	r.runEnded()
+	stopped := ""
+	if active != nil {
+		r.mu.Lock()
+		r.active, stopped = nil, active.stopped
+		r.mu.Unlock()
+	}
+	if stopped != "" && res.State != api.RunSuccess && res.State != api.RunWarning {
+		res.State, res.Error = api.RunCanceled, "stopped because the PC went "+stopped+"; it runs again once the PC no longer is"
+		rep.Log("warn", res.Error)
+	} else {
+		stopped = ""
+	}
 	if scheduled && parent.Err() == nil { // agent stopping: the restart catches it up
 		r.sched.RunEnded(t.job.ID, res.State == api.RunFailed)
+		if stopped != "" {
+			r.sched.Defer(t.job.ID, t.slot, stopped)
+		}
 	}
 	r.log.Info("run finished", "job", t.spec.JobID, "trigger", t.trigger, "state", res.State, "err", res.Error)
 	rep.finish(res)

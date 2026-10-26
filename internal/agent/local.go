@@ -222,6 +222,9 @@ func (r *Runner) localStatus(peer *ipc.Peer) *ipc.Status {
 	next := map[int64]int64{}
 	for _, js := range r.sched.States() {
 		next[js.JobID] = js.NextRun
+		if st.Waiting == "" {
+			st.Waiting = js.Waiting
+		}
 	}
 	r.local.mu.Lock()
 	defer r.local.mu.Unlock()

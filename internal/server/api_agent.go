@@ -262,7 +262,7 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 			ChangeDetection: s.changeDetection(ctx, t, j),
 			Schedule:        j.Schedule, WindowMinutes: j.WindowMinutes, CatchUp: j.CatchUp, Encrypt: j.Encrypt,
 			StartDelay: j.StartDelay, PreventSleep: j.PreventSleep,
-			WakeToRun: j.WakeToRun, Bandwidth: j.Bandwidth})
+			WakeToRun: j.WakeToRun, Bandwidth: j.Bandwidth, OnBattery: j.OnBattery, OnMetered: j.OnMetered})
 	}
 	b, _ := json.Marshal(cfg)
 	sum := sha256.Sum256(b)
@@ -276,7 +276,7 @@ func applyAgentState(c *Client, jobs []*Job) {
 	for _, j := range jobs {
 		for _, st := range c.ScheduleState {
 			if st.JobID == j.ID {
-				j.NextRun, j.CatchUpPending = st.NextRun, st.CatchUpPending
+				j.NextRun, j.CatchUpPending, j.Waiting = st.NextRun, st.CatchUpPending, st.Waiting
 			}
 		}
 	}

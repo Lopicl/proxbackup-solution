@@ -28,6 +28,13 @@ import (
 //     catch-up off: record as "missed"
 //   - backups paused from the tray     → catch-up on: start it once the pause ends
 //     catch-up off: record as "missed"
+//   - PC on battery / metered network  → (job policy "defer" or "stop") wait: start
+//     it once the condition ends, as a scheduled run within the start window,
+//     later as a catch-up run; catch-up off: "missed" once the window has passed
+//
+// A job with policy "stop" also has its scheduled run stopped when the
+// condition sets in mid-run (Runner.enforceConditions); the run then waits
+// like a deferred one (Defer).
 //
 // With catch-up on, a scheduled run that fails because the agent went offline
 // meanwhile (lost contact with the server, or the agent stopped mid-run: PC
@@ -50,6 +57,8 @@ type Scheduler struct {
 	// conn reports since when the agent has been connected to the server (zero
 	// while offline) and how often it lost the connection so far.
 	conn func() (onlineSince time.Time, drops int)
+	// cond reports the PC's power and network state (nil = mains, unmetered).
+	cond func() conditions
 	logf func(level, format string, args ...any)
 
 	mu     sync.Mutex
@@ -77,6 +86,10 @@ type jobState struct {
 	RetryOnline bool  `json:"retry_online,omitempty"`
 	RetryFrom   int64 `json:"retry_from,omitempty"`
 	Running     int64 `json:"running,omitempty"` // slot of the scheduled run in progress
+	// Deferred: the run of PendingSlot waits for the PC to leave battery
+	// power or a metered network (Reason, for a "missed" record).
+	Deferred bool   `json:"deferred,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 const (
@@ -221,6 +234,7 @@ func (s *Scheduler) Tick() {
 	if s.pausedBy != nil {
 		paused = s.pausedBy()
 	}
+	cond := s.conditions()
 	for _, j := range jobs {
 		if j.Schedule == "" {
 			continue
@@ -251,9 +265,32 @@ func (s *Scheduler) Tick() {
 			}
 		}
 
+		blocked, _ := cond.blockedBy(j)
+
+		// A run waiting for the PC to leave battery power or a metered
+		// network: on time within its window, a catch-up after it.
+		if st.Deferred {
+			slot := time.Unix(st.PendingSlot, 0)
+			late := now.Sub(slot) > window(j)
+			switch {
+			case blocked == "" && paused == "" && !s.busy(j.ID) && (!late || j.CatchUp):
+				trigger, msg := api.TriggerSchedule, "starting the run that waited"
+				if late {
+					trigger, msg = api.TriggerCatchUp, "starting catch-up of the run that waited"
+				}
+				if s.start(s.cfg.Spec(j), j, trigger, slot) {
+					s.logf("info", "%s: no longer %s, %s", j.Name, st.Reason, msg)
+					st.Deferred, st.Reason, changed = false, "", true
+				}
+			case late && !j.CatchUp:
+				s.missed(j, slot, "the PC was "+st.Reason+" during the start window")
+				st.Deferred, st.Reason, changed = false, "", true
+			}
+		}
+
 		// A catch-up deferred because the job was busy (or a run cut off by
 		// going offline): start it once it's free.
-		if st.CatchUpPending && paused == "" && !s.busy(j.ID) && s.retryDue(st, now) {
+		if st.CatchUpPending && paused == "" && blocked == "" && !s.busy(j.ID) && s.retryDue(st, now) {
 			msg := "starting deferred catch-up run"
 			if st.RetryOnline {
 				msg = "starting catch-up of the run cut off by the agent going offline"
@@ -278,13 +315,19 @@ func (s *Scheduler) Tick() {
 		case paused != "":
 			if j.CatchUp {
 				st.CatchUpPending, st.PendingSlot, st.RetryOnline = true, due.Slot.Unix(), false
+				st.Deferred = false // coalesced into this catch-up
 				s.logf("info", "%s: backups are paused, will catch up when the pause ends", j.Name)
 			} else {
 				s.missed(j, due.Slot, "scheduled backups were paused on the PC by "+paused)
 			}
+		case blocked != "" && (due.OnTime || j.CatchUp):
+			st.Deferred, st.PendingSlot, st.Reason = true, due.Slot.Unix(), blocked
+			st.CatchUpPending, st.RetryOnline = false, false // coalesced into this run
+			s.logf("info", "%s: the PC is %s, the scheduled run waits until it no longer is", j.Name, blocked)
 		case s.busy(j.ID):
 			if j.CatchUp {
 				st.CatchUpPending, st.PendingSlot, st.RetryOnline = true, due.Slot.Unix(), false
+				st.Deferred = false // coalesced into this catch-up
 				s.logf("info", "%s: previous run still in progress, will catch up when it finishes", j.Name)
 			} else {
 				s.missed(j, due.Slot, "the previous run of this job was still in progress")
@@ -303,6 +346,28 @@ func (s *Scheduler) Tick() {
 			s.logf("warn", "saving schedule state: %v", err)
 		}
 	}
+}
+
+// conditions reports the PC's power and network state.
+func (s *Scheduler) conditions() conditions {
+	if s.cond == nil {
+		return conditions{}
+	}
+	return s.cond()
+}
+
+// Defer makes a scheduled run that was stopped because the PC went on battery
+// power or a metered network wait until it no longer is (see Tick).
+func (s *Scheduler) Defer(jobID int64, slot time.Time, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.state[jobID]
+	if st == nil {
+		return
+	}
+	st.Deferred, st.PendingSlot, st.Reason = true, slot.Unix(), reason
+	st.CatchUpPending, st.RetryOnline = false, false
+	s.saveLocked()
 }
 
 // connection reports the agent's connection to the server.
@@ -372,11 +437,15 @@ func (s *Scheduler) States() []api.JobState {
 		return nil
 	}
 	now := s.now()
+	cond := s.conditions()
 	out := make([]api.JobState, 0, len(s.cfg.Jobs))
 	for _, j := range s.cfg.Jobs {
 		js := api.JobState{JobID: j.ID, Running: s.busy(j.ID)}
 		if st := s.state[j.ID]; st != nil {
 			js.LastSlot, js.CatchUpPending = st.LastSlot, st.CatchUpPending
+			if st.Deferred || st.CatchUpPending {
+				js.Waiting, _ = cond.blockedBy(j)
+			}
 		}
 		if j.Schedule != "" {
 			if sched, err := schedule.Parse(j.Schedule); err == nil {

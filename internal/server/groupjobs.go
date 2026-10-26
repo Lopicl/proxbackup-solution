@@ -53,6 +53,8 @@ type GroupJob struct {
 	PreventSleep    bool            `json:"prevent_sleep"`
 	WakeToRun       bool            `json:"wake_to_run"`
 	Bandwidth       api.Bandwidth   `json:"bandwidth"`
+	OnBattery       string          `json:"on_battery"`
+	OnMetered       string          `json:"on_metered"`
 	// Members: these clients, plus every client with one of Tags.
 	Clients   []int64  `json:"clients"`
 	Tags      []string `json:"tags"`
@@ -81,13 +83,15 @@ func startDelay(groupID, clientID int64, spreadMinutes int) int {
 }
 
 const groupCols = `id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, window_minutes, catch_up, retention,
-	enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at, daily_cap, prevent_sleep, wake_to_run, bandwidth`
+	enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at, daily_cap, prevent_sleep, wake_to_run, bandwidth,
+	on_battery, on_metered`
 
 func scanGroupJob(sc interface{ Scan(...any) error }) (*GroupJob, error) {
 	g := &GroupJob{}
 	var src, exc, vol, ret, tags, bw string
 	err := sc.Scan(&g.ID, &g.Name, &g.Kind, &g.BackupID, &src, &exc, &vol, &g.UseVSS, &g.Schedule, &g.WindowMinutes, &g.CatchUp, &ret,
-		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.SpreadMinutes, &tags, &g.CreatedAt, &g.DailyCap, &g.PreventSleep, &g.WakeToRun, &bw)
+		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.SpreadMinutes, &tags, &g.CreatedAt, &g.DailyCap, &g.PreventSleep, &g.WakeToRun, &bw,
+		&g.OnBattery, &g.OnMetered)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -177,9 +181,10 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 		}
 		res, err := db.ExecContext(ctx, `INSERT INTO group_jobs(name, kind, backup_id, sources, excludes, volumes, use_vss, schedule,
 			window_minutes, catch_up, retention, enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at,
-			daily_cap, prevent_sleep, wake_to_run, bandwidth) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			daily_cap, prevent_sleep, wake_to_run, bandwidth, on_battery, on_metered) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
-			g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.CreatedAt, g.DailyCap, g.PreventSleep, g.WakeToRun, bw)
+			g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.CreatedAt, g.DailyCap, g.PreventSleep, g.WakeToRun, bw,
+			g.OnBattery, g.OnMetered)
 		if err != nil {
 			return err
 		}
@@ -188,9 +193,10 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 	}
 	_, err := db.ExecContext(ctx, `UPDATE group_jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?,
 		schedule=?, window_minutes=?, catch_up=?, retention=?, enabled=?, change_detection=?, encrypt=?, lock_days=?, spread_minutes=?,
-		member_tags=?, daily_cap=?, prevent_sleep=?, wake_to_run=?, bandwidth=? WHERE id=?`,
+		member_tags=?, daily_cap=?, prevent_sleep=?, wake_to_run=?, bandwidth=?, on_battery=?, on_metered=? WHERE id=?`,
 		g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
-		g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.DailyCap, g.PreventSleep, g.WakeToRun, bw, g.ID)
+		g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.DailyCap, g.PreventSleep, g.WakeToRun, bw,
+		g.OnBattery, g.OnMetered, g.ID)
 	return err
 }
 

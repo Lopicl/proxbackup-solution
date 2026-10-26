@@ -68,6 +68,10 @@ export interface Bandwidth {
   window_days?: number[] // 0 = Sunday; empty = every day
 }
 
+// Battery / metered-network policy: '' = run anyway, 'defer' = don't start
+// until the condition ends, 'stop' = also stop a run in progress.
+export type Policy = '' | 'defer' | 'stop'
+
 export interface Client {
   id: number
   name: string
@@ -131,6 +135,8 @@ export interface JobDefinition {
   prevent_sleep: boolean // keep the PC from going to sleep while a run is going
   wake_to_run: boolean // wake the PC from sleep or hibernation for scheduled runs
   bandwidth: Bandwidth // upload limit of the job (the client's own limit applies too)
+  on_battery: Policy // what scheduled runs do while the PC runs on battery power
+  on_metered: Policy // ... and while it is on a metered network
   enabled: boolean
 }
 
@@ -146,6 +152,7 @@ export interface Job extends JobDefinition {
   start_delay: number // seconds after the scheduled time this member starts
   next_run?: number
   catch_up_pending?: boolean
+  waiting?: string // a due run waits for the PC to leave battery power or a metered network ("on battery power")
 }
 
 export const ALL_CLIENTS = '*'

@@ -271,7 +271,17 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
                     <td>
                       <ScheduleText j={g} />
                     </td>
-                    <td>{m.catch_up_pending ? <span className="badge info">catch-up pending</span> : m.next_run ? dateTime(m.next_run) : '—'}</td>
+                    <td>
+                      {m.waiting ? (
+                        <span className="badge info">waits: {m.waiting}</span>
+                      ) : m.catch_up_pending ? (
+                        <span className="badge info">catch-up pending</span>
+                      ) : m.next_run ? (
+                        dateTime(m.next_run)
+                      ) : (
+                        '—'
+                      )}
+                    </td>
                     <td>{m.last_run ? <StateBadge state={m.last_run.state} /> : '—'}</td>
                     <td>{keepText(g.retention)}</td>
                     <td className="row-actions">

@@ -84,6 +84,8 @@ func buildView(st *ipc.Status, now time.Time) view {
 	if st.PausedUntil > now.Unix() {
 		v.paused, v.state = true, stateIdle
 		v.next = "Backups paused until " + when(st.PausedUntil, now)
+	} else if st.Waiting != "" {
+		v.next = "Backup waits: the PC is " + st.Waiting
 	} else if next > 0 {
 		v.next = "Next backup: " + when(next, now)
 	}
@@ -91,7 +93,7 @@ func buildView(st *ipc.Status, now time.Time) view {
 	if r := st.Running; r != nil {
 		v.running, v.state = true, stateRunning
 		v.tooltip = "ProxBackup: " + runningText(r)
-	} else if v.paused {
+	} else if v.paused || st.Waiting != "" {
 		v.tooltip = "ProxBackup: " + v.next
 	}
 	if !st.Online {

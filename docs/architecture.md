@@ -408,8 +408,9 @@ was updated, the running tray starts the new executable and exits.
 
 * **Icon and tooltip:** green (last runs succeeded), blue (running, with progress), amber
   (warnings, never backed up), red (a job's last run failed), grey (paused, no jobs, or the
-  agent service isn't running). The menu shows the last backup, the next scheduled one, and
-  the last 10 runs, including missed ones.
+  agent service isn't running). The menu shows the last backup, the next scheduled one (or
+  why a due one waits, e.g. "the PC is on battery power"), and the last 10 runs, including
+  missed ones.
 * **Back up now** queues every backup job of the PC (trigger `manual`, logged as started from
   the tray by the user). Pausing doesn't block it.
 * **Pause scheduled backups** for 1, 4 or 24 hours (no indefinite pause). While paused, due slots
@@ -453,6 +454,7 @@ a slot.
 | PC was off/asleep or the agent wasn't running, window passed | start immediately, trigger `catch-up` | record a `missed` run |
 | Same job still running from the previous slot | start right after it finishes (`catch-up`) | record a `missed` run |
 | Waited in the queue behind another job past the window | run as `catch-up` | record a `missed` run |
+| PC on battery / metered network, job policy `defer` or `stop` | wait; start when the condition ends (`schedule` within the window, `catch-up` after it) | wait; start if the condition ends within the window, else record a `missed` run |
 
 * Several missed slots, e.g. after three days off, are coalesced into **one** catch-up run.
 * New jobs and changed schedules start counting from "now". They never catch up on slots from
@@ -469,6 +471,15 @@ a slot.
   2-minute unattended idle timeout. Windows ignores the timer when *Allow wake timers* is off,
   and it can't wake a PC that is shut down. On PCs with no sleep state it can wake from (most
   VMs) the agent logs one warning.
+* **Battery and metered networks:** each job has `on_battery` and `on_metered` policies for
+  scheduled runs (`""` run as usual, `defer`, `stop`; manual runs ignore them). Every schedule
+  check the agent reads the power source (`GetSystemPowerStatus`) and the cost of the internet
+  connection (Network List Manager `INetworkCostManager::GetCost`: fixed or variable data
+  plan, over the data limit, or roaming = metered; set per network in Windows settings). A due
+  run of a blocked job waits as in the table; a newer slot coalesces into it. With `stop`, a
+  scheduled run in progress is canceled when the condition sets in and waits the same way (it
+  starts over; PBS dedup skips chunks the previous snapshot already has). The wait reason is
+  reported in the poll, shown as "waits: on battery power" in the console and in the tray menu.
 
 ```mermaid
 stateDiagram-v2
@@ -479,6 +490,10 @@ stateDiagram-v2
   Due --> Pending: same job still running, catch-up on
   Pending --> Running: previous run finished
   Due --> Missed: window passed / busy, catch-up off
+  Due --> Deferred: on battery / metered network, job policy defer or stop
+  Running --> Deferred: condition sets in, job policy stop
+  Deferred --> Running: condition ended (within window, or catch-up on)
+  Deferred --> Missed: window passed, catch-up off
   Running --> Waiting: report result (spooled if server offline)
   Missed --> Waiting: report "missed"
 ```
@@ -668,7 +683,7 @@ docs/                   this document
 | Phase | Scope |
 |-------|-------|
 | **1 — MVP** (implemented; verified against PBS 4.2, with a Windows 11 ARM64 VM for the Windows paths) | PBS protocol library, pxar encoder, pxar v2 split archives with metadata change detection (see [pxar v2](#2-pkgpxar-pxar-encoder-and-decoder-v1-and-v2)), buzhash chunker, file backup with VSS, volume image backup, PBS GUI catalog for file and image backups, enrollment + mTLS, agent-side scheduling with catch-up, run history and logs, retention via prune, webhook/SMTP notifications, restore of pxar archives to a folder, React UI, console `.deb` for the PBS host (port 8077, PBS sign-in), automatic console and Windows agent updates from GitHub releases |
-| 2 — alpha 0.2 (in progress; ✅ = implemented) | ✅ Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, ✅ tray app (status, back up now, pause, recent runs, self-service restore page scoped to the user's profile for non-admins), ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, ✅ upload bandwidth limits (per job and client, optional time-of-day window, enforced by pacing every PBS upload request body), metered-network/battery awareness, immutable backups (✅ lock via the PBS `protected` flag while retention keeps a snapshot, ✅ tamper-resistant retention; see [Security model](#security-model)), ✅ no `catalog.pcat1.didx` for pxar v2 file backups (browsed through the `.mpxar`) |
+| 2 — alpha 0.2 (in progress; ✅ = implemented) | ✅ Internal user management with granular permissions (console users, built-in and custom roles optionally scoped to clients, audit log; replaces sign-in with PBS credentials), ✅ group jobs (one job definition assigned to many clients, each keeping its own PBS backup group, run history and agent-side schedule, with optional start-time spread), ✅ file restore from images (NTFS reader over the fixed index), ✅ client-side encryption + key escrow, NTFS ACLs and ADS in xattrs, ✅ tray app (status, back up now, pause, recent runs, self-service restore page scoped to the user's profile for non-admins), ✅ per-file restore browser in the UI, ✅ top-bar navigation with a profile menu and Console Settings icon, ✅ upload bandwidth limits (per job and client, optional time-of-day window, enforced by pacing every PBS upload request body), ✅ metered-network/battery awareness (per-job policy for scheduled runs, see [Client-side scheduling](#client-side-scheduling)), immutable backups (✅ lock via the PBS `protected` flag while retention keeps a snapshot, ✅ tamper-resistant retention; see [Security model](#security-model)), ✅ no `catalog.pcat1.didx` for pxar v2 file backups (browsed through the `.mpxar`) |
 | 3 — macOS & Linux agents | First-class `proxbackup-agent` for macOS and Linux (see [Platform support](#platform-support)): full Unix metadata (mode, uid/gid with names, xattrs, POSIX ACLs, file flags, hard links), consistent snapshots (APFS local snapshots on macOS; LVM, btrfs and ZFS snapshots on Linux, with live reads as an explicit fallback), per-OS default sources and excludes, Full Disk Access onboarding on macOS, launchd/systemd install verified, per-OS enrollment commands and packages (`.pkg`, `.deb`/`.rpm`) in the UI, agent self-update on macOS and Linux, CI runs the E2E suite on Linux and macOS |
 | 4 — Bare-metal recovery | Linux-based **ProxBackup Rescue** boot image (USB/ISO + network boot) that restores whole Windows and Linux machines from PBS. Disk-layout capture in image jobs, partition recreation, volume restore, boot repair. See [Bare-metal recovery](#bare-metal-recovery) |
 | 5 | Network share backups (SMB and NFS shares backed up directly by the console, server-side snapshots when available; see [Network share backups](#network-share-backups)), changed-block tracking for images, OIDC login, multi-PBS targets, sync-job awareness, immutable off-host copy (guided pull-sync to a second PBS; see [Security model](#security-model)) |

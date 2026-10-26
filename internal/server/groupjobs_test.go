@@ -383,3 +383,38 @@ func TestBandwidthLimits(t *testing.T) {
 		t.Fatal("window without an end accepted")
 	}
 }
+
+func TestBatteryMeteredPolicy(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	c := groupTestClients(t, s, "pc-1")[0]
+	g := &GroupJob{Name: "Users", Kind: api.KindFiles, Sources: []string{`C:\Users`}, Enabled: true, ChangeDetection: "metadata",
+		Clients: []int64{c.ID}}
+	if _, err := s.store.SaveGroupJob(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.agentConfig(ctx, c)
+	if b, _ := json.Marshal(before); strings.Contains(string(b), "on_battery") || strings.Contains(string(b), "on_metered") {
+		t.Fatalf("default config mentions the policies: %s", b)
+	}
+
+	g.OnBattery, g.OnMetered = api.PolicyDefer, api.PolicyStop
+	if err := validateGroupJob(g); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.SaveGroupJob(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.agentConfig(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j := cfg.Jobs[0]; cfg.Rev == before.Rev || j.OnBattery != api.PolicyDefer || j.OnMetered != api.PolicyStop {
+		t.Fatalf("config = %+v", cfg.Jobs[0])
+	}
+	bad := *g
+	bad.OnBattery = "pause"
+	if validateGroupJob(&bad) == nil {
+		t.Fatal("unknown policy accepted")
+	}
+}

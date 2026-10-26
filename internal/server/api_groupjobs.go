@@ -129,6 +129,9 @@ func validateGroupJob(g *GroupJob) error {
 	if err := g.Bandwidth.Clean(); err != nil {
 		return err
 	}
+	if !api.ValidPolicy(g.OnBattery) || !api.ValidPolicy(g.OnMetered) {
+		return errors.New(`on_battery and on_metered must be "", "defer" or "stop"`)
+	}
 	g.Sources, g.Excludes, g.Volumes = cleanList(g.Sources), cleanList(g.Excludes), cleanList(g.Volumes)
 	tags := []string{}
 	for _, t := range cleanList(g.Tags) {

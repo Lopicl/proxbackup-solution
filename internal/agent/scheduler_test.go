@@ -18,6 +18,7 @@ type schedHarness struct {
 	missed  []string
 	since   time.Time // zero = offline
 	drops   int
+	cond    conditions
 }
 
 func newHarness(t *testing.T, jobs ...api.JobConfig) *schedHarness {
@@ -37,6 +38,7 @@ func newHarness(t *testing.T, jobs ...api.JobConfig) *schedHarness {
 		h.missed = append(h.missed, slot.Format("02 15:04")+" "+reason)
 	}
 	h.s.conn = func() (time.Time, int) { return h.since, h.drops }
+	h.s.cond = func() conditions { return h.cond }
 	h.s.logf = func(string, string, ...any) {}
 	if err := h.s.Update(&api.AgentConfig{Rev: "r1", Jobs: jobs}); err != nil {
 		t.Fatal(err)
@@ -352,5 +354,120 @@ func TestSchedulerNewRunReplacesOfflineRetry(t *testing.T) {
 	h.s.Tick()
 	if strings.Join(h.started, ",") != "schedule@12 21:00,schedule@13 21:00" {
 		t.Fatalf("started %v", h.started)
+	}
+}
+
+func onBattery(catchUp bool, policy string) api.JobConfig {
+	j := daily(catchUp)
+	j.OnBattery = policy
+	return j
+}
+
+func TestSchedulerDeferOnBatteryWithinWindow(t *testing.T) {
+	h := newHarness(t, onBattery(false, api.PolicyDefer))
+	h.cond.Battery = true
+	h.at(12, 21, 0)
+	h.s.Tick()
+	if len(h.started) != 0 || len(h.missed) != 0 {
+		t.Fatalf("started %v missed %v", h.started, h.missed)
+	}
+	if st := h.s.States(); st[0].Waiting != reasonBattery {
+		t.Fatalf("waiting %q", st[0].Waiting)
+	}
+	h.cond.Battery = false // plugged in within the window: an on-time run
+	h.at(12, 21, 40)
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:00" || len(h.missed) != 0 {
+		t.Fatalf("started %v missed %v", h.started, h.missed)
+	}
+	if st := h.s.States(); st[0].Waiting != "" {
+		t.Fatalf("still waiting %q", st[0].Waiting)
+	}
+}
+
+func TestSchedulerDeferOnBatteryMissedWindow(t *testing.T) {
+	h := newHarness(t, onBattery(false, api.PolicyDefer))
+	h.cond.Battery = true
+	h.at(12, 21, 0)
+	h.s.Tick()
+	h.at(12, 22, 1)
+	h.s.Tick()
+	if len(h.started) != 0 || len(h.missed) != 1 || !strings.Contains(h.missed[0], reasonBattery) {
+		t.Fatalf("started %v missed %v", h.started, h.missed)
+	}
+	h.cond.Battery = false
+	h.at(12, 22, 30)
+	h.s.Tick()
+	if len(h.started) != 0 {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+func TestSchedulerDeferOnMeteredCatchUp(t *testing.T) {
+	j := daily(true)
+	j.OnMetered = api.PolicyStop
+	h := newHarness(t, j)
+	h.cond.Metered = true
+	h.at(12, 21, 0)
+	h.s.Tick()
+	h.at(13, 21, 0) // still metered: the next slot coalesces into one wait
+	h.s.Tick()
+	h.cond.Metered = false
+	h.at(13, 23, 0)
+	h.s.Tick()
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "catch-up@13 21:00" || len(h.missed) != 0 {
+		t.Fatalf("started %v missed %v", h.started, h.missed)
+	}
+}
+
+func TestSchedulerPolicyRunIgnoresBattery(t *testing.T) {
+	h := newHarness(t, onBattery(true, api.PolicyRun))
+	h.cond.Battery, h.cond.Metered = true, true
+	h.at(12, 21, 0)
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:00" {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+func TestSchedulerDeferStoppedRun(t *testing.T) {
+	h := newHarness(t, onBattery(true, api.PolicyStop))
+	h.at(12, 21, 0)
+	h.s.Tick()
+	slot := time.Date(2026, 10, 12, 21, 0, 0, 0, time.Local)
+	h.s.RunStarted(1, slot)
+	h.cond.Battery = true // the run is stopped (Runner.enforceConditions)
+	h.s.RunEnded(1, false)
+	h.busy[1] = false
+	h.s.Defer(1, slot, reasonBattery)
+	h.at(12, 21, 30)
+	h.s.Tick()
+	if len(h.started) != 1 {
+		t.Fatalf("started %v", h.started)
+	}
+	h.cond.Battery = false
+	h.at(12, 23, 0) // past the window: a catch-up
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:00,catch-up@12 21:00" {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+func TestBlockedBy(t *testing.T) {
+	j := api.JobConfig{OnBattery: api.PolicyDefer, OnMetered: api.PolicyStop}
+	for _, c := range []struct {
+		cond   conditions
+		reason string
+		stop   bool
+	}{
+		{conditions{}, "", false},
+		{conditions{Battery: true}, reasonBattery, false},
+		{conditions{Metered: true}, reasonMetered, true},
+		{conditions{Battery: true, Metered: true}, reasonBattery, true},
+	} {
+		if r, s := c.cond.blockedBy(j); r != c.reason || s != c.stop {
+			t.Errorf("%+v: got %q %v", c.cond, r, s)
+		}
 	}
 }

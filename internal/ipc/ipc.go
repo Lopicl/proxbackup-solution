@@ -68,11 +68,14 @@ type Status struct {
 	Online     bool   `json:"online"`
 	Configured bool   `json:"configured"` // a job configuration was received
 	// PausedUntil (unix seconds) while scheduled backups are paused.
-	PausedUntil int64       `json:"paused_until,omitempty"`
-	PausedBy    string      `json:"paused_by,omitempty"`
-	Running     *RunningRun `json:"running,omitempty"`
-	Jobs        []Job       `json:"jobs"`
-	Recent      []RunInfo   `json:"recent"` // newest first
+	PausedUntil int64  `json:"paused_until,omitempty"`
+	PausedBy    string `json:"paused_by,omitempty"`
+	// Waiting: a scheduled backup waits for the PC to leave battery power or
+	// a metered network (e.g. "on battery power"; "" = none waits).
+	Waiting string      `json:"waiting,omitempty"`
+	Running *RunningRun `json:"running,omitempty"`
+	Jobs    []Job       `json:"jobs"`
+	Recent  []RunInfo   `json:"recent"` // newest first
 }
 
 // Job is a backup job of this PC.

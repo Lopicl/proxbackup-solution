@@ -166,6 +166,9 @@ func (s *Store) migrate() error {
 		// Upload bandwidth limits (api.Bandwidth as JSON).
 		{"group_jobs", "bandwidth", "TEXT NOT NULL DEFAULT '{}'"},
 		{"clients", "bandwidth", "TEXT NOT NULL DEFAULT '{}'"},
+		// What scheduled runs do on battery power or a metered network (api.Policy*).
+		{"group_jobs", "on_battery", "TEXT NOT NULL DEFAULT ''"},
+		{"group_jobs", "on_metered", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -355,9 +358,14 @@ type Job struct {
 	WakeToRun bool `json:"wake_to_run"`
 	// Bandwidth limits the job's uploads.
 	Bandwidth api.Bandwidth `json:"bandwidth"`
+	// OnBattery and OnMetered: what scheduled runs do while the PC is on
+	// battery power or a metered network (api.Policy*).
+	OnBattery string `json:"on_battery"`
+	OnMetered string `json:"on_metered"`
 	// Reported by the agent (it owns the schedule).
-	NextRun        int64 `json:"next_run,omitempty"`
-	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
+	NextRun        int64  `json:"next_run,omitempty"`
+	CatchUpPending bool   `json:"catch_up_pending,omitempty"`
+	Waiting        string `json:"waiting,omitempty"` // why a due run waits (api.JobState.Waiting)
 }
 
 type Run struct {
@@ -810,7 +818,7 @@ const jobCols = `j.id, j.client_id, j.group_id, COALESCE(g.name, j.name), COALES
 	COALESCE(g.enabled, 1), j.created_at, COALESCE(g.window_minutes, j.window_minutes), COALESCE(g.catch_up, j.catch_up),
 	COALESCE(g.change_detection, j.change_detection), COALESCE(g.encrypt, j.encrypt), COALESCE(g.lock_days, j.lock_days),
 	COALESCE(g.spread_minutes, 0), COALESCE(g.daily_cap, 0), COALESCE(g.prevent_sleep, 1), COALESCE(g.wake_to_run, 1),
-	COALESCE(g.bandwidth, '{}')`
+	COALESCE(g.bandwidth, '{}'), COALESCE(g.on_battery, ''), COALESCE(g.on_metered, '')`
 const jobFrom = ` FROM jobs j LEFT JOIN group_jobs g ON g.id=j.group_id`
 
 func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
@@ -818,7 +826,7 @@ func scanJob(sc interface{ Scan(...any) error }) (*Job, error) {
 	var src, exc, extra, vol, ret, bw string
 	err := sc.Scan(&j.ID, &j.ClientID, &j.GroupID, &j.Name, &j.Kind, &j.BackupID, &src, &exc, &extra, &vol, &j.UseVSS, &j.Schedule, &ret,
 		&j.MemberEnabled, &j.GroupEnabled, &j.CreatedAt, &j.WindowMinutes, &j.CatchUp, &j.ChangeDetection, &j.Encrypt, &j.LockDays,
-		&j.SpreadMinutes, &j.DailyCap, &j.PreventSleep, &j.WakeToRun, &bw)
+		&j.SpreadMinutes, &j.DailyCap, &j.PreventSleep, &j.WakeToRun, &bw, &j.OnBattery, &j.OnMetered)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}

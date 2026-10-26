@@ -146,6 +146,23 @@ type JobConfig struct {
 	WakeToRun bool `json:"wake_to_run,omitempty"`
 	// Bandwidth limits this job's uploads (see JobSpec).
 	Bandwidth Bandwidth `json:"bandwidth,omitzero"`
+	// OnBattery and OnMetered: what scheduled runs do while the PC runs on
+	// battery power or is on a metered network (PolicyRun, PolicyDefer or
+	// PolicyStop). Manual runs ignore them.
+	OnBattery string `json:"on_battery,omitempty"`
+	OnMetered string `json:"on_metered,omitempty"`
+}
+
+// Battery and metered-network policies of a job.
+const (
+	PolicyRun   = ""      // run as usual
+	PolicyDefer = "defer" // don't start; start once the condition ends
+	PolicyStop  = "stop"  // also stop a run in progress and repeat it later
+)
+
+// ValidPolicy reports whether p is a battery or metered-network policy.
+func ValidPolicy(p string) bool {
+	return p == PolicyRun || p == PolicyDefer || p == PolicyStop
 }
 
 // AgentConfig is everything the agent needs to run scheduled backups on its
@@ -175,6 +192,9 @@ type JobState struct {
 	LastSlot       int64 `json:"last_slot,omitempty"`
 	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
 	Running        bool  `json:"running,omitempty"`
+	// Waiting: a due run waits for the PC to leave battery power or a
+	// metered network (the reason, e.g. "on battery power"; "" = not waiting).
+	Waiting string `json:"waiting,omitempty"`
 }
 
 // PollRequest is the agent heartbeat.

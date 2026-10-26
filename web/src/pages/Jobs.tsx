@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState, type ReactNode } from 'react'
-import { ALL_CLIENTS, api, type Bandwidth, type GroupJob, type GroupJobView, type GroupMember, type Job, type Keep } from '../api'
+import { ALL_CLIENTS, api, type Bandwidth, type Policy, type GroupJob, type GroupJobView, type GroupMember, type Job, type Keep } from '../api'
 import { RunsTable } from './RunsTable'
 import { usePerms } from '../perms'
 import { ago, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
@@ -225,7 +225,15 @@ export function JobDetail({ id }: { id: number }) {
                     <code>host/{m.backup_id}</code>
                   </td>
                   <td>
-                    {m.catch_up_pending ? <span className="badge info">catch-up pending</span> : m.next_run ? dateTime(m.next_run) : '—'}
+                    {m.waiting ? (
+                      <span className="badge info">waits: {m.waiting}</span>
+                    ) : m.catch_up_pending ? (
+                      <span className="badge info">catch-up pending</span>
+                    ) : m.next_run ? (
+                      dateTime(m.next_run)
+                    ) : (
+                      '—'
+                    )}
                     {m.schedule && m.start_delay > 0 && (
                       <span className="tag" title="Start offset within the job's spread">
                         {delayText(m.start_delay)}
@@ -393,6 +401,8 @@ export function newGroupJob(clients: number[]): Partial<GroupJob> {
     prevent_sleep: true,
     wake_to_run: true,
     bandwidth: {},
+    on_battery: '',
+    on_metered: 'defer',
     enabled: true,
     clients,
     tags: [],
@@ -456,6 +466,17 @@ function RateInput({ kbit, onChange }: { kbit?: number; onChange: (kbit: number)
 }
 
 // BandwidthFields edits an upload limit, with an optional time window.
+// PolicySelect picks what scheduled runs do on battery power or a metered network.
+function PolicySelect({ value, onChange }: { value: Policy; onChange: (p: Policy) => void }) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value as Policy)}>
+      <option value="">Run as usual</option>
+      <option value="defer">Wait until it no longer is</option>
+      <option value="stop">Wait, and stop a running backup</option>
+    </select>
+  )
+}
+
 export function BandwidthFields({ b, onChange }: { b: Bandwidth; onChange: (b: Bandwidth) => void }) {
   const set = (p: Partial<Bandwidth>) => onChange({ ...b, ...p })
   const days = b.window_days ?? []
@@ -781,6 +802,22 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
                   </Option>
                 )}
               </div>
+              {j.schedule && (
+                <div className="grid3">
+                  <Field label="On battery power" hint="Laptops unplugged. Runs started by hand always run.">
+                    <PolicySelect value={j.on_battery ?? ''} onChange={(on_battery) => set({ on_battery })} />
+                  </Field>
+                  <Field label="On a metered network" hint="Set as metered in Windows (e.g. a phone hotspot), or roaming.">
+                    <PolicySelect value={j.on_metered ?? ''} onChange={(on_metered) => set({ on_metered })} />
+                  </Field>
+                </div>
+              )}
+              {j.schedule && (j.on_battery || j.on_metered) && (
+                <p className="muted-text small">
+                  A run that waits starts as soon as the PC is plugged in or off the metered network: on time within the start window, after it as a
+                  catch-up, or it is recorded as missed if catch-up is off. A stopped run starts over.
+                </p>
+              )}
               <h3>Bandwidth</h3>
               <p className="muted-text">Caps how fast each member uploads to PBS. A limit set on the client applies too; the lower one wins.</p>
               <BandwidthFields b={j.bandwidth ?? {}} onChange={(bandwidth) => set({ bandwidth })} />
