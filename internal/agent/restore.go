@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -82,28 +80,50 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 		dec = pxar.NewSplitDecoder(src, countingReader{pstream, &j.bytesRead})
 	}
 
-	if err := os.MkdirAll(spec.TargetDir, 0o755); err != nil {
+	root, err := openRestoreRoot(spec.TargetDir)
+	if err != nil {
 		return res, err
 	}
+	defer root.Close()
 	j.logf("info", "restoring %s from %s to %s", archive, ref, spec.TargetDir)
 
 	if strings.HasSuffix(archive, ".img.fidx") {
-		out := filepath.Join(spec.TargetDir, strings.TrimSuffix(archive, ".fidx"))
-		f, err := os.Create(out)
+		name := strings.TrimSuffix(archive, ".fidx")
+		f, err := root.Create(name)
 		if err != nil {
 			return res, err
 		}
 		n, err := io.Copy(f, src)
-		if cerr := f.Close(); err == nil {
-			err = cerr
+		if err != nil {
+			f.Discard()
+		} else {
+			err = f.Commit()
 		}
 		res.BytesTotal = uint64(n)
-		j.logf("info", "wrote image %s (%d bytes)", out, n)
+		j.logf("info", "wrote image %s (%d bytes)", filepath.Join(spec.TargetDir, name), n)
 		return res, err
 	}
-	err = j.restorePxar(ctx, dec, spec)
+	err = j.restorePxar(ctx, root, dec, spec)
 	res.BytesTotal = j.bytesRead.Load()
 	return res, err
+}
+
+// errNotFollowed and errBadName make a restore skip an entry: restores don't
+// write through junctions or symbolic links below the target, which a user
+// could have put there or a crafted archive could have restored.
+var (
+	errNotFollowed = errors.New("junction or symbolic link, not followed")
+	errBadName     = errors.New("name not valid on Windows")
+)
+
+// skipEntry reports whether err only means the entry at path is skipped.
+func (j *job) skipEntry(path string, err error) bool {
+	if !errors.Is(err, errNotFollowed) && !errors.Is(err, errBadName) {
+		return false
+	}
+	j.skipped.Add(1)
+	j.logf("warn", "skipped %s: %v", path, err)
+	return true
 }
 
 // withinDir reports whether the cleaned path target is root or below it. A
@@ -119,11 +139,11 @@ func withinDir(root, target string) bool {
 }
 
 type dirMeta struct {
-	path string
-	md   pxar.Metadata
+	rel string
+	md  pxar.Metadata
 }
 
-func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.RestoreSpec) error {
+func (j *job) restorePxar(ctx context.Context, root *restoreRoot, dec *pxar.Decoder, spec *api.RestoreSpec) error {
 	selected := func(p string) bool {
 		if len(spec.Paths) == 0 {
 			return true
@@ -136,7 +156,6 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 		}
 		return false
 	}
-	enableRestorePrivilege()
 	var dirs []dirMeta
 	for {
 		if err := ctx.Err(); err != nil {
@@ -152,37 +171,49 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 		if !selected(e.Path) {
 			continue
 		}
-		target := filepath.Join(spec.TargetDir, filepath.FromSlash(e.Path))
-		if !withinDir(filepath.Clean(spec.TargetDir), target) {
+		rel := filepath.FromSlash(e.Path)
+		if !withinDir(filepath.Clean(spec.TargetDir), filepath.Join(spec.TargetDir, rel)) {
 			return fmt.Errorf("refusing to restore outside target: %q", e.Path)
 		}
 		switch e.Kind {
 		case pxar.KindDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := root.MkdirAll(rel); err != nil {
+				if j.skipEntry(e.Path, err) {
+					continue
+				}
 				return err
 			}
 			j.dirs.Add(1)
-			dirs = append(dirs, dirMeta{target, e.Meta})
+			dirs = append(dirs, dirMeta{rel, e.Meta})
 			// The archive root is the target folder itself: it keeps its own
 			// permissions and streams.
-			if e.Path != "" {
-				if err := writeStreams(target, ntFromPxar(e.Meta)); err != nil {
+			if nt := ntFromPxar(e.Meta); e.Path != "" && len(nt.streams) > 0 {
+				f, err := root.Open(rel)
+				if err == nil {
+					err = f.WriteStreams(nt)
+					f.Close()
+				}
+				if err != nil {
 					j.logf("warn", "metadata for %s: %v", e.Path, err)
 				}
 			}
 		case pxar.KindFile:
-			if err := j.restoreFile(dec, e, target, spec.Overwrite); err != nil {
+			if err := j.restoreFile(root, dec, e, rel, spec.Overwrite); err != nil {
 				return err
 			}
 		case pxar.KindSymlink:
-			os.MkdirAll(filepath.Dir(target), 0o755)
-			if err := os.Symlink(e.Target, target); err != nil {
+			if err := root.Symlink(rel, e.Target); err != nil {
 				j.skipped.Add(1)
 				j.logf("warn", "symlink %s: %v", e.Path, err)
 				continue
 			}
 			attrs, has, ctime := fromPxarMeta(e.Meta)
-			if err := applyMeta(target, time.Unix(e.Meta.MtimeSecs, int64(e.Meta.MtimeNanos)), attrs, has, ctime); err != nil {
+			f, err := root.Open(rel)
+			if err == nil {
+				err = f.SetMeta(time.Unix(e.Meta.MtimeSecs, int64(e.Meta.MtimeNanos)), attrs, has, ctime)
+				f.Close()
+			}
+			if err != nil {
 				j.logf("warn", "metadata for %s: %v", e.Path, err)
 			}
 		default:
@@ -191,78 +222,73 @@ func (j *job) restorePxar(ctx context.Context, dec *pxar.Decoder, spec *api.Rest
 	}
 	// Directory timestamps and permissions last, deepest first, so file
 	// creation doesn't bump them and the permissions can't get in the way.
-	root := filepath.Clean(spec.TargetDir)
 	for i := len(dirs) - 1; i >= 0; i-- {
 		d := dirs[i]
+		f, err := root.Open(d.rel)
+		if err != nil {
+			j.logf("warn", "metadata for %s: %v", filepath.ToSlash(d.rel), err)
+			continue
+		}
 		attrs, has, ctime := fromPxarMeta(d.md)
-		applyMeta(d.path, time.Unix(d.md.MtimeSecs, int64(d.md.MtimeNanos)), attrs, has, ctime)
-		if d.path != root {
-			if err := applySecurity(d.path, ntFromPxar(d.md)); err != nil {
-				j.logf("warn", "metadata for %s: %v", d.path, err)
+		f.SetMeta(time.Unix(d.md.MtimeSecs, int64(d.md.MtimeNanos)), attrs, has, ctime)
+		if d.rel != "" {
+			if err := f.SetSecurity(ntFromPxar(d.md)); err != nil {
+				j.logf("warn", "metadata for %s: %v", filepath.ToSlash(d.rel), err)
 			}
 		}
+		f.Close()
 	}
 	return nil
 }
 
-func (j *job) restoreFile(dec *pxar.Decoder, e *pxar.Entry, target, overwrite string) error {
+func (j *job) restoreFile(root *restoreRoot, dec *pxar.Decoder, e *pxar.Entry, rel, overwrite string) error {
 	attrs, has, ctime := fromPxarMeta(e.Meta)
-	_, err := j.writeRestored(e.Path, target, overwrite, dec.Contents(),
+	_, err := j.writeRestored(root, e.Path, rel, overwrite, dec.Contents(),
 		time.Unix(e.Meta.MtimeSecs, int64(e.Meta.MtimeNanos)), attrs, has, ctime, ntFromPxar(e.Meta))
 	return err
 }
 
-// writeRestored writes one restored file through a temporary name and applies
-// its metadata: streams first (writing them bumps the mtime), then
-// timestamps and attributes, then permissions. It reports whether the file was written; existing files are
+// writeRestored writes one restored file, rel below root (path in the
+// archive), and applies its metadata before it takes its name: streams first
+// (writing them bumps the mtime), then timestamps and attributes, then
+// permissions. It reports whether the file was written; existing files are
 // kept according to overwrite, and unwritable targets are skipped with a warning.
-func (j *job) writeRestored(rel, target, overwrite string, src io.Reader, mtime time.Time, attrs uint32, hasAttrs bool, ctime time.Time, nt ntExtras) (bool, error) {
-	if st, err := os.Lstat(target); err == nil {
+func (j *job) writeRestored(root *restoreRoot, path, rel, overwrite string, src io.Reader, mtime time.Time, attrs uint32, hasAttrs bool, ctime time.Time, nt ntExtras) (bool, error) {
+	if old, err := root.Lstat(rel); err == nil {
 		switch overwrite {
 		case "overwrite":
 		case "if-newer":
-			if !mtime.After(st.ModTime()) {
+			if !mtime.After(old) {
 				return false, nil
 			}
 		default: // "skip"
-			j.logf("info", "exists, skipped: %s", rel)
+			j.logf("info", "exists, skipped: %s", path)
 			return false, nil
 		}
-		// Clear read-only so we can replace it.
-		os.Chmod(target, 0o644)
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return false, err
-	}
-	tmp := target + ".proxbackup-restore"
-	f, err := os.Create(tmp)
+	f, err := root.Create(rel)
 	if err != nil {
 		j.skipped.Add(1)
-		j.logf("warn", "cannot create %s: %v", path.Clean(rel), err)
+		j.logf("warn", "cannot create %s: %v", path, err)
 		return false, nil
 	}
-	_, err = io.Copy(f, src)
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	if _, err := io.Copy(f, src); err != nil {
+		f.Discard()
+		return false, fmt.Errorf("%s: %w", path, err)
 	}
-	if err != nil {
-		os.Remove(tmp)
-		return false, fmt.Errorf("%s: %w", rel, err)
+	if err := f.WriteStreams(nt); err != nil {
+		j.logf("warn", "metadata for %s: %v", path, err)
 	}
-	if err := os.Rename(tmp, target); err != nil {
-		os.Remove(tmp)
+	if err := f.SetMeta(mtime, attrs, hasAttrs, ctime); err != nil {
+		j.logf("warn", "metadata for %s: %v", path, err)
+	}
+	if err := f.SetSecurity(nt); err != nil {
+		j.logf("warn", "metadata for %s: %v", path, err)
+	}
+	if err := f.Commit(); err != nil {
 		j.skipped.Add(1)
-		j.logf("warn", "cannot replace %s: %v", rel, err)
+		j.logf("warn", "cannot replace %s: %v", path, err)
 		return false, nil
-	}
-	if err := writeStreams(target, nt); err != nil {
-		j.logf("warn", "metadata for %s: %v", rel, err)
-	}
-	if err := applyMeta(target, mtime, attrs, hasAttrs, ctime); err != nil {
-		j.logf("warn", "metadata for %s: %v", rel, err)
-	}
-	if err := applySecurity(target, nt); err != nil {
-		j.logf("warn", "metadata for %s: %v", rel, err)
 	}
 	j.files.Add(1)
 	return true, nil

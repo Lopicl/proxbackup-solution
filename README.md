@@ -115,6 +115,9 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 - **On the PC:** tray icon → *Restore files…* opens the same browser without a console login.
   Administrators can restore anything; other users only their own profile folder, written with
   their own Windows permissions.
+- Restores never write through a junction or symbolic link in the target folder (that entry is
+  skipped with a warning), and refuse a target whose path contains one. A folder the agent creates
+  directly on a drive (like `C:\Restore`) is open only to SYSTEM and administrators.
 
 ### 7. Users
 

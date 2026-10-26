@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -71,20 +70,22 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 		}
 	}
 
-	if err := os.MkdirAll(spec.TargetDir, 0o755); err != nil {
+	rroot, err := openRestoreRoot(spec.TargetDir)
+	if err != nil {
 		return res, err
 	}
+	defer rroot.Close()
 	j.logf("info", "restoring %s from the NTFS volume in %s to %s", strings.Join(spec.Paths, ", "), spec.Archive, spec.TargetDir)
 	root := filepath.Clean(spec.TargetDir)
 	var dirs []*ntfs.File
-	var dirPaths []string
+	var dirRels []string
 	for _, s := range sels {
 		if covered(s.rel) {
 			continue
 		}
 		err := j.walkImage(ctx, vol, s.f, s.rel, true, func(f *ntfs.File, rel string) error {
-			target := filepath.Join(root, filepath.FromSlash(rel))
-			if !withinDir(root, target) {
+			target := filepath.FromSlash(rel)
+			if !withinDir(root, filepath.Join(root, target)) {
 				return fmt.Errorf("refusing to restore outside target: %q", rel)
 			}
 			if why := imageSkipReason(f); why != "" {
@@ -93,12 +94,15 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 				return nil
 			}
 			if f.IsDir {
-				if err := os.MkdirAll(target, 0o755); err != nil {
+				if err := rroot.MkdirAll(target); err != nil {
+					if j.skipEntry(rel, err) {
+						return nil
+					}
 					return err
 				}
 				j.dirs.Add(1)
 				if rel != "" {
-					dirs, dirPaths = append(dirs, f), append(dirPaths, target)
+					dirs, dirRels = append(dirs, f), append(dirRels, target)
 				}
 				return nil
 			}
@@ -109,7 +113,7 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 			size := uint64(data.Size())
 			before := j.bytesRead.Load()
 			src := countingReader{io.NewSectionReader(data, 0, data.Size()), &j.bytesRead}
-			if _, err := j.writeRestored(rel, target, spec.Overwrite, src, f.Mtime, f.Attrs, true, f.Ctime, ntExtras{}); err != nil {
+			if _, err := j.writeRestored(rroot, rel, target, spec.Overwrite, src, f.Mtime, f.Attrs, true, f.Ctime, ntExtras{}); err != nil {
 				return err
 			}
 			// Kept files count as done for progress.
@@ -128,7 +132,10 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 	// Directory timestamps last, deepest first, so file creation doesn't bump them.
 	for i := len(dirs) - 1; i >= 0; i-- {
 		d := dirs[i]
-		applyMeta(dirPaths[i], d.Mtime, d.Attrs, true, d.Ctime)
+		if f, err := rroot.Open(dirRels[i]); err == nil {
+			f.SetMeta(d.Mtime, d.Attrs, true, d.Ctime)
+			f.Close()
+		}
 	}
 	res.BytesTotal = j.bytesRead.Load()
 	j.logf("info", "restored %d files, %d folders from %s", j.files.Load(), j.dirs.Load(), spec.Archive)

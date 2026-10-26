@@ -7,7 +7,6 @@ package agent
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -167,79 +166,13 @@ func readStream(p, name string) ([]byte, error) {
 	return data, err
 }
 
-// writeStreams writes the alternate data streams of a restored file or folder.
-func writeStreams(p string, nt ntExtras) error {
-	var errs []error
-	for _, s := range nt.streams {
-		// OPEN_ALWAYS: CREATE_ALWAYS fails on hidden or system files.
-		h, err := windows.CreateFile(windows.StringToUTF16Ptr(longPath(p)+":"+s.name), windows.GENERIC_WRITE, 0, nil,
-			windows.OPEN_ALWAYS, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("stream %s: %w", s.name, err))
-			continue
-		}
-		f := os.NewFile(uintptr(h), s.name)
-		err = f.Truncate(0)
-		if err == nil {
-			_, err = f.Write(s.data)
-		}
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("stream %s: %w", s.name, err))
-		}
-	}
-	return errors.Join(errs...)
-}
-
-var procSetFileSecurityW = windows.NewLazySystemDLL("advapi32.dll").NewProc("SetFileSecurityW")
-
-func setFileSecurity(p string, info windows.SECURITY_INFORMATION, sd *windows.SECURITY_DESCRIPTOR) error {
-	r, _, err := procSetFileSecurityW.Call(uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(longPath(p)))), uintptr(info), uintptr(unsafe.Pointer(sd)))
-	if r == 0 {
-		return err
-	}
-	return nil
-}
-
-// applySecurity writes the backed-up security descriptor as is, with the
-// inherited ACEs it had, like robocopy /SEC. Setting another owner needs
-// SeRestorePrivilege (see enableRestorePrivilege); without it the group and
-// DACL are still applied.
-func applySecurity(p string, nt ntExtras) error {
-	if len(nt.sd) == 0 {
-		return nil
-	}
-	// Copy into an aligned buffer: the xattr value sits anywhere in the archive.
-	buf := make([]uint64, (len(nt.sd)+7)/8)
-	copy(unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), len(nt.sd)), nt.sd)
-	sd := (*windows.SECURITY_DESCRIPTOR)(unsafe.Pointer(&buf[0]))
-	if !sd.IsValid() {
-		return errors.New("invalid security descriptor")
-	}
-	// Without the request bit, the system drops SE_DACL_AUTO_INHERITED.
-	if ctl, _, err := sd.Control(); err == nil && ctl&windows.SE_DACL_AUTO_INHERITED != 0 {
-		sd.SetControl(windows.SE_DACL_AUTO_INHERIT_REQ, windows.SE_DACL_AUTO_INHERIT_REQ)
-	}
-	all := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.GROUP_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION)
-	err := setFileSecurity(p, all, sd)
-	if err == windows.ERROR_INVALID_OWNER || err == windows.ERROR_ACCESS_DENIED || err == windows.ERROR_PRIVILEGE_NOT_HELD {
-		if err2 := setFileSecurity(p, all&^windows.OWNER_SECURITY_INFORMATION, sd); err2 == nil {
-			return fmt.Errorf("owner not restored: %w", err)
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("permissions: %w", err)
-	}
-	return nil
-}
-
 var restorePrivilege sync.Once
 
 // enableRestorePrivilege enables SeRestorePrivilege for the process, so
-// restores can set any owner. The service account and elevated
-// administrators hold it; for others restores keep the owner they get.
+// restores can set any owner and write past permissions, and
+// SeCreateSymbolicLinkPrivilege, which elevated administrators hold disabled.
+// The service account and elevated administrators hold both; for others
+// restores keep the owner they get.
 func enableRestorePrivilege() {
 	restorePrivilege.Do(func() {
 		var tok windows.Token
@@ -247,41 +180,13 @@ func enableRestorePrivilege() {
 			return
 		}
 		defer tok.Close()
-		tp := windows.Tokenprivileges{PrivilegeCount: 1}
-		if windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr("SeRestorePrivilege"), &tp.Privileges[0].Luid) != nil {
-			return
+		for _, name := range []string{"SeRestorePrivilege", "SeCreateSymbolicLinkPrivilege"} {
+			tp := windows.Tokenprivileges{PrivilegeCount: 1}
+			if windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &tp.Privileges[0].Luid) != nil {
+				continue
+			}
+			tp.Privileges[0].Attributes = windows.SE_PRIVILEGE_ENABLED
+			windows.AdjustTokenPrivileges(tok, false, &tp, 0, nil, nil)
 		}
-		tp.Privileges[0].Attributes = windows.SE_PRIVILEGE_ENABLED
-		windows.AdjustTokenPrivileges(tok, false, &tp, 0, nil, nil)
 	})
-}
-
-// applyMeta restores timestamps and attributes after a file was written.
-func applyMeta(p string, mtime time.Time, attrs uint32, hasAttrs bool, ctime time.Time) error {
-	h, err := windows.CreateFile(windows.StringToUTF16Ptr(p), windows.FILE_WRITE_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-	if err == nil {
-		mt := windows.NsecToFiletime(mtime.UnixNano())
-		var ct *windows.Filetime
-		if !ctime.IsZero() {
-			c := windows.NsecToFiletime(ctime.UnixNano())
-			ct = &c
-		}
-		err = windows.SetFileTime(h, ct, nil, &mt)
-		windows.CloseHandle(h)
-	}
-	if err != nil {
-		err = os.Chtimes(p, mtime, mtime)
-	}
-	if hasAttrs || attrs != 0 {
-		keep := attrs & (attrReadonly | attrHidden | attrSystem | attrArchive | windows.FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
-		if keep == 0 {
-			keep = windows.FILE_ATTRIBUTE_NORMAL
-		}
-		if aerr := windows.SetFileAttributes(windows.StringToUTF16Ptr(p), keep); aerr != nil && err == nil {
-			err = aerr
-		}
-	}
-	return err
 }

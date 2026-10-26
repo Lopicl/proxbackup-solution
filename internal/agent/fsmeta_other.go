@@ -35,11 +35,6 @@ func readExtras(p string, m *winMeta, withChtime bool) []string {
 	return nil
 }
 
-// Development builds don't restore NTFS security descriptors or streams.
-func writeStreams(string, ntExtras) error  { return nil }
-func applySecurity(string, ntExtras) error { return nil }
-func enableRestorePrivilege()              {}
-
 func applyMeta(p string, mtime time.Time, attrs uint32, _ bool, _ time.Time) error {
 	if fi, err := os.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		// Set the link's own times; Chtimes would follow it to the target.
