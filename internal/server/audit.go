@@ -67,6 +67,8 @@ var auditActions = map[string]string{
 	"DELETE /api/clients/{id}":                   "revoke client",
 	"POST /api/clients/{id}/unrevoke":            "restore revoked client",
 	"POST /api/clients/{id}/agent-update":        "push agent update",
+	"POST /api/clients/{id}/rotate-credentials":  "rotate client credentials",
+	"POST /api/clients/rotate-credentials":       "rotate credentials of clients",
 	"POST /api/clients/{id}/restore":             "start restore",
 	"GET /api/clients/{id}/encryption-key":       "download client encryption key",
 	"PUT /api/clients/{id}/tags":                 "change client tags",

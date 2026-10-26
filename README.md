@@ -83,6 +83,12 @@ namespace only**. Running the command again re-enrolls the PC.
 the PC, installs the agent to `C:\Program Files\ProxBackup` and starts the service
 (equivalent: `proxbackup-agent.exe setup <token>`). Revoke the setup when done.
 
+**Credentials:** agents up to 0.2.14 left `%ProgramData%\proxbackup` (PBS token, certificate key,
+encryption key) readable by every user of the PC. The console flags those clients as
+*credentials exposed* and gives each a new PBS token secret and client certificate the first time
+its updated agent connects. *Rotate* on the client page does the same for any client. The
+encryption key stays: earlier backups need it.
+
 ### 5. Create jobs
 
 On the client page create a *Files* job (default `C:\Users`, daily, with retention) or a

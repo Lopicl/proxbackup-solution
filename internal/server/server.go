@@ -52,6 +52,9 @@ type Server struct {
 
 	enrollMu sync.Mutex // serializes client creation (see enrollClient)
 
+	rotateMu     sync.Mutex // serializes PBS token rotations (rotate.go)
+	rotateFailed map[int64]time.Time
+
 	wakeMu sync.Mutex
 	wake   map[int64]chan struct{} // per-client long-poll wakeups
 
@@ -77,7 +80,8 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{}}
+	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{},
+		rotateFailed: map[int64]time.Time{}}
 	s.notify = &Notifier{s: s}
 	s.updater = newUpdater(s)
 	return s, nil
@@ -194,6 +198,8 @@ func (s *Server) uiRoutes() http.Handler {
 	api.HandleFunc("DELETE /api/clients/{id}", s.need(manage, s.handleRevokeClient))
 	api.HandleFunc("GET /api/clients/revoked", s.need(view, s.handleRevokedClients))
 	api.HandleFunc("POST /api/clients/{id}/unrevoke", s.need(manage, s.handleUnrevokeClient))
+	api.HandleFunc("POST /api/clients/{id}/rotate-credentials", s.need(manage, s.handleRotateCredentials))
+	api.HandleFunc("POST /api/clients/rotate-credentials", s.need(manage, s.handleRotateCredentialsBulk))
 	api.HandleFunc("POST /api/clients/{id}/agent-update", s.need(manage, s.handlePushAgentUpdate))
 	api.HandleFunc("GET /api/clients/{id}/snapshots", s.need(restore, s.handleSnapshots))
 	api.HandleFunc("GET /api/clients/{id}/catalog", s.need(restore, s.handleCatalog))

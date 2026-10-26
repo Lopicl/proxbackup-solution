@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,13 +36,15 @@ func (s *Server) agentRoutes() http.Handler {
 	mux.Handle("POST /agent/v1/runs/{id}/events", s.requireAgent(s.handleEvents))
 	mux.Handle("GET /agent/v1/update/{platform}", s.requireAgent(s.handleAgentBinary))
 	mux.Handle("POST /agent/v1/restore-sessions", s.requireAgent(s.handleCreateRestoreSession))
+	mux.Handle("POST /agent/v1/cert", s.requireAgent(s.handleRenewCert))
 	return mux
 }
 
 type agentHandler func(w http.ResponseWriter, r *http.Request, c *Client)
 
 // requireAgent authenticates the client certificate (verified by TLS against our CA)
-// and resolves it to a non-revoked client.
+// and resolves it to a non-revoked client. The first request with a renewed
+// certificate revokes the previous one.
 func (s *Server) requireAgent(h agentHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
@@ -53,6 +56,14 @@ func (s *Server) requireAgent(h agentHandler) http.Handler {
 		if err != nil {
 			httpError(w, http.StatusForbidden, errors.New("unknown or revoked client"))
 			return
+		}
+		if serial == c.pendingSerial {
+			if err := s.store.PromoteSerial(r.Context(), c.ID, serial); err != nil {
+				httpError(w, http.StatusInternalServerError, err)
+				return
+			}
+			s.log.Info("client certificate renewed; the old one is no longer accepted", "client", c.Name, "id", c.ID, "old_serial", c.CertSerial)
+			c.CertSerial, c.pendingSerial, c.CertRenew = serial, "", false
 		}
 		h(w, r, c)
 	})
@@ -188,9 +199,17 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		if fresh, err := s.store.Client(ctx, c.ID); err == nil {
 			c = fresh // e.g. moved to another namespace while this poll waited
 		}
+		if s.tokenRotationDue(c) {
+			if err := s.rotateClientToken(ctx, c); err != nil {
+				s.log.Warn("could not rotate the client's PBS token; retrying later", "client", c.Name, "err", err)
+			} else if fresh, err := s.store.Client(ctx, c.ID); err == nil {
+				c = fresh
+			}
+		}
 		offer := s.updater.agentOffer(ctx, c.ID, req.OS, req.AgentVersion)
 		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID), Update: offer,
-			ServerURL: strings.TrimRight(s.cfg.PublicURL, "/")}
+			ServerURL: strings.TrimRight(s.cfg.PublicURL, "/"),
+			RenewCert: c.CertRenew && slices.Contains(c.Features, api.FeatureCertRenewal)}
 		cfg, err := s.agentConfig(ctx, c)
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err)

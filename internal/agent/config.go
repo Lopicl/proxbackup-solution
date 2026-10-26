@@ -16,10 +16,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"proxbackup/internal/api"
 )
@@ -82,8 +84,18 @@ func writeSecret(p string, data []byte) error {
 	return os.Rename(tmp, p)
 }
 
+// httpClient returns the mTLS client for the management server.
+func (c *Config) httpClient() (*http.Client, error) {
+	tc, err := c.TLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	return &http.Client{Timeout: 90 * time.Second, Transport: &http.Transport{TLSClientConfig: tc, IdleConnTimeout: 2 * time.Minute}}, nil
+}
+
 // TLSConfig returns the mTLS client configuration for the management server.
 func (c *Config) TLSConfig() (*tls.Config, error) {
+	finishCertRenewal(c)
 	cert, err := tls.LoadX509KeyPair(c.path("client.pem"), c.path("client.key"))
 	if err != nil {
 		return nil, fmt.Errorf("load client certificate: %w", err)

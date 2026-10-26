@@ -169,6 +169,17 @@ func (s *Store) migrate() error {
 		// What scheduled runs do on battery power or a metered network (api.Policy*).
 		{"group_jobs", "on_battery", "TEXT NOT NULL DEFAULT ''"},
 		{"group_jobs", "on_metered", "TEXT NOT NULL DEFAULT ''"},
+		// Credential rotation: the PBS token and client certificate may have been
+		// read by local users (Windows agents up to 0.2.14), a new PBS token
+		// secret or certificate is pending for the next poll, the serial of a
+		// new certificate the agent hasn't used yet, and the agent's features.
+		{"clients", "creds_exposed", "INTEGER NOT NULL DEFAULT 0"},
+		{"clients", "rotate_token", "INTEGER NOT NULL DEFAULT 0"},
+		{"clients", "token_rotated_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"clients", "cert_renew", "INTEGER NOT NULL DEFAULT 0"},
+		{"clients", "cert_renewed_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"clients", "pending_serial", "TEXT NOT NULL DEFAULT ''"},
+		{"clients", "agent_features", "TEXT NOT NULL DEFAULT '[]'"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -183,6 +194,13 @@ func (s *Store) migrate() error {
 		if n == 0 {
 			if _, err := s.db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, c.table, c.name, c.def)); err != nil {
 				return err
+			}
+			if c.name == "creds_exposed" {
+				// Every Windows agent so far left its data directory readable by
+				// all local users. Their credentials rotate once the agent is updated.
+				if _, err := s.db.Exec(`UPDATE clients SET creds_exposed=1 WHERE os LIKE 'windows%'`); err != nil {
+					return err
+				}
 			}
 			if c.name == "must_change_pw" {
 				// Existing installs: the initial "admin" may still have its generated password.
@@ -307,8 +325,21 @@ type Client struct {
 	// The client's encryption key ("" = none yet; created with the first encrypted job).
 	EncryptionFingerprint string `json:"encryption_fingerprint"`
 	EncryptionCreated     int64  `json:"encryption_created"`
+	// CredsExposed: the agent ran with a data directory readable by every local
+	// user (Windows agents up to 0.2.14), so its PBS token and certificate key
+	// may have been copied. They are rotated when the agent reports the fix.
+	CredsExposed bool `json:"creds_exposed"`
+	// RotateToken: a new PBS token secret is issued at the agent's next poll.
+	RotateToken    bool  `json:"rotate_token"`
+	TokenRotatedAt int64 `json:"token_rotated_at"`
+	// CertRenew: the agent is asked for a new client certificate (agents
+	// without api.FeatureCertRenewal keep it pending until they are updated).
+	CertRenew     bool     `json:"cert_renew"`
+	CertRenewedAt int64    `json:"cert_renewed_at"`
+	Features      []string `json:"agent_features"`
 
 	tokenSecretEnc []byte
+	pendingSerial  string
 	cryptKeyEnc    []byte
 	revokedSerial  string
 	revokedJobs    []int64
@@ -462,15 +493,17 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
 	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags, paused_until, paused_by,
-	tray_error, revoked_at, revoked_serial, revoked_jobs, bandwidth`
+	tray_error, revoked_at, revoked_serial, revoked_jobs, bandwidth, creds_exposed, rotate_token, token_rotated_at, cert_renew, cert_renewed_at,
+	pending_serial, agent_features`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
-	var sched, oldNS, tags, revJobs, bw string
+	var sched, oldNS, tags, revJobs, bw, features string
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
 		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags, &c.PausedUntil, &c.PausedBy,
-		&c.TrayError, &c.RevokedAt, &c.revokedSerial, &revJobs, &bw)
+		&c.TrayError, &c.RevokedAt, &c.revokedSerial, &revJobs, &bw, &c.CredsExposed, &c.RotateToken, &c.TokenRotatedAt, &c.CertRenew,
+		&c.CertRenewedAt, &c.pendingSerial, &features)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -483,6 +516,8 @@ func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c.Tags = nonNil(c.Tags)
 	json.Unmarshal([]byte(revJobs), &c.revokedJobs)
 	json.Unmarshal([]byte(bw), &c.Bandwidth)
+	json.Unmarshal([]byte(features), &c.Features)
+	c.Features = nonNil(c.Features)
 	c.Restorable = c.Revoked && c.revokedSerial != ""
 	c.Online = !c.Revoked && time.Since(time.Unix(c.LastSeen, 0)) < 2*time.Minute
 	return c, err
@@ -509,8 +544,11 @@ func (s *Store) Client(ctx context.Context, id int64) (*Client, error) {
 	return scanClient(s.db.QueryRowContext(ctx, `SELECT `+clientCols+` FROM clients WHERE id=?`, id))
 }
 
+// ClientBySerial finds the active client with the certificate serial, its
+// current one or a renewed one it hasn't used yet (see PromoteSerial).
 func (s *Store) ClientBySerial(ctx context.Context, serial string) (*Client, error) {
-	return scanClient(s.db.QueryRowContext(ctx, `SELECT `+clientCols+` FROM clients WHERE cert_serial=? AND revoked=0`, serial))
+	return scanClient(s.db.QueryRowContext(ctx, `SELECT `+clientCols+` FROM clients WHERE (cert_serial=? OR pending_serial=? AND pending_serial<>'') AND revoked=0`,
+		serial, serial))
 }
 
 func (s *Store) ClientNameTaken(ctx context.Context, name string) bool {
@@ -550,9 +588,50 @@ func (s *Store) MoveClientNamespace(ctx context.Context, c *Client, ns string) e
 
 func (s *Store) TouchClient(ctx context.Context, id int64, req api.PollRequest) {
 	sched, _ := json.Marshal(nonNilStates(req.Schedule))
+	features, _ := json.Marshal(nonNil(req.Features))
+	// A Windows agent without the data directory fix exposes its credentials
+	// (again, if they were rotated before it was updated).
+	exposed := strings.HasPrefix(req.OS, "windows") && !slices.Contains(req.Features, api.FeatureDataDirACL)
 	s.db.ExecContext(ctx, `UPDATE clients SET last_seen=?, hostname=?, os=?, agent_version=?, config_rev=?, schedule_state=?, time_zone=?,
-		paused_until=?, paused_by=?, tray_error=? WHERE id=?`, now(), req.Hostname, req.OS, req.AgentVersion, req.ConfigRev, sched, req.TimeZone,
-		req.PausedUntil, req.PausedBy, req.TrayError, id)
+		paused_until=?, paused_by=?, tray_error=?, agent_features=?, creds_exposed=MAX(creds_exposed, ?) WHERE id=?`, now(), req.Hostname, req.OS,
+		req.AgentVersion, req.ConfigRev, sched, req.TimeZone, req.PausedUntil, req.PausedBy, req.TrayError, string(features), exposed, id)
+}
+
+// RequestRotation makes the client's next poll issue a new PBS token secret
+// and ask its agent for a new certificate.
+func (s *Store) RequestRotation(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE clients SET rotate_token=1, cert_renew=1 WHERE id=? AND revoked=0`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errNotFound
+	}
+	return nil
+}
+
+// SetRotatedToken stores a new PBS token for the client and asks its agent for
+// a new certificate too. secure: the agent keeps its credentials from local
+// users, so they no longer count as exposed.
+func (s *Store) SetRotatedToken(ctx context.Context, id int64, tokenID string, tokenSecretEnc []byte, secure bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE clients SET token_id=?, token_secret_enc=?, rotate_token=0, token_rotated_at=?, cert_renew=1,
+		creds_exposed=CASE WHEN ? THEN 0 ELSE creds_exposed END WHERE id=? AND revoked=0`, tokenID, tokenSecretEnc, now(), secure, id)
+	return err
+}
+
+// SetPendingSerial records a renewed certificate: both serials are accepted
+// until the agent uses the new one.
+func (s *Store) SetPendingSerial(ctx context.Context, id int64, serial string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE clients SET pending_serial=? WHERE id=? AND revoked=0`, serial, id)
+	return err
+}
+
+// PromoteSerial makes the renewed certificate the client's only one, once the
+// agent connected with it. The old certificate is no longer accepted.
+func (s *Store) PromoteSerial(ctx context.Context, id int64, serial string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE clients SET cert_serial=pending_serial, pending_serial='', cert_renew=0, cert_renewed_at=?
+		WHERE id=? AND pending_serial=? AND pending_serial<>''`, now(), id, serial)
+	return err
 }
 
 // SetClientKey stores a new encryption key for a client that has none. It
@@ -592,7 +671,7 @@ func (s *Store) RevokeClient(ctx context.Context, id int64) error {
 	}
 	b, _ := json.Marshal(enabled)
 	res, err := tx.ExecContext(ctx, `UPDATE clients SET revoked=1, revoked_at=?, revoked_serial=COALESCE(cert_serial,''), revoked_jobs=?,
-		cert_serial=NULL, token_secret_enc=NULL, name=name||'#revoked-'||id WHERE id=? AND revoked=0`, now(), string(b), id)
+		cert_serial=NULL, pending_serial='', token_secret_enc=NULL, name=name||'#revoked-'||id WHERE id=? AND revoked=0`, now(), string(b), id)
 	if err != nil {
 		return err
 	}

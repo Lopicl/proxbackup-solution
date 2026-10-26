@@ -118,7 +118,7 @@ func (r *Runner) download(ctx context.Context, u *api.AgentUpdate, dst string) e
 		return err
 	}
 	// The poll client's timeout is too short for a download.
-	hc := &http.Client{Transport: r.hc.Transport}
+	hc := &http.Client{Transport: r.client().Transport}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return err

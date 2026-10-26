@@ -26,6 +26,7 @@ export function Clients() {
     setups.reload()
     revoked.reload()
   }
+  const exposed = (data ?? []).filter((c) => c.creds_exposed).length
   const activeSetups = (setups.data ?? []).filter((t) => t.expires > Date.now() / 1000)
   return (
     <>
@@ -36,6 +37,24 @@ export function Clients() {
         actions={
           canEnroll && (
             <>
+              {exposed > 0 && (
+                <button
+                  title="Agents that run the fixed version get new credentials anyway. This also rotates them for clients whose agent is still old: do it again after their update."
+                  onClick={async () => {
+                    if (!confirm(`Rotate the PBS token and certificate of the ${exposed} clients with exposed credentials? Each agent gets them the next time it connects.`))
+                      return
+                    try {
+                      setActionError('')
+                      await api.rotateCredentialsBulk({ exposed: true })
+                      reload()
+                    } catch (err) {
+                      setActionError((err as Error).message)
+                    }
+                  }}
+                >
+                  Rotate exposed credentials ({exposed})
+                </button>
+              )}
               <button onClick={() => setCreatingSetup(true)} title="One setup for many PCs: each asks for its client name">
                 Create agent setup
               </button>
@@ -113,7 +132,15 @@ export function Clients() {
                         <span key={t} className="tag">
                           #{t}
                         </span>
-                      ))}
+                      ))}{' '}
+                      {c.creds_exposed && (
+                        <span
+                          className="badge warn"
+                          title="The agent left its PBS token and certificate key readable by every user of the PC (agents up to 0.2.14). They are replaced once the agent is updated."
+                        >
+                          credentials exposed
+                        </span>
+                      )}
                     </td>
                     <td>{c.hostname}</td>
                     <td className="muted-text">

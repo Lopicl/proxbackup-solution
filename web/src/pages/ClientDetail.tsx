@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useMemo, useState } from 'react'
-import { ALL_CLIENTS, api, clientName, type Bandwidth, type GroupJob, type GroupMember, type Snapshot } from '../api'
+import { ALL_CLIENTS, api, clientName, type Bandwidth, type Client, type GroupJob, type GroupMember, type Snapshot } from '../api'
 import { adminBackend, RestoreBrowser } from './RestoreBrowser'
 import { RunsTable } from './RunsTable'
 import { BandwidthFields, bandwidthText, GroupJobEditor, JobTags, keepText, MemberEditor, newGroupJob, ScheduleText } from './Jobs'
@@ -137,6 +137,34 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         <span>
           Token <code>{c.token_id}</code>
         </span>
+        {!c.revoked && (
+          <span>
+            Credentials <CredentialState c={c} />{' '}
+            {canManage && (
+              <button
+                className="small ghost"
+                title="Issue a new PBS token secret and client certificate. The old ones stop working once the agent has the new ones."
+                onClick={async () => {
+                  if (
+                    !confirm(
+                      `Rotate the credentials of ${c.name}? Its agent gets a new PBS token secret and a new client certificate the next time it connects${c.online ? ' (now)' : ''}. The encryption key stays: existing backups need it.`,
+                    )
+                  )
+                    return
+                  try {
+                    setMsg('')
+                    await api.rotateCredentials(id)
+                    reload()
+                  } catch (e) {
+                    setMsg((e as Error).message)
+                  }
+                }}
+              >
+                Rotate
+              </button>
+            )}
+          </span>
+        )}
         <span>
           Last seen <b>{ago(c.last_seen)}</b>
         </span>
@@ -606,4 +634,34 @@ function RestoreDialog({
       </p>
     </Modal>
   )
+}
+
+// CredentialState shows whether the client's PBS token and certificate may be
+// known to someone else and how far a rotation got.
+export function CredentialState({ c }: { c: Client }) {
+  const fixed = c.agent_features.includes('data-dir-acl')
+  const renews = c.agent_features.includes('cert-renewal')
+  if (c.creds_exposed)
+    return (
+      <b
+        className="warn-text"
+        title="Agents up to 0.2.14 left their data directory readable by every user of the PC, so the PBS token and client certificate key may have been copied. Both are replaced automatically once the agent runs a fixed version. The encryption key can't be replaced: existing backups need it."
+      >
+        possibly exposed — {fixed ? 'rotating' : 'update the agent to rotate them'}
+      </b>
+    )
+  if (c.rotate_token)
+    return (
+      <b className="warn-text" title="The old PBS token secret works until the agent gets the new one">
+        new PBS token pending{c.online ? '' : ' — applied when the PC connects'}
+      </b>
+    )
+  if (c.cert_renew)
+    return (
+      <b className="warn-text" title="The old certificate is accepted until the agent connects with its new one">
+        new certificate pending{renews ? '' : ' — needs an agent update'}
+      </b>
+    )
+  const last = Math.max(c.token_rotated_at, c.cert_renewed_at)
+  return <b>{last ? `rotated ${ago(last)}` : 'from enrollment'}</b>
 }

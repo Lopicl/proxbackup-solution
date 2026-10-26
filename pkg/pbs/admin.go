@@ -4,6 +4,7 @@ package pbs
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -181,6 +182,22 @@ func (c *Client) CreateToken(ctx context.Context, userid, name, comment string) 
 	path := "access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(name)
 	err := c.Call(ctx, http.MethodPost, path, map[string]any{"comment": comment}, &out)
 	return out.TokenID, out.Value, err
+}
+
+// RegenerateToken replaces the secret of an API token, keeping its ACLs, and
+// returns the new secret. The old secret stops working at once.
+func (c *Client) RegenerateToken(ctx context.Context, userid, name string) (string, error) {
+	var out struct {
+		Secret string `json:"secret"`
+	}
+	path := "access/users/" + url.PathEscape(userid) + "/token/" + url.PathEscape(name)
+	if err := c.Call(ctx, http.MethodPut, path, map[string]any{"regenerate": true}, &out); err != nil {
+		return "", err
+	}
+	if out.Secret == "" {
+		return "", errors.New("PBS returned no token secret")
+	}
+	return out.Secret, nil
 }
 
 // DeleteToken removes an API token.

@@ -290,7 +290,7 @@ func (r *Runner) restoreLink(ctx context.Context, peer *ipc.Peer) (string, error
 	var resp api.RestoreSessionResponse
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if err := postJSON(ctx, r.hc, r.serverURL()+"/agent/v1/restore-sessions", req, &resp); err != nil {
+	if err := postJSON(ctx, r.client(), r.serverURL()+"/agent/v1/restore-sessions", req, &resp); err != nil {
 		kept.Close()
 		return "", fmt.Errorf("the ProxBackup Console is unreachable: %w", err)
 	}

@@ -26,7 +26,8 @@ import (
 // ("Run now", restores). Jobs run one at a time.
 type Runner struct {
 	cfg     *Config
-	hc      *http.Client
+	hcMu    sync.Mutex
+	hc      *http.Client // replaced when the client certificate is renewed (certrenew.go)
 	version string
 	log     *slog.Logger
 	sched   *Scheduler
@@ -55,6 +56,8 @@ type Runner struct {
 
 	urlMu     sync.Mutex // guards cfg.ServerURL/FallbackURL
 	moveTried map[string]time.Time
+
+	renewFailedAt time.Time // last failed certificate renewal (poll only)
 }
 
 // task is one unit of work for the worker.
@@ -78,13 +81,13 @@ type activeRun struct {
 
 // NewRunner creates a runner from an enrolled configuration.
 func NewRunner(cfg *Config, version string, log *slog.Logger) (*Runner, error) {
-	tc, err := cfg.TLSConfig()
+	hc, err := cfg.httpClient()
 	if err != nil {
 		return nil, err
 	}
 	r := &Runner{
 		cfg:      cfg,
-		hc:       &http.Client{Timeout: 90 * time.Second, Transport: &http.Transport{TLSClientConfig: tc, IdleConnTimeout: 2 * time.Minute}},
+		hc:       hc,
 		version:  version,
 		log:      log,
 		spool:    &spool{dir: filepath.Join(cfg.dir, "spool")},
@@ -356,8 +359,10 @@ func (r *Runner) poll(ctx context.Context, base string, wait int) (*api.PollResp
 	}
 	req.PausedUntil, req.PausedBy = r.pauseInfo()
 	req.TrayError = r.trayError()
+	// The service only runs once the data dir is secured (see SecureDataDir).
+	req.Features = []string{api.FeatureDataDirACL, api.FeatureCertRenewal}
 	var resp api.PollResponse
-	if err := postJSON(ctx, r.hc, fmt.Sprintf("%s/agent/v1/poll?wait=%d", base, wait), req, &resp); err != nil {
+	if err := postJSON(ctx, r.client(), fmt.Sprintf("%s/agent/v1/poll?wait=%d", base, wait), req, &resp); err != nil {
 		return nil, err
 	}
 	r.setOnline(true)
@@ -386,6 +391,9 @@ func (r *Runner) poll(ctx context.Context, base string, wait int) (*api.PollResp
 		}
 		r.mu.Unlock()
 		r.queue <- task{spec: j, trigger: api.TriggerManual}
+	}
+	if resp.RenewCert {
+		r.renewCert(ctx, base)
 	}
 	if resp.Update != nil {
 		r.maybeUpdate(ctx, resp.Update)
@@ -581,12 +589,12 @@ func (r *Runner) execute(parent context.Context, t task) {
 
 func (r *Runner) register(ctx context.Context, reg *api.RunRegister) (int64, error) {
 	var resp api.RunRegisterResponse
-	if err := postJSON(ctx, r.hc, r.serverURL()+"/agent/v1/runs", reg, &resp); err != nil {
+	if err := postJSON(ctx, r.client(), r.serverURL()+"/agent/v1/runs", reg, &resp); err != nil {
 		return 0, err
 	}
 	return resp.RunID, nil
 }
 
 func (r *Runner) postEvents(ctx context.Context, runID int64, events []api.Event) error {
-	return postJSON(ctx, r.hc, fmt.Sprintf("%s/agent/v1/runs/%d/events", r.serverURL(), runID), events, nil)
+	return postJSON(ctx, r.client(), fmt.Sprintf("%s/agent/v1/runs/%d/events", r.serverURL(), runID), events, nil)
 }

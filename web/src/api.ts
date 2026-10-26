@@ -100,6 +100,14 @@ export interface Client {
   revoked: boolean
   revoked_at: number
   restorable: boolean // revoked and can be un-revoked (its agent reconnects)
+  // The agent ran with a data directory every local user could read (Windows agents
+  // up to 0.2.14): its PBS token and certificate are rotated once it is updated.
+  creds_exposed: boolean
+  rotate_token: boolean // a new PBS token secret is issued at the next poll
+  token_rotated_at: number
+  cert_renew: boolean // a new client certificate is pending (old agents: until updated)
+  cert_renewed_at: number
+  agent_features: string[]
 }
 
 // A revoked client is renamed "<name>#revoked-<id>"; this is its name before.
@@ -503,6 +511,10 @@ export const api = {
   revokeClient: (id: number) => request('DELETE', `/clients/${id}`),
   revokedClients: () => request<Client[]>('GET', '/clients/revoked'),
   unrevokeClient: (id: number) => request('POST', `/clients/${id}/unrevoke`),
+  rotateCredentials: (id: number) => request('POST', `/clients/${id}/rotate-credentials`),
+  // Every client with exposed credentials (exposed: true) or the listed ones.
+  rotateCredentialsBulk: (sel: { exposed?: boolean; client_ids?: number[] }) =>
+    request<{ requested: number }>('POST', '/clients/rotate-credentials', sel),
   pushAgentUpdate: (id: number) => request<{ version: string }>('POST', `/clients/${id}/agent-update`),
   snapshots: (id: number) => request<Snapshot[]>('GET', `/clients/${id}/snapshots`),
   // Lists a directory of a snapshot's catalog: "/" lists the archives, "/<archive>/<dir>" their contents.

@@ -516,7 +516,7 @@ erDiagram
   ADMIN ||--o{ SESSION : has
 
   TARGET { int id string name string host string fingerprint string datastore string root_ns string admin_auth_id blob admin_secret_enc string pbs_user }
-  CLIENT { int id string name string hostname string os string agent_version string cert_serial int target_id string namespace string token_id blob token_secret_enc datetime last_seen bool revoked string config_rev string schedule_state string time_zone blob crypt_key_enc string crypt_fingerprint datetime crypt_created string tags }
+  CLIENT { int id string name string hostname string os string agent_version string cert_serial int target_id string namespace string token_id blob token_secret_enc datetime last_seen bool revoked string config_rev string schedule_state string time_zone blob crypt_key_enc string crypt_fingerprint datetime crypt_created string tags bool creds_exposed bool rotate_token bool cert_renew string pending_serial string agent_features }
   GROUP_JOB { int id string name string kind string backup_id string sources string excludes string volumes bool use_vss string schedule int window_minutes bool catch_up string retention bool enabled string change_detection bool encrypt int lock_days int spread_minutes string member_tags int daily_cap }
   GROUP_JOB_CLIENT { int group_id int client_id }
   JOB { int id int client_id int group_id string backup_id bool enabled string extra_excludes }
@@ -592,9 +592,30 @@ sequenceDiagram
   agent refuses a data directory that is a junction or symlink, and deletes reparse points and
   hard-linked files inside it without following them. The walk uses `SetKernelObjectSecurity`
   on handles opened with `FILE_FLAG_OPEN_REPARSE_POINT`, because `SetSecurityInfo` on a
-  directory propagates inheritance through links. Agents up to 0.2.14 left the directory
-  readable by all users; consider their PBS tokens and client keys exposed to local users.
-  On Linux the directory is 0700.
+  directory propagates inheritance through links. On Linux the directory is 0700.
+* **Credential rotation.** Agents up to 0.2.14 left the data directory readable by all users,
+  so the console marks every Windows client whose agent polls without the `data-dir-acl`
+  feature (and, on upgrade, every existing Windows client) as *credentials exposed*. The first
+  poll of an agent that reports the feature rotates both credentials:
+  1. *PBS token:* the console regenerates the token's secret (`PUT access/users/{user}/token/{name}`
+     with `regenerate`; a PBS without it gets the token deleted and recreated under the same id,
+     so it still owns the client's backup groups, with its ACLs granted again) and returns it
+     with that poll's config. The old secret stops working at once.
+  2. *Client certificate:* the poll reply sets `renew_cert`. The agent creates a new key, posts
+     a CSR to `POST /agent/v1/cert` and swaps `client.key`/`client.pem` (via `client.renew.*`,
+     so an interrupted swap is completed or discarded at the next start). The console accepts
+     the old and the new serial until the agent connects with the new certificate, then drops
+     the old serial. A CSR for the current key is refused.
+
+  Admins can request the same rotation for any client (client page → *Credentials → Rotate*,
+  or *Rotate exposed credentials* under Clients for all flagged ones); it is applied at the
+  agent's next poll, so an offline PC keeps working with its old token until it connects. A
+  failed PBS call is retried after 10 minutes. Rotating an old agent gives it a new token but
+  leaves the client flagged, since the new secret lands in the same readable file; the
+  certificate waits for the update. **The client encryption key is not rotated:** existing
+  snapshots are encrypted with it, and a new key would only protect future backups while the
+  old one still decrypts all earlier ones. Treat backups made before the update as readable by
+  whoever copied `jobs.json`.
 * **Agent ↔ PBS:** the PBS certificate fingerprint is pinned. The scoped token has
   `DatastoreBackup` only, so a compromised PC cannot read other PCs' backups or delete its
   own history.

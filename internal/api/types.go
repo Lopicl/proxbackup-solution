@@ -213,7 +213,20 @@ type PollRequest struct {
 	// TrayError: the service can't start the tray app in a user session
 	// ("" = fine). See the agent log in %ProgramData%\proxbackup\logs.
 	TrayError string `json:"tray_error,omitempty"`
+	// Features the agent supports (Feature*).
+	Features []string `json:"features,omitempty"`
 }
+
+// Agent features reported in PollRequest.Features.
+const (
+	// FeatureDataDirACL: the agent restricts its data directory to SYSTEM and
+	// Administrators. Windows agents without it (up to 0.2.14) left jobs.json
+	// and client.key readable by every local user.
+	FeatureDataDirACL = "data-dir-acl"
+	// FeatureCertRenewal: the agent gets a new client certificate when
+	// PollResponse.RenewCert asks for it (POST /agent/v1/cert).
+	FeatureCertRenewal = "cert-renewal"
+)
 
 // PollResponse carries config updates, on-demand work and cancellations.
 type PollResponse struct {
@@ -225,6 +238,10 @@ type PollResponse struct {
 	// ServerURL is the console's current agent-facing URL (PROXBACKUP_PUBLIC_URL).
 	// Agents enrolled under another URL switch to it once it answers.
 	ServerURL string `json:"server_url,omitempty"`
+	// RenewCert asks the agent to replace its client certificate: it sends a
+	// CSR for a new key to POST /agent/v1/cert. The old certificate stops
+	// working once the new one is used.
+	RenewCert bool `json:"renew_cert,omitempty"`
 }
 
 // AgentUpdate describes an agent binary the server offers.
@@ -310,6 +327,16 @@ type EnrollResponse struct {
 	ClientName string `json:"client_name"`
 	CertPEM    string `json:"cert_pem"`
 	CAPEM      string `json:"ca_pem"`
+}
+
+// RenewCertRequest asks for a new client certificate (POST /agent/v1/cert).
+type RenewCertRequest struct {
+	CSR string `json:"csr"`
+}
+
+// RenewCertResponse returns the new client certificate.
+type RenewCertResponse struct {
+	CertPEM string `json:"cert_pem"`
 }
 
 // EnrollmentToken is the string an admin pastes into the agent: base64url(JSON).
