@@ -559,6 +559,15 @@ func (s *Store) ClientNameTaken(ctx context.Context, name string) bool {
 	return n > 0
 }
 
+// RevokedClientNamed reports whether a revoked client had name. Its PBS
+// groups are owned by the token id derived from the name, so a new client
+// under it would own (and could read) the revoked client's snapshots.
+func (s *Store) RevokedClientNamed(ctx context.Context, name string) bool {
+	var n int
+	s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM clients WHERE revoked=1 AND substr(name, 1, length(?)+1)=?||'#'`, name, name).Scan(&n)
+	return n > 0
+}
+
 func (s *Store) CreateClient(ctx context.Context, c *Client) error {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO clients(name, hostname, os, cert_serial, target_id, namespace, token_id, token_secret_enc, last_seen, created_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?)`, c.Name, c.Hostname, c.OS, c.CertSerial, c.TargetID, c.Namespace, c.TokenID, c.tokenSecretEnc, now(), now())

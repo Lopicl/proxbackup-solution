@@ -81,7 +81,9 @@ namespace only**. Running the command again re-enrolls the PC.
 **Many PCs:** *Clients → Create agent setup* creates a temporary token (4 h by default) and a setup
 `.exe`. On each PC, double-click it, confirm the client name and console address, and it enrolls
 the PC, installs the agent to `C:\Program Files\ProxBackup` and starts the service
-(equivalent: `proxbackup-agent.exe setup <token>`). Revoke the setup when done.
+(equivalent: `proxbackup-agent.exe setup <token>`). Revoke the setup when done. A setup can't use
+the name of a revoked client, since that client's backups would come with it; a single-PC
+enrollment created in the console can.
 
 **Credentials:** agents up to 0.2.14 left `%ProgramData%\proxbackup` (PBS token, certificate key,
 encryption key) readable by every user of the PC. The console flags those clients as

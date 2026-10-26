@@ -55,6 +55,17 @@ func TestRevokeAndUnrevoke(t *testing.T) {
 		t.Fatalf("name changed to %q", rc2.Name)
 	}
 
+	// The freed name stays reserved against setup-token enrollment.
+	if !s.store.RevokedClientNamed(ctx, "pc-1") || s.store.RevokedClientNamed(ctx, "pc") || s.store.RevokedClientNamed(ctx, "pc-2") {
+		t.Fatal("RevokedClientNamed")
+	}
+	if s.store.ClientNameTaken(ctx, "pc-1") {
+		t.Fatal("revoked name not free for admin enrollments")
+	}
+	if _, _, err := s.enrollClient(ctx, &Enrollment{ClientName: "pc-1"}, api.EnrollRequest{Hostname: "x"}, true); !errors.Is(err, errClientNameTaken) {
+		t.Fatalf("setup enrollment under a revoked name: %v", err)
+	}
+
 	list, err := s.store.RevokedClients(ctx, now()-86400)
 	if err != nil || len(list) != 1 || list[0].ID != c.ID {
 		t.Fatalf("revoked list = %v, %v", list, err)
@@ -75,6 +86,9 @@ func TestRevokeAndUnrevoke(t *testing.T) {
 	}
 	if list, _ := s.store.RevokedClients(ctx, 0); len(list) != 0 {
 		t.Fatalf("revoked list after un-revoke = %v", list)
+	}
+	if s.store.RevokedClientNamed(ctx, "pc-1") {
+		t.Fatal("name still reserved after un-revoke")
 	}
 	if err := s.store.UnrevokeClient(ctx, uc, "pc-1", "x", nil); !errors.Is(err, errNotFound) {
 		t.Fatalf("un-revoke of an active client: %v", err)

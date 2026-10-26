@@ -104,7 +104,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusForbidden, err)
 		return
 	}
-	c, certPEM, err := s.enrollClient(ctx, e, req)
+	c, certPEM, err := s.enrollClient(ctx, e, req, false)
 	if err != nil {
 		s.store.ReleaseEnrollment(ctx, e.ID)
 		s.log.Error("enrollment failed", "client", e.ClientName, "err", err)
@@ -117,11 +117,14 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 }
 
 // enrollWithSetupToken enrolls a PC under the name it chose (its hostname if
-// none). A taken name is a 409 so the setup can ask for another one.
+// none). A taken name is a 409 so the setup can ask for another one. Names of
+// revoked clients count as taken: whoever runs the setup chooses the name, and
+// the new client would inherit the revoked PC's PBS token id and namespace,
+// and with them its snapshots.
 func (s *Server) enrollWithSetupToken(w http.ResponseWriter, r *http.Request, st *SetupToken, req api.EnrollRequest) {
 	ctx := r.Context()
 	e := &Enrollment{ClientName: cmp.Or(strings.TrimSpace(req.ClientName), req.Hostname), TargetID: st.TargetID}
-	c, certPEM, err := s.enrollClient(ctx, e, req)
+	c, certPEM, err := s.enrollClient(ctx, e, req, true)
 	if err != nil {
 		s.log.Warn("setup enrollment failed", "client", e.ClientName, "setup_token", st.ID, "remote", r.RemoteAddr, "err", err)
 		code := http.StatusInternalServerError
@@ -139,7 +142,10 @@ func (s *Server) enrollWithSetupToken(w http.ResponseWriter, r *http.Request, st
 	writeJSON(w, api.EnrollResponse{ClientID: c.ID, ClientName: c.Name, CertPEM: string(certPEM), CAPEM: string(s.pki.CAPEM)})
 }
 
-func (s *Server) enrollClient(ctx context.Context, e *Enrollment, req api.EnrollRequest) (*Client, []byte, error) {
+// enrollClient creates the client. An admin-issued enrollment may reuse a
+// revoked client's name (and thereby its backups); with a setup token
+// (setup=true) such names are refused.
+func (s *Server) enrollClient(ctx context.Context, e *Enrollment, req api.EnrollRequest, setup bool) (*Client, []byte, error) {
 	name := sanitizeClientName(e.ClientName)
 	if name == "" {
 		name = sanitizeClientName(req.Hostname)
@@ -153,6 +159,9 @@ func (s *Server) enrollClient(ctx context.Context, e *Enrollment, req api.Enroll
 	defer s.enrollMu.Unlock()
 	if s.store.ClientNameTaken(ctx, name) {
 		return nil, nil, fmt.Errorf("%w: %q", errClientNameTaken, name)
+	}
+	if setup && s.store.RevokedClientNamed(ctx, name) {
+		return nil, nil, fmt.Errorf("%w: %q belonged to a revoked client", errClientNameTaken, name)
 	}
 	t, err := s.store.Target(ctx, e.TargetID)
 	if err != nil {
