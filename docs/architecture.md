@@ -203,7 +203,8 @@ read on every run.
 * **Configuration.** The agent long-polls `POST /agent/v1/poll` and sends the revision of the
   configuration it has. When the server's revision differs, it pushes the full config: the PBS
   target (endpoint, fingerprint, datastore, namespace, scoped API token) and all enabled jobs
-  with their schedules. The agent stores it in `jobs.json` (0600). Saving a job in the UI wakes
+  with their schedules. The agent stores it in `jobs.json` in its data directory (see
+  *Agent data directory* under Security model). Saving a job in the UI wakes
   the poll, so changes arrive within seconds when the PC is online. At startup the agent tries a
   quick sync (≤10 s) before its first schedule check, so changes made while the PC was off take
   effect immediately. Every poll reply also carries the console's `PROXBACKUP_PUBLIC_URL`; when
@@ -582,13 +583,25 @@ sequenceDiagram
   token, and the agent (which keeps polling with its certificate) reconnects with its
   history, key and jobs. Clients revoked by older consoles (no serial kept) can't be restored
   this way and must be enrolled again.
+* **Agent data directory:** `%ProgramData%\proxbackup` holds the client key, `jobs.json`
+  (PBS token, encryption key) and the spool of run reports the agent delivers to the console.
+  Go's mode bits do nothing on Windows, and ProgramData lets every user read its subfolders
+  and create files in them, so enrollment, setup and every service start apply a protected
+  DACL instead: owner Administrators, `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`. Everything inside
+  gets the same owner and inherited ACEs, so explicit grants a user added are dropped. The
+  agent refuses a data directory that is a junction or symlink, and deletes reparse points and
+  hard-linked files inside it without following them. The walk uses `SetKernelObjectSecurity`
+  on handles opened with `FILE_FLAG_OPEN_REPARSE_POINT`, because `SetSecurityInfo` on a
+  directory propagates inheritance through links. Agents up to 0.2.14 left the directory
+  readable by all users; consider their PBS tokens and client keys exposed to local users.
+  On Linux the directory is 0700.
 * **Agent ↔ PBS:** the PBS certificate fingerprint is pinned. The scoped token has
   `DatastoreBackup` only, so a compromised PC cannot read other PCs' backups or delete its
   own history.
 * **Client-side encryption (phase 2, implemented):** enabled per job. The console generates
   a per-client AES-256 key with the client's first encrypted job, keeps it sealed with the
   master key (`crypt_key_enc`; kept when the client is revoked) and sends it with the agent
-  config, which the agent stores in `jobs.json` (0600) next to its PBS token so scheduled
+  config, which the agent stores in `jobs.json` next to its PBS token so scheduled
   backups run offline. Chunks, indexes' chunks, the catalog and `client.log.blob` are
   encrypted; the manifest is signed. Snapshots are standard PBS encrypted snapshots:
   `proxmox-backup-client --keyfile` restores them and PBS verifies them without the key.

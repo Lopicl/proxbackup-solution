@@ -124,7 +124,8 @@ year) and how much data each client's latest backups hold. *Runs* lists active a
 ### Troubleshooting
 
 The agent service logs to `%ProgramData%\proxbackup\logs\agent.log` (rotated at 5 MiB, 3 old files
-kept). If it can't start the tray icon in a user session, the client page in the console says so.
+kept). `%ProgramData%\proxbackup` is accessible to SYSTEM and Administrators only (the agent
+resets its permissions on every start), so open the log from an elevated prompt. If it can't start the tray icon in a user session, the client page in the console says so.
 
 ### Ad-hoc use without a console
 

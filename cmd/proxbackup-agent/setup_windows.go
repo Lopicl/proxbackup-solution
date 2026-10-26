@@ -17,6 +17,8 @@ import (
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
+
+	"proxbackup/internal/agent"
 )
 
 const serviceName = "proxbackup-agent"
@@ -48,6 +50,9 @@ func elevate() (relaunched bool, err error) {
 // a setup .exe carries) and installs and starts the service from there. An
 // existing service is stopped and pointed at the new copy.
 func installService(dataDir string) error {
+	if _, err := agent.SecureDataDir(dataDir); err != nil {
+		return err
+	}
 	src, err := os.Executable()
 	if err != nil {
 		return err

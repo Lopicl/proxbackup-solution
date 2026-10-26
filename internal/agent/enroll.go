@@ -31,6 +31,9 @@ func Enroll(ctx context.Context, dir, token string) (*Config, error) {
 // EnrollWith enrolls with a parsed token. clientName is the name asked for
 // with a setup token (ignored by one-time codes; empty = the hostname).
 func EnrollWith(ctx context.Context, dir string, t *api.EnrollmentToken, clientName string) (*Config, error) {
+	if _, err := SecureDataDir(dir); err != nil {
+		return nil, err
+	}
 	hostname, _ := os.Hostname()
 	keyPEM, csrPEM, err := newKeyAndCSR(hostname)
 	if err != nil {

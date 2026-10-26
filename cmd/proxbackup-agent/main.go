@@ -90,7 +90,14 @@ func main() {
 		os.Exit(tray.Run(version, *dataDir, *replace))
 	case "run", "install", "uninstall", "start", "stop":
 		fs.Parse(args)
+		var dirErr error
+		var removed []string
 		if cmd == "run" {
+			// Before anything is written there: only SYSTEM and Administrators
+			// may access the data dir (see agent.SecureDataDir).
+			removed, dirErr = agent.SecureDataDir(*dataDir)
+		}
+		if cmd == "run" && dirErr == nil {
 			// The service has no console: also log to <data dir>\logs\agent.log.
 			if lf, lerr := agent.OpenLogFile(*dataDir); lerr == nil {
 				defer lf.Close()
@@ -99,7 +106,10 @@ func main() {
 				log.Warn("can't open the log file; logging to stderr only", "err", lerr)
 			}
 		}
-		if err = serviceCommand(cmd, *dataDir, log); err != nil && cmd == "run" {
+		for _, p := range removed {
+			log.Warn("removed a link from the data directory", "path", p)
+		}
+		if err = serviceCommand(cmd, *dataDir, log, dirErr); err != nil && cmd == "run" {
 			log.Error("agent stopped", "err", err)
 		}
 	case "backup", "image", "restore":
@@ -120,12 +130,20 @@ func fatalf(format string, args ...any) {
 
 type program struct {
 	dataDir string
+	dirErr  error // from securing the data dir: the agent won't run
 	log     *slog.Logger
 	cancel  context.CancelFunc
 	done    chan struct{}
 }
 
-func (p *program) Start(service.Service) error {
+func (p *program) Start(s service.Service) error {
+	if p.dirErr != nil {
+		p.log.Error("can't secure the data directory", "err", p.dirErr)
+		if sl, err := s.SystemLogger(nil); err == nil {
+			sl.Error("can't secure the data directory: " + p.dirErr.Error())
+		}
+		return p.dirErr
+	}
 	cfg, err := agent.LoadConfig(p.dataDir)
 	if err != nil {
 		p.log.Error("can't load the agent configuration", "err", err)
@@ -189,8 +207,8 @@ func runSetup(dataDir, token string) {
 	}
 }
 
-func serviceCommand(cmd, dataDir string, log *slog.Logger) error {
-	p := &program{dataDir: dataDir, log: log}
+func serviceCommand(cmd, dataDir string, log *slog.Logger, dirErr error) error {
+	p := &program{dataDir: dataDir, dirErr: dirErr, log: log}
 	svc, err := newService(p, dataDir, "")
 	if err != nil {
 		return err
