@@ -187,7 +187,7 @@ and the agent as a Windows service installed by enrollment or the setup `.exe`.
 
 ## Development
 
-Requires Go ≥ 1.26 and Node ≥ 20. Development happens on `alpha` (the default branch).
+Requires Go ≥ 1.26 and Node ≥ 20. Releases are built with the patched toolchain pinned in `go.mod` (`toolchain` line; Go downloads it automatically) and fail on any reachable `govulncheck` finding. Development happens on `alpha` (the default branch).
 
 ```sh
 make test   # go vet (host + windows) and all unit tests

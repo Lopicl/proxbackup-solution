@@ -28,9 +28,25 @@ jobs:
             exit 1
           fi
 
+      # go-version-file honors go.mod's toolchain line, so releases are built
+      # with the patched Go release pinned there, not the go directive's minimum.
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      # Fail the release on any vulnerability the code actually reaches
+      # (stdlib or dependencies), for both the Linux console and Windows agent.
+      - name: Check toolchain and vulnerabilities
+        run: |
+          want="$(awk '/^toolchain /{print $2}' go.mod)"
+          got="$(go env GOVERSION)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::building with $got, go.mod pins $want"
+            exit 1
+          fi
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+          GOOS=windows "$(go env GOPATH)/bin/govulncheck" ./...
 
       - uses: actions/setup-node@v4
         with:

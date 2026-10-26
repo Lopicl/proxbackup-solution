@@ -2,6 +2,8 @@ module proxbackup
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	fyne.io/systray v1.12.2
 	github.com/Microsoft/go-winio v0.6.2
