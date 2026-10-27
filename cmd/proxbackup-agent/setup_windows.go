@@ -72,9 +72,9 @@ func installAgent(dataDir string) error {
 	if err != nil {
 		return err
 	}
-	dst := filepath.Join(cmp.Or(os.Getenv("ProgramFiles"), `C:\Program Files`), "ProxBackup", "proxbackup-agent.exe")
+	dst := installPath()
 	fromDst := strings.EqualFold(filepath.Clean(src), dst)
-	binPath := syscall.EscapeArg(dst) + " run -data-dir " + syscall.EscapeArg(dataDir)
+	binPath := servicePath(dst, dataDir)
 
 	m, err := mgr.Connect()
 	if err != nil {
@@ -124,6 +124,56 @@ func installAgent(dataDir string) error {
 	}
 	fmt.Printf("service install: ok (%s)\n", dst)
 	return nil
+}
+
+// installPath is where the agent service runs from.
+func installPath() string {
+	return filepath.Join(cmp.Or(os.Getenv("ProgramFiles"), `C:\Program Files`), "ProxBackup", "proxbackup-agent.exe")
+}
+
+func servicePath(exe, dataDir string) string {
+	return syscall.EscapeArg(exe) + " run -data-dir " + syscall.EscapeArg(dataDir)
+}
+
+// relocate moves a service that `install` set up outside Program Files
+// (before 0.2.16 it ran the exe from wherever it was downloaded) to
+// Program Files: it copies this binary there and points the service at the
+// copy. moved means the service must be restarted to run the copy. It only
+// acts when this process is the proxbackup-agent service.
+func relocate(dataDir string) (moved bool, err error) {
+	src, err := os.Executable()
+	if err != nil {
+		return false, err
+	}
+	dst := installPath()
+	if strings.EqualFold(filepath.Clean(src), dst) {
+		return false, nil
+	}
+	m, err := mgr.Connect()
+	if err != nil {
+		return false, fmt.Errorf("service manager: %w", err)
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(serviceName)
+	if err != nil {
+		return false, err
+	}
+	defer s.Close()
+	if st, err := s.Query(); err != nil || st.ProcessId != uint32(os.Getpid()) {
+		return false, err // another copy (a test service, or run by hand)
+	}
+	cfg, err := s.Config()
+	if err != nil {
+		return false, err
+	}
+	if err := copyAgent(src, dst); err != nil {
+		return false, err
+	}
+	cfg.BinaryPathName = servicePath(dst, dataDir)
+	if err := s.UpdateConfig(cfg); err != nil {
+		return false, fmt.Errorf("update service: %w", err)
+	}
+	return true, nil
 }
 
 func stopService(s *mgr.Service) error {

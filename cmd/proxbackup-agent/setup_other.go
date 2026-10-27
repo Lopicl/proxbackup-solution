@@ -9,6 +9,9 @@ import "log/slog"
 // elevate is a no-op: run the setup as root.
 func elevate() (bool, error) { return false, nil }
 
+// relocate is a no-op: packages install the agent where it belongs.
+func relocate(string) (bool, error) { return false, nil }
+
 // installAgent installs the service from this executable.
 func installAgent(dataDir string) error {
 	return serviceCommand("install", dataDir, slog.Default(), nil)

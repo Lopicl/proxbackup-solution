@@ -521,7 +521,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	code := randToken(24)
 	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint()})
 	enc := base64.RawURLEncoding.EncodeToString(tok)
-	command := `proxbackup-agent.exe enroll ` + enc + ` && proxbackup-agent.exe install && proxbackup-agent.exe start`
+	command := `proxbackup-agent.exe enroll ` + enc + ` && proxbackup-agent.exe install`
 	if err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, time.Duration(req.TTLHours)*time.Hour, s.sealer.Seal(command)); err != nil {
 		httpError(w, 500, err)
 		return

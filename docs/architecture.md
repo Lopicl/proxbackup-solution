@@ -185,9 +185,12 @@ read on every run.
 
 * Runs as `LocalSystem` (needed for VSS and for reading every file), installed with
   `proxbackup-agent install`. That copies the agent to `%ProgramFiles%\ProxBackup` and installs
-  the service from there, or repoints an existing one, so SYSTEM never runs a binary from a
-  folder users can write to (such as Downloads). Re-running the enrollment command on an
-  enrolled PC keeps the existing service and restarts it.
+  and starts the service from there, or repoints an existing one, so SYSTEM never runs a binary
+  from a folder users can write to (such as Downloads). A service that an older `install` left
+  elsewhere moves itself on start: it copies its binary to Program Files, repoints the service,
+  and exits so the service manager restarts it from there (like after a self-update); the tray
+  follows it to the new path. Re-running the enrollment command on an enrolled PC keeps the
+  existing service and restarts it.
 * **Enrollment.** An admin creates a one-time enrollment code in the UI. The code bundles the
   server URL, a secret, and the server CA fingerprint. The agent generates an ECDSA key and
   CSR, and the server returns a client certificate signed by its internal CA. Every later

@@ -102,7 +102,7 @@ func (r *Runner) selfUpdate(ctx context.Context, u *api.AgentUpdate) error {
 		time.Sleep(10 * time.Second)
 	}
 	r.log.Info("agent updated, restarting", "version", u.Version)
-	restartService()
+	RestartService()
 	os.Exit(3) // non-zero: the service manager's recovery action restarts us
 	return nil
 }

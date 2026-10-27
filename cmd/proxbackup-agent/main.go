@@ -32,8 +32,9 @@ Usage:
   proxbackup-agent enroll <token>         enroll with a proxbackup-server (token from the web UI)
   proxbackup-agent setup <token>          interactive setup with a setup token: asks for the client
                                           name and console address, then installs and starts the service
-  proxbackup-agent install | uninstall    install/remove the Windows service
-  proxbackup-agent start | stop           start/stop the service
+  proxbackup-agent install                install the service to Program Files and start it
+  proxbackup-agent uninstall              remove the Windows service
+  proxbackup-agent start | stop           start (restart if running) / stop the service
   proxbackup-agent run                    run in the foreground (what the service executes)
   proxbackup-agent tray                   the notification-area icon (the service starts it in each user session)
   proxbackup-agent backup  [flags]        ad-hoc file backup straight to PBS (no server needed)
@@ -109,7 +110,7 @@ func main() {
 			log.Warn("removed a link from the data directory", "path", p)
 		}
 		if cmd == "install" {
-			err = installAgent(*dataDir)
+			err = installService(*dataDir)
 		} else if err = serviceCommand(cmd, *dataDir, log, dirErr); err != nil && cmd == "run" {
 			log.Error("agent stopped", "err", err)
 		}
@@ -144,6 +145,21 @@ func (p *program) Start(s service.Service) error {
 			sl.Error("can't secure the data directory: " + p.dirErr.Error())
 		}
 		return p.dirErr
+	}
+	if !service.Interactive() {
+		if moved, err := relocate(p.dataDir); err != nil {
+			p.log.Warn("can't move the agent to Program Files; it keeps running from here", "err", err)
+		} else if moved {
+			// Report the service as started, then exit: the service manager
+			// restarts it from the new place (as after a self-update).
+			p.log.Info("moved the agent to Program Files, restarting")
+			go func() {
+				time.Sleep(time.Second)
+				agent.RestartService()
+				os.Exit(3)
+			}()
+			return nil
+		}
 	}
 	cfg, err := agent.LoadConfig(p.dataDir)
 	if err != nil {

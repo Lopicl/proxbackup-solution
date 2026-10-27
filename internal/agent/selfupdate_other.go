@@ -4,5 +4,5 @@
 
 package agent
 
-// restartService relies on the service manager (systemd Restart=, launchd KeepAlive).
-func restartService() {}
+// RestartService relies on the service manager (systemd Restart=, launchd KeepAlive).
+func RestartService() {}

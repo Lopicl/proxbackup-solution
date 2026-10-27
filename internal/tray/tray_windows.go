@@ -5,7 +5,10 @@ package tray
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -141,8 +144,8 @@ func (t *app) poll() {
 
 // apply updates the menu and icon for st (nil = agent unreachable).
 func (t *app) apply(st *ipc.Status) {
-	if st != nil && st.Version != t.version && st.Exe != "" {
-		t.replace(st.Exe) // the agent was updated: run the new tray
+	if st != nil && st.Exe != "" && (st.Version != t.version || !sameFile(st.Exe)) {
+		t.replace(st.Exe) // the agent was updated or moved: run the new tray
 		return
 	}
 	v := buildView(st, time.Now())
@@ -230,6 +233,12 @@ func (t *app) openRestore() {
 	if err := windows.ShellExecute(0, windows.StringToUTF16Ptr("open"), windows.StringToUTF16Ptr(resp.URL), nil, nil, windows.SW_SHOWNORMAL); err != nil {
 		message(fmt.Sprintf("Open %s in your browser to restore files (%v).", resp.URL, err), true)
 	}
+}
+
+// sameFile reports whether exe is this tray's executable.
+func sameFile(exe string) bool {
+	self, err := os.Executable()
+	return err != nil || strings.EqualFold(filepath.Clean(self), filepath.Clean(exe))
 }
 
 // replace starts the tray of the updated agent and exits this one.
