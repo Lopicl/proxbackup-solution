@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"time"
 
@@ -29,7 +30,8 @@ var version = "dev"
 const usage = `proxbackup-agent — Proxmox Backup Server agent for Windows
 
 Usage:
-  proxbackup-agent enroll <token>         enroll with a proxbackup-server (token from the web UI)
+  proxbackup-agent enroll <token>         enroll with a proxbackup-server (token from the web UI), then
+                                          install and start the service (Windows; -no-install: enroll only)
   proxbackup-agent setup <token>          interactive setup with a setup token: asks for the client
                                           name and console address, then installs and starts the service
   proxbackup-agent install                install the service to Program Files and start it
@@ -68,15 +70,20 @@ func main() {
 	case "version":
 		fmt.Println(version)
 	case "enroll":
+		noInstall := fs.Bool("no-install", false, "only enroll: don't install and start the service")
 		fs.Parse(args)
 		if fs.NArg() != 1 {
-			fatalf("usage: proxbackup-agent enroll <token>")
+			fatalf("usage: proxbackup-agent enroll [-no-install] <token>")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		var cfg *agent.Config
 		if cfg, err = agent.Enroll(ctx, *dataDir, fs.Arg(0)); err == nil {
 			fmt.Printf("enrolled as %q (client %d) with %s\n", cfg.ClientName, cfg.ClientID, cfg.ServerURL)
+			// On Linux and macOS the package manages the service.
+			if runtime.GOOS == "windows" && !*noInstall {
+				err = installService(*dataDir)
+			}
 		}
 	case "setup":
 		fs.Parse(args)

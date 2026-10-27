@@ -183,8 +183,9 @@ read on every run.
 
 ### 3. `proxbackup-agent`: ProxBackup Agent (Windows service)
 
-* Runs as `LocalSystem` (needed for VSS and for reading every file), installed with
-  `proxbackup-agent install`. That copies the agent to `%ProgramFiles%\ProxBackup` and installs
+* Runs as `LocalSystem` (needed for VSS and for reading every file), installed by
+  `proxbackup-agent enroll <token>` right after enrolling (or by `proxbackup-agent install`
+  alone). That copies the agent to `%ProgramFiles%\ProxBackup` and installs
   and starts the service from there, or repoints an existing one, so SYSTEM never runs a binary
   from a folder users can write to (such as Downloads). A service that an older `install` left
   elsewhere moves itself on start: it copies its binary to Program Files, repoints the service,

@@ -72,11 +72,12 @@ older snapshots stay listed and restorable.
 **One PC:** *Clients → Add client*, then run the shown command in an elevated prompt:
 
 ```bat
-proxbackup-agent.exe enroll <token> && proxbackup-agent.exe install
+proxbackup-agent.exe enroll <token>
 ```
 
-`install` copies the agent to `C:\Program Files\ProxBackup` and installs and starts the service
-there, wherever the `.exe` was run from, so the download can be deleted afterwards. Agents that an
+It enrolls the PC, copies the agent to `C:\Program Files\ProxBackup` and installs and starts the
+service there, wherever the `.exe` was run from, so the download can be deleted afterwards
+(`enroll -no-install` only enrolls; `install` installs and starts on its own). Agents that an
 older `install` left in another folder move there by themselves the next time they start. The console
 creates the namespace `pcs/<client>` and a PBS token with **DatastoreBackup on that namespace
 only**. Running the command again re-enrolls the PC.
