@@ -129,6 +129,22 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	if fp == "" {
 		fp = s.localFingerprintFor(ctx, req.AdminAuthID)
 	}
+	// Clients get the target's host and fingerprint together with their own PBS
+	// token secret, so repointing them could collect every client's token.
+	// Only someone who may already read all their backups may do that.
+	if t.ID != 0 && (!sameHost(t.Host, req.Host) ||
+		pbs.NormalizeFingerprint(t.Fingerprint) != pbs.NormalizeFingerprint(fp)) && !access(r).Global(PermRestore) {
+		n, err := s.store.TargetClientCount(ctx, t.ID)
+		if err != nil {
+			httpError(w, 500, err)
+			return
+		}
+		if n > 0 {
+			httpError(w, http.StatusForbidden, fmt.Errorf("%d clients use this PBS server: changing its host or fingerprint "+
+				"also needs the permission Restore (for all clients)", n))
+			return
+		}
+	}
 	// The stored secret only stays with the PBS and token it was entered for.
 	if req.AdminSecret == "" && (t.ID == 0 || !t.sameEndpoint(req.Host, fp, req.AdminAuthID)) {
 		if req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, fp); req.AdminSecret == "" {

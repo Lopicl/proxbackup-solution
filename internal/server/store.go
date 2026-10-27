@@ -484,10 +484,15 @@ func (s *Store) SaveTarget(ctx context.Context, t *Target, sealSecret func(id in
 	return err
 }
 
-func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
+// TargetClientCount is the number of active (not revoked) clients of a target.
+func (s *Store) TargetClientCount(ctx context.Context, id int64) (int, error) {
 	var n int
-	s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM clients WHERE target_id=? AND revoked=0`, id).Scan(&n)
-	if n > 0 {
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM clients WHERE target_id=? AND revoked=0`, id).Scan(&n)
+	return n, err
+}
+
+func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
+	if n, _ := s.TargetClientCount(ctx, id); n > 0 {
 		return fmt.Errorf("target is used by %d clients", n)
 	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM targets WHERE id=?`, id)

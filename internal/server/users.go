@@ -53,7 +53,7 @@ var permissions = []PermInfo{
 	{PermManageJobs, "Manage jobs", "Change member job settings. Creating and editing group jobs needs all clients.", true},
 	{PermRunBackups, "Run backups", "Start and cancel backups.", true},
 	{PermRestore, "Restore", "Browse snapshots, restore files and download client encryption keys.", true},
-	{PermTargets, "Manage datastores", "Add, change and remove the PBS datastores clients back up to.", false},
+	{PermTargets, "Manage datastores", "Add, change and remove the PBS datastores clients back up to. Pointing a datastore in use at another host or fingerprint also needs Restore for all clients.", false},
 	{PermNotifications, "Manage notifications", "Email and webhook notification settings.", false},
 	{PermUpdates, "Manage updates", "Console update settings and installing updates.", false},
 	{PermEncryption, "Manage encryption", "The master key for client-side encryption.", false},
