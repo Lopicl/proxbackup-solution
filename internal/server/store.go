@@ -463,16 +463,21 @@ func (s *Store) Target(ctx context.Context, id int64) (*Target, error) {
 	return scanTarget(s.db.QueryRowContext(ctx, `SELECT `+targetCols+` FROM targets WHERE id=?`, id))
 }
 
-func (s *Store) SaveTarget(ctx context.Context, t *Target) error {
+// SaveTarget creates or updates t. sealSecret, if not nil, seals a new admin
+// secret for the target's id; nil keeps t's sealed secret.
+func (s *Store) SaveTarget(ctx context.Context, t *Target, sealSecret func(id int64) []byte) error {
 	if t.ID == 0 {
 		t.CreatedAt = now()
-		res, err := s.db.ExecContext(ctx, `INSERT INTO targets(name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, created_at)
-			VALUES(?,?,?,?,?,?,?,?,?)`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.CreatedAt)
+		id, err := s.insertSealed(ctx, colTargetSecret, sealSecret, &t.adminSecretEnc, `INSERT INTO targets(name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, created_at)
+			VALUES(?,?,?,?,?,?,COALESCE(?, X''),?,?)`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.CreatedAt)
 		if err != nil {
 			return err
 		}
-		t.ID, _ = res.LastInsertId()
+		t.ID = id
 		return nil
+	}
+	if sealSecret != nil {
+		t.adminSecretEnc = sealSecret(t.ID)
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE targets SET name=?, host=?, fingerprint=?, datastore=?, root_ns=?, admin_auth_id=?,
 		admin_secret_enc=?, pbs_user=? WHERE id=?`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.ID)
@@ -568,14 +573,44 @@ func (s *Store) RevokedClientNamed(ctx context.Context, name string) bool {
 	return n > 0
 }
 
-func (s *Store) CreateClient(ctx context.Context, c *Client) error {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO clients(name, hostname, os, cert_serial, target_id, namespace, token_id, token_secret_enc, last_seen, created_at)
+// CreateClient inserts c; sealToken seals its PBS token secret for the new id.
+func (s *Store) CreateClient(ctx context.Context, c *Client, sealToken func(id int64) []byte) error {
+	id, err := s.insertSealed(ctx, colClientToken, sealToken, &c.tokenSecretEnc, `INSERT INTO clients(name, hostname, os, cert_serial, target_id, namespace, token_id, token_secret_enc, last_seen, created_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?)`, c.Name, c.Hostname, c.OS, c.CertSerial, c.TargetID, c.Namespace, c.TokenID, c.tokenSecretEnc, now(), now())
 	if err != nil {
 		return err
 	}
-	c.ID, _ = res.LastInsertId()
+	c.ID = id
 	return nil
+}
+
+// insertSealed runs insert, then stores seal(id) in col of the new row, in
+// one transaction: sealed values are bound to an id that only exists after
+// the insert. A nil seal keeps what insert stored; out receives the value.
+func (s *Store) insertSealed(ctx context.Context, col sealedCol, seal func(id int64) []byte, out *[]byte, insert string, args ...any) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, insert, args...)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if seal != nil {
+		sealed := seal(id)
+		if _, err := tx.ExecContext(ctx, `UPDATE `+col.table+` SET `+col.column+`=? WHERE id=?`, sealed, id); err != nil {
+			return 0, err
+		}
+		if out != nil {
+			*out = sealed
+		}
+	}
+	return id, tx.Commit()
 }
 
 // MoveClientNamespace points a client at ns, remembering its current namespace
@@ -749,11 +784,11 @@ type Enrollment struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
-// CreateEnrollment stores a new code. commandEnc is the sealed enrollment
+// CreateEnrollment stores a new code. sealCommand seals the enrollment
 // command, kept so it can be shown again until the PC enrolls.
-func (s *Store) CreateEnrollment(ctx context.Context, codeHash, name string, targetID int64, ttl time.Duration, commandEnc []byte) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO enrollments(code_hash, client_name, target_id, expires, created_at, command_enc) VALUES(?,?,?,?,?,?)`,
-		codeHash, name, targetID, time.Now().Add(ttl).Unix(), now(), commandEnc)
+func (s *Store) CreateEnrollment(ctx context.Context, codeHash, name string, targetID int64, ttl time.Duration, sealCommand func(id int64) []byte) error {
+	_, err := s.insertSealed(ctx, colEnrollCmd, sealCommand, nil, `INSERT INTO enrollments(code_hash, client_name, target_id, expires, created_at) VALUES(?,?,?,?,?)`,
+		codeHash, name, targetID, time.Now().Add(ttl).Unix(), now())
 	return err
 }
 
@@ -829,15 +864,11 @@ type SetupToken struct {
 	CreatedAt int64 `json:"created_at"`
 }
 
-// CreateSetupToken stores a new token. tokenEnc is the sealed token string,
+// CreateSetupToken stores a new token. sealToken seals the token string,
 // kept so the setup can be downloaded again until it expires.
-func (s *Store) CreateSetupToken(ctx context.Context, codeHash string, targetID, expires int64, tokenEnc []byte) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `INSERT INTO setup_tokens(code_hash, target_id, expires, token_enc, created_at) VALUES(?,?,?,?,?)`,
-		codeHash, targetID, expires, tokenEnc, now())
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+func (s *Store) CreateSetupToken(ctx context.Context, codeHash string, targetID, expires int64, sealToken func(id int64) []byte) (int64, error) {
+	return s.insertSealed(ctx, colSetupToken, sealToken, nil, `INSERT INTO setup_tokens(code_hash, target_id, expires, token_enc, created_at) VALUES(?,?,?,X'',?)`,
+		codeHash, targetID, expires, now())
 }
 
 // SetupTokens lists the tokens that haven't expired.
@@ -1438,4 +1469,90 @@ func (s *Store) ClientStorage(ctx context.Context, since int64) (map[int64]*Clie
 		get(id).Uploaded += n
 	}
 	return out, rows.Err()
+}
+
+const sealedBoundKey = "sealed_values_bound"
+
+// BindSealedValues re-seals, once, the values sealed before they were bound to
+// their row and column (see sealedCol). After that unbound values don't open,
+// so whoever can write the database can't swap them between rows or columns.
+// It returns how many values were re-sealed; values that didn't open before
+// either are left alone.
+func (s *Store) BindSealedValues(ctx context.Context, sl *Sealer) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var done string
+	if err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, sealedBoundKey).Scan(&done); err == nil && done == "true" {
+		return 0, nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	// rebind returns v sealed for its row, or nil if it needs no change.
+	rebind := func(v []byte, col sealedCol, id int64) []byte {
+		if _, err := sl.Open(v, col, id); err == nil {
+			return nil
+		}
+		plain, err := sl.open(v, nil)
+		if err != nil {
+			return nil
+		}
+		return sl.Seal(plain, col, id)
+	}
+	n := 0
+	for _, col := range []sealedCol{colTargetSecret, colClientToken, colClientKey, colEnrollCmd, colSetupToken} {
+		type row struct {
+			id int64
+			v  []byte
+		}
+		var vals []row
+		rows, err := tx.QueryContext(ctx, `SELECT id, `+col.column+` FROM `+col.table+` WHERE length(`+col.column+`) > 0`)
+		if err != nil {
+			return 0, err
+		}
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.id, &r.v); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			vals = append(vals, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+		for _, r := range vals {
+			if b := rebind(r.v, col, r.id); b != nil {
+				if _, err := tx.ExecContext(ctx, `UPDATE `+col.table+` SET `+col.column+`=? WHERE id=?`, b, r.id); err != nil {
+					return 0, err
+				}
+				n++
+			}
+		}
+	}
+	// The SMTP password is a field of the notification settings (JSON).
+	var raw string
+	if err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key='notifications'`).Scan(&raw); err == nil {
+		var m map[string]json.RawMessage
+		var v []byte
+		if json.Unmarshal([]byte(raw), &m) == nil && json.Unmarshal(m["smtp_pass_enc"], &v) == nil && len(v) > 0 {
+			if b := rebind(v, colSMTPPass, 0); b != nil {
+				m["smtp_pass_enc"], _ = json.Marshal(b)
+				out, _ := json.Marshal(m)
+				if _, err := tx.ExecContext(ctx, `UPDATE settings SET value=? WHERE key='notifications'`, string(out)); err != nil {
+					return 0, err
+				}
+				n++
+			}
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value=excluded.value`, sealedBoundKey); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
 }

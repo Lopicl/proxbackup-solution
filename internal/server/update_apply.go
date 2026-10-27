@@ -38,13 +38,16 @@ type updateRequest struct {
 // installed version, so a compromised console cannot get arbitrary code run
 // as root or force a downgrade.
 func ApplyUpdate(ctx context.Context, installed, dataDir, cacheDir, repo string, log *slog.Logger) error {
-	dir := filepath.Join(dataDir, "updates")
-	// The directory belongs to the service user: don't follow it elsewhere.
-	if fi, err := os.Lstat(dir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink; refusing to use it", dir)
+	dir, err := openUpdatesDir(dataDir)
+	if err != nil {
+		return err
 	}
-	reqPath := filepath.Join(dir, updateRequestFile)
-	fi, err := os.Lstat(reqPath)
+	if dir == nil {
+		log.Info("no update requested")
+		return nil
+	}
+	defer dir.Close()
+	fi, err := dir.Lstat(updateRequestFile)
 	if errors.Is(err, os.ErrNotExist) {
 		log.Info("no update requested")
 		return nil
@@ -54,9 +57,9 @@ func ApplyUpdate(ctx context.Context, installed, dataDir, cacheDir, repo string,
 	}
 	var b []byte
 	if fi.Mode().IsRegular() && fi.Size() < 4096 {
-		b, err = os.ReadFile(reqPath)
+		b, err = dir.ReadFile(updateRequestFile)
 	}
-	os.Remove(reqPath) // one attempt per request; the .path unit would retrigger otherwise
+	dir.Remove(updateRequestFile) // one attempt per request; the .path unit would retrigger otherwise
 	var req updateRequest
 	if err != nil || json.Unmarshal(b, &req) != nil || !isVersion(req.Version) {
 		return errors.New("invalid update request")
@@ -74,6 +77,43 @@ func ApplyUpdate(ctx context.Context, installed, dataDir, cacheDir, repo string,
 	}
 	writeHelperResult(dir, res, log)
 	return err
+}
+
+// openUpdatesDir opens dataDir/updates, nil if it doesn't exist. Both belong
+// to the service user and we run as root, so every file operation goes
+// through the returned root: the service user can't redirect them elsewhere
+// by swapping in a symlink, not even between a check and the use.
+func openUpdatesDir(dataDir string) (*os.Root, error) {
+	data, err := os.OpenRoot(dataDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer data.Close()
+	name := filepath.Join(dataDir, "updates")
+	fi, err := data.Lstat("updates")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("%s is not a directory (%s); refusing to use it", name, fi.Mode().Type())
+	}
+	// A symlink swapped in now can only point within dataDir, and is caught
+	// here: the directory we opened must be the one checked above.
+	dir, err := data.OpenRoot("updates")
+	if err != nil {
+		return nil, err
+	}
+	if opened, err := dir.Stat("."); err != nil || !os.SameFile(fi, opened) {
+		dir.Close()
+		return nil, fmt.Errorf("%s changed while it was opened; refusing to use it", name)
+	}
+	return dir, nil
 }
 
 func applyDeb(ctx context.Context, installed, version, cacheDir, repo string, log *slog.Logger) error {
@@ -127,12 +167,11 @@ func applyDeb(ctx context.Context, installed, version, cacheDir, repo string, lo
 // console can read it. We run as root in a directory the service user owns, so
 // never follow a planted symlink: create the file exclusively and chown the
 // open descriptor.
-func writeHelperResult(dir string, res UpdateResult, log *slog.Logger) {
+func writeHelperResult(dir *os.Root, res UpdateResult, log *slog.Logger) {
 	b, _ := json.Marshal(res)
-	p := filepath.Join(dir, updateResultFile)
-	tmp := p + ".tmp"
-	os.Remove(tmp)
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp := updateResultFile + ".tmp"
+	dir.Remove(tmp)
+	f, err := dir.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		log.Warn("cannot write update result", "err", err)
 		return
@@ -150,5 +189,5 @@ func writeHelperResult(dir string, res UpdateResult, log *slog.Logger) {
 		log.Warn("cannot write update result", "err", err)
 		return
 	}
-	os.Rename(tmp, p)
+	dir.Rename(tmp, updateResultFile)
 }

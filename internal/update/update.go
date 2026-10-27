@@ -9,11 +9,13 @@
 //	proxbackup-server-linux-<arch>            standalone server binary
 //	proxbackup-agent-windows-<arch>.exe       Windows agent
 //	SHA256SUMS                                sha256sum output for all of the above
+//	SHA256SUMS.minisig                        its signature, once releases are signed (sign.go)
 package update
 
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -131,6 +133,9 @@ type Client struct {
 	HTTP *http.Client
 	// API is the GitHub API base URL (tests point it elsewhere).
 	API string
+	// Key is the minisign public key SHA256SUMS must be signed with; empty
+	// uses the built-in release key (see releaseKey).
+	Key string
 }
 
 func (c *Client) repo() string {
@@ -278,21 +283,36 @@ func (c *Client) ByVersion(ctx context.Context, version string) (*Release, error
 }
 
 // Sums downloads and parses the release's SHA256SUMS: file name → hex digest.
+// With a release key, its signature must check out too.
 func (c *Client) Sums(ctx context.Context, r *Release) (map[string]string, error) {
-	a, ok := r.Asset(SumsAsset)
+	b, err := c.smallAsset(ctx, r, SumsAsset)
+	if err != nil {
+		return nil, err
+	}
+	if key := strings.TrimSpace(cmp.Or(c.Key, releaseKey)); key != "" {
+		version, _ := r.Version()
+		sig, err := c.smallAsset(ctx, r, SigAsset)
+		if err != nil {
+			return nil, fmt.Errorf("%w (releases must be signed)", err)
+		}
+		if err := verifySums(key, version, b, sig); err != nil {
+			return nil, fmt.Errorf("release %s: %w", r.Tag, err)
+		}
+	}
+	return ParseSums(b)
+}
+
+func (c *Client) smallAsset(ctx context.Context, r *Release, name string) ([]byte, error) {
+	a, ok := r.Asset(name)
 	if !ok {
-		return nil, fmt.Errorf("release %s has no %s", r.Tag, SumsAsset)
+		return nil, fmt.Errorf("release %s has no %s", r.Tag, name)
 	}
 	resp, err := c.get(ctx, a.URL, "application/octet-stream")
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, err
-	}
-	return ParseSums(b)
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 }
 
 // ParseSums parses `sha256sum` output ("<hex>  <name>" or "<hex> *<name>").

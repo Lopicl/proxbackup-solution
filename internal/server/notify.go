@@ -164,7 +164,7 @@ func (n *Notifier) send(ctx context.Context, ns NotifySettings, m Message) []err
 		}
 	}
 	if ns.SMTPHost != "" && ns.SMTPTo != "" {
-		pass, _ := n.s.sealer.Open(ns.SMTPPassEnc)
+		pass, _ := n.s.sealer.Open(ns.SMTPPassEnc, colSMTPPass, 0)
 		if len(ns.SMTPPassEnc) == 0 {
 			pass = ""
 		}
@@ -333,7 +333,7 @@ func (s *Server) handleSaveNotify(w http.ResponseWriter, r *http.Request) {
 	ns := v.NotifySettings
 	ns.SMTPPassEnc = old.SMTPPassEnc
 	if v.SMTPPassword != "" {
-		ns.SMTPPassEnc = s.sealer.Seal(v.SMTPPassword)
+		ns.SMTPPassEnc = s.sealer.Seal(v.SMTPPassword, colSMTPPass, 0)
 	}
 	if ns.SMTPPort == 0 {
 		ns.SMTPPort = 587

@@ -66,8 +66,8 @@ func TestTargetSecretsStayWithTheirPBS(t *testing.T) {
 	s.cfg.LocalPBS = &LocalPBS{APIAddr: localHost, PublicHost: localHost, AuthID: localID, SecretFile: secretFile}
 
 	stored := &Target{Name: "remote", Host: localHost, Fingerprint: localFP, Datastore: "ds", AdminAuthID: "admin@pbs!t",
-		PBSUser: "proxbackup@pbs", adminSecretEnc: s.sealer.Seal("stored-secret")}
-	if err := s.store.SaveTarget(ctx, stored); err != nil {
+		PBSUser: "proxbackup@pbs"}
+	if err := s.store.SaveTarget(ctx, stored, s.sealer.sealFor("stored-secret", colTargetSecret)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -124,7 +124,7 @@ func TestTargetSecretsStayWithTheirPBS(t *testing.T) {
 		t.Fatalf("save with new host and secret: %d", c)
 	}
 	got, _ := s.store.Target(ctx, stored.ID)
-	if sec, _ := s.sealer.Open(got.adminSecretEnc); sec != "new-secret" || got.Host != evilHost {
+	if sec, _ := s.sealer.Open(got.adminSecretEnc, colTargetSecret, got.ID); sec != "new-secret" || got.Host != evilHost {
 		t.Fatalf("saved target %+v secret %q", got, sec)
 	}
 	delete(form, "admin_secret")

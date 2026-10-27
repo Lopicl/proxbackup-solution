@@ -176,8 +176,8 @@ func (s *Server) enrollClient(ctx context.Context, e *Enrollment, req api.Enroll
 		return nil, nil, fmt.Errorf("PBS provisioning: %w", err)
 	}
 	c := &Client{Name: name, Hostname: req.Hostname, OS: req.OS, CertSerial: serial, TargetID: t.ID,
-		Namespace: ns, TokenID: tokenID, tokenSecretEnc: s.sealer.Seal(secret)}
-	if err := s.store.CreateClient(ctx, c); err != nil {
+		Namespace: ns, TokenID: tokenID}
+	if err := s.store.CreateClient(ctx, c, s.sealer.sealFor(secret, colClientToken)); err != nil {
 		return nil, nil, err
 	}
 	// Group jobs for all clients pick up the new one.
@@ -262,7 +262,7 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 	if err != nil {
 		return nil, err
 	}
-	secret, err := s.sealer.Open(c.tokenSecretEnc)
+	secret, err := s.sealer.Open(c.tokenSecretEnc, colClientToken, c.ID)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt client token: %w", err)
 	}
@@ -348,7 +348,7 @@ func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSp
 	if err != nil {
 		return nil, err
 	}
-	secret, err := s.sealer.Open(c.tokenSecretEnc)
+	secret, err := s.sealer.Open(c.tokenSecretEnc, colClientToken, c.ID)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt client token: %w", err)
 	}
@@ -499,7 +499,7 @@ func (s *Server) afterBackup(ctx context.Context, run *Run) {
 }
 
 func (s *Server) adminClient(t *Target) (*pbs.Client, error) {
-	secret, err := s.sealer.Open(t.adminSecretEnc)
+	secret, err := s.sealer.Open(t.adminSecretEnc, colTargetSecret, t.ID)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt admin token: %w", err)
 	}

@@ -254,6 +254,13 @@ release notes shown in consoles.
 | `proxbackup-server-linux-{amd64,arm64}` | standalone consoles |
 | `proxbackup-agent-windows-{amd64,arm64}.exe` | agents (served by the console) |
 | `SHA256SUMS` | integrity check for every download |
+| `SHA256SUMS.minisig` | its signature, once releases are signed (see below) |
+
+**Signed releases (not on yet):** put a minisign public key (`minisign -G -p
+internal/update/release.pub -s ~/.minisign/proxbackup.key`) in `internal/update/release.pub`.
+Builds carrying it only install signed releases from then on. The workflow then publishes drafts:
+`scripts/release.sh --sign <version>` signs `SHA256SUMS` on your machine and publishes the draft.
+Keep the secret key off GitHub and backed up. Without it, consoles can't install updates anymore.
 
 **Pre-releases:** releases of `alpha` commits are published as GitHub pre-releases, installed only
 by consoles that opt in. Packages built from `alpha` are opted in by default ("Include

@@ -192,6 +192,37 @@ func TestApplyUpdateRejectsBadRequests(t *testing.T) {
 	}
 }
 
+// The service user owns the updates directory: a symlink there must not make
+// the root helper remove or create files elsewhere.
+func TestApplyUpdateIgnoresSymlinks(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dir, elsewhere := t.TempDir(), t.TempDir()
+	victim := filepath.Join(elsewhere, updateRequestFile)
+	os.WriteFile(victim, []byte(`{"version":"9.9.9.9"}`), 0o600)
+	os.Symlink(elsewhere, filepath.Join(dir, "updates"))
+	if err := ApplyUpdate(context.Background(), "0.1.0.1", dir, t.TempDir(), "o/r", log); err == nil {
+		t.Error("symlinked updates directory was used")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("file behind the symlink was removed: %v", err)
+	}
+
+	// A symlinked request is removed as a link, its target is left alone.
+	os.Remove(filepath.Join(dir, "updates"))
+	os.Mkdir(filepath.Join(dir, "updates"), 0o700)
+	os.Symlink(victim, filepath.Join(dir, "updates", updateRequestFile))
+	os.Symlink(filepath.Join(elsewhere, "planted"), filepath.Join(dir, "updates", updateResultFile+".tmp"))
+	if err := ApplyUpdate(context.Background(), "0.1.0.1", dir, t.TempDir(), "o/r", log); err == nil {
+		t.Error("symlinked request was accepted")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Errorf("request symlink target was removed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(elsewhere, "planted")); err == nil {
+		t.Error("result was written through a symlink")
+	}
+}
+
 func TestPushAgentUpdateWakesPoll(t *testing.T) {
 	s := newTestServer(t, "deb")
 	ctx := context.Background()
@@ -199,11 +230,11 @@ func TestPushAgentUpdateWakesPoll(t *testing.T) {
 	us.Agents = false
 	s.store.SetSetting(ctx, "updates", us)
 	tg := &Target{Name: "pbs", Host: "pbs.lan", Datastore: "ds", AdminAuthID: "root@pam!t", PBSUser: "proxbackup@pbs", adminSecretEnc: []byte{}}
-	if err := s.store.SaveTarget(ctx, tg); err != nil {
+	if err := s.store.SaveTarget(ctx, tg, nil); err != nil {
 		t.Fatal(err)
 	}
-	c := &Client{Name: "pc", OS: "windows/amd64", TargetID: tg.ID, tokenSecretEnc: s.sealer.Seal("secret")}
-	if err := s.store.CreateClient(ctx, c); err != nil {
+	c := &Client{Name: "pc", OS: "windows/amd64", TargetID: tg.ID}
+	if err := s.store.CreateClient(ctx, c, s.sealer.sealFor("secret", colClientToken)); err != nil {
 		t.Fatal(err)
 	}
 	c.AgentVersion = "0.0.9.0"

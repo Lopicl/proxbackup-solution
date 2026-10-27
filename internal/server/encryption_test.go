@@ -19,12 +19,12 @@ import (
 func TestClientEncryptionKey(t *testing.T) {
 	s := newTestServer(t, "")
 	ctx := context.Background()
-	tg := &Target{Name: "pbs", Host: "pbs:8007", Datastore: "ds", AdminAuthID: "root@pam!x", PBSUser: "proxbackup@pbs", adminSecretEnc: s.sealer.Seal("x")}
-	if err := s.store.SaveTarget(ctx, tg); err != nil {
+	tg := &Target{Name: "pbs", Host: "pbs:8007", Datastore: "ds", AdminAuthID: "root@pam!x", PBSUser: "proxbackup@pbs"}
+	if err := s.store.SaveTarget(ctx, tg, s.sealer.sealFor("x", colTargetSecret)); err != nil {
 		t.Fatal(err)
 	}
-	c := &Client{Name: "pc-1", TargetID: tg.ID, CertSerial: "01", Namespace: "pcs/pc-1", TokenID: "proxbackup@pbs!pc-1", tokenSecretEnc: s.sealer.Seal("tok")}
-	if err := s.store.CreateClient(ctx, c); err != nil {
+	c := &Client{Name: "pc-1", TargetID: tg.ID, CertSerial: "01", Namespace: "pcs/pc-1", TokenID: "proxbackup@pbs!pc-1"}
+	if err := s.store.CreateClient(ctx, c, s.sealer.sealFor("tok", colClientToken)); err != nil {
 		t.Fatal(err)
 	}
 	reload := func() *Client {

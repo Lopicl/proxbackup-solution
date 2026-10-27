@@ -49,7 +49,7 @@ func (s *Server) clientKey(ctx context.Context, c *Client) (*api.CryptKey, error
 	if len(c.cryptKeyEnc) == 0 {
 		return nil, nil
 	}
-	key, err := s.sealer.Open(c.cryptKeyEnc)
+	key, err := s.sealer.Open(c.cryptKeyEnc, colClientKey, c.ID)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt client encryption key: %w", err)
 	}
@@ -74,7 +74,7 @@ func (s *Server) ensureClientKey(ctx context.Context, c *Client) error {
 		return err
 	}
 	created := now()
-	ok, err := s.store.SetClientKey(ctx, c.ID, s.sealer.Seal(base64.StdEncoding.EncodeToString(key[:])), cc.Fingerprint(), created)
+	ok, err := s.store.SetClientKey(ctx, c.ID, s.sealer.Seal(base64.StdEncoding.EncodeToString(key[:]), colClientKey, c.ID), cc.Fingerprint(), created)
 	if err != nil {
 		return err
 	}

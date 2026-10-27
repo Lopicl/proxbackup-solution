@@ -16,15 +16,14 @@ import (
 func groupTestClients(t *testing.T, s *Server, names ...string) []*Client {
 	t.Helper()
 	ctx := context.Background()
-	tg := &Target{Name: "pbs", Host: "pbs:8007", Datastore: "ds", AdminAuthID: "root@pam!x", PBSUser: "proxbackup@pbs", adminSecretEnc: s.sealer.Seal("x")}
-	if err := s.store.SaveTarget(ctx, tg); err != nil {
+	tg := &Target{Name: "pbs", Host: "pbs:8007", Datastore: "ds", AdminAuthID: "root@pam!x", PBSUser: "proxbackup@pbs"}
+	if err := s.store.SaveTarget(ctx, tg, s.sealer.sealFor("x", colTargetSecret)); err != nil {
 		t.Fatal(err)
 	}
 	var out []*Client
 	for i, n := range names {
-		c := &Client{Name: n, TargetID: tg.ID, CertSerial: string(rune('a' + i)), Namespace: "pcs/" + n, TokenID: "proxbackup@pbs!" + n,
-			tokenSecretEnc: s.sealer.Seal("tok")}
-		if err := s.store.CreateClient(ctx, c); err != nil {
+		c := &Client{Name: n, TargetID: tg.ID, CertSerial: string(rune('a' + i)), Namespace: "pcs/" + n, TokenID: "proxbackup@pbs!" + n}
+		if err := s.store.CreateClient(ctx, c, s.sealer.sealFor("tok", colClientToken)); err != nil {
 			t.Fatal(err)
 		}
 		out = append(out, c)

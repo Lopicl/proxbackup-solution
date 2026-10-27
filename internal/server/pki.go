@@ -233,17 +233,50 @@ func LoadOrCreateSealer(dir string) (*Sealer, error) {
 	return &Sealer{aead: aead}, nil
 }
 
-func (s *Sealer) Seal(plain string) []byte {
-	nonce := make([]byte, s.aead.NonceSize())
-	rand.Read(nonce)
-	return s.aead.Seal(nonce, nonce, []byte(plain), nil)
+// sealedCol is a database column holding sealed values. Each value is bound
+// to its column and row (the AEAD's associated data), so a value copied to
+// another row or column doesn't open.
+type sealedCol struct{ table, column string }
+
+var (
+	colTargetSecret = sealedCol{"targets", "admin_secret_enc"}
+	colClientToken  = sealedCol{"clients", "token_secret_enc"}
+	colClientKey    = sealedCol{"clients", "crypt_key_enc"}
+	colEnrollCmd    = sealedCol{"enrollments", "command_enc"}
+	colSetupToken   = sealedCol{"setup_tokens", "token_enc"}
+	colSMTPPass     = sealedCol{"settings", "notifications.smtp_pass_enc"} // id 0
+)
+
+func (c sealedCol) aad(id int64) []byte {
+	return fmt.Appendf(nil, "proxbackup-sealed-v2\x00%s\x00%s\x00%d", c.table, c.column, id)
 }
 
-func (s *Sealer) Open(sealed []byte) (string, error) {
+// Seal encrypts plain for row id of col.
+func (s *Sealer) Seal(plain string, col sealedCol, id int64) []byte {
+	return s.seal(plain, col.aad(id))
+}
+
+// sealFor seals plain for a row whose id is only known once it is inserted.
+func (s *Sealer) sealFor(plain string, col sealedCol) func(id int64) []byte {
+	return func(id int64) []byte { return s.Seal(plain, col, id) }
+}
+
+// Open decrypts a value Seal made for row id of col.
+func (s *Sealer) Open(sealed []byte, col sealedCol, id int64) (string, error) {
+	return s.open(sealed, col.aad(id))
+}
+
+func (s *Sealer) seal(plain string, aad []byte) []byte {
+	nonce := make([]byte, s.aead.NonceSize())
+	rand.Read(nonce)
+	return s.aead.Seal(nonce, nonce, []byte(plain), aad)
+}
+
+func (s *Sealer) open(sealed, aad []byte) (string, error) {
 	if len(sealed) < s.aead.NonceSize() {
 		return "", errors.New("sealed secret too short")
 	}
 	n := s.aead.NonceSize()
-	plain, err := s.aead.Open(nil, sealed[:n], sealed[n:], nil)
+	plain, err := s.aead.Open(nil, sealed[:n], sealed[n:], aad)
 	return string(plain), err
 }

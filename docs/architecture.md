@@ -391,7 +391,9 @@ read on every run.
   * *.deb:* the unprivileged service only writes `/var/lib/proxbackup/updates/request`. A
     `.path` unit starts the root helper `proxbackup-server-update.service`
     (`proxbackup-server apply-update`), which downloads the package from GitHub itself,
-    verifies it against the release's `SHA256SUMS`, refuses downgrades and runs `dpkg`.
+    verifies it against the release's `SHA256SUMS`, refuses downgrades and runs `dpkg`. The
+    helper accesses `updates/` only through an `os.Root` opened on the data directory, so the
+    service user can't redirect its file operations elsewhere with symlinks.
   * *Standalone binary:* the console downloads and verifies the new binary, swaps it in and
     re-executes itself.
 
@@ -539,9 +541,12 @@ jobs existed). `kind` is `files`/`image` for jobs and also `restore` for runs. J
 `retention`, `progress`, …) are stored as text. A `settings` key/value table holds
 notification and update settings. Run history older than 180 days is pruned daily.
 
-Secrets (`admin_secret_enc`, `token_secret_enc`, `command_enc`, and client encryption keys,
-`crypt_key_enc`) are encrypted at rest with a server master key: `PROXBACKUP_MASTER_KEY` (32 bytes,
-base64), or `master.key` in the data directory, generated with 0600 permissions on first start.
+Secrets (`admin_secret_enc`, `token_secret_enc`, `command_enc`, setup `token_enc`, the SMTP
+password and client encryption keys, `crypt_key_enc`) are encrypted at rest (AES-256-GCM) with a
+server master key: `PROXBACKUP_MASTER_KEY` (32 bytes, base64), or `master.key` in the data
+directory, generated with 0600 permissions on first start. Each value is bound to its table, column
+and row id (the GCM associated data), so a value copied into another row or column doesn't decrypt.
+Values sealed by earlier versions are re-sealed once at startup (`sealed_values_bound` setting).
 
 ## Backup flow
 
@@ -685,7 +690,9 @@ sequenceDiagram
     this setup and checks it, with sync freshness from sync-job awareness (both phase 5). Tape
     via PBS tape backup is the offline alternative.
 * **Admin UI:** session cookie plus a custom request header (`X-PROXBACKUP-Request`) against
-  CSRF. Console users (argon2id, forced change of the generated initial password) with
+  CSRF, also required for sign-in and sign-out (no login CSRF), and JSON bodies must be sent as
+  `application/json`. Responses carry HSTS and a CSP without `'unsafe-inline'`; the HTTP server
+  has header, body-read and idle timeouts. Console users (argon2id, forced change of the generated initial password) with
   granular, client-scoped roles, enforced on every API route, and an audit log; optional OIDC
   in phase 5 (SSO with MFA for the MSP console in phase 6). Password checks are throttled
   (`internal/server/loginlimit.go`): after 5 failures per client address (IPv6 by /64) or per
@@ -696,8 +703,19 @@ sequenceDiagram
   `MemoryMax=1G`, so a sign-in flood can't exhaust the PBS host's memory.
 * **Updates:** the console and its root helper only install release assets whose SHA-256
   matches the release's `SHA256SUMS`, and never downgrade. Agents verify the binary's size,
-  hash and reported version and only fetch it from the console over mTLS. Releases are not
-  signed yet, so the GitHub repository is part of the trust base.
+  hash and reported version and only fetch it from the console over mTLS. Release signing is
+  ready but not switched on yet: once `internal/update/release.pub` holds a minisign public
+  key, builds carrying it accept only releases whose `SHA256SUMS.minisig` checks out with a
+  trusted comment naming the release's version. The secret key stays off GitHub
+  (`scripts/release.sh --sign`), so the repository is then no longer part of the trust base.
+  Until then it is. The release workflow pins its actions to commit SHAs and only its publish
+  job, which runs no build tooling, has `contents: write`.
+* **PBS token scope:** the console's local token is `root@pam!proxbackup-console` with Admin
+  on `/`. Admin on `/access` instead isn't narrower: it includes `Permissions.Modify` on
+  `/access/acl`, so the token can grant itself Admin on `/` (checked on PBS 4.2). A real
+  reduction is a console user `proxbackup@pbs` with `DatastoreAdmin` on `/datastore`, signing
+  in with a ticket: PBS lets a user manage its own tokens and their ACLs, and caps their
+  privileges at the user's.
 
 ## Repository layout
 

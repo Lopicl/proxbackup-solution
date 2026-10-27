@@ -81,7 +81,7 @@ func (s *Server) regenerateToken(ctx context.Context, c *Client) error {
 		return fmt.Errorf("PBS token: %w", err)
 	}
 	secure := slices.Contains(c.Features, api.FeatureDataDirACL)
-	if err := s.store.SetRotatedToken(ctx, c.ID, c.TokenID, s.sealer.Seal(secret), secure); err != nil {
+	if err := s.store.SetRotatedToken(ctx, c.ID, c.TokenID, s.sealer.Seal(secret, colClientToken, c.ID), secure); err != nil {
 		return err
 	}
 	s.log.Info("client PBS token rotated", "client", c.Name, "id", c.ID, "token", c.TokenID)

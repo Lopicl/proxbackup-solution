@@ -1,5 +1,8 @@
 # Builds and publishes a GitHub release when a v* tag is pushed (make release).
 # The release assets are what consoles download for automatic updates.
+#
+# Actions are pinned to commit SHAs (tags can be moved). Only the publish job,
+# which runs no build tooling, can write to the repository.
 name: Release
 
 on:
@@ -7,18 +10,18 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0  # release.sh checks whether the tag is on alpha (pre-release)
+          persist-credentials: false
 
       - name: Tag matches VERSION
         run: |
@@ -30,7 +33,7 @@ jobs:
 
       # go-version-file honors go.mod's toolchain line, so releases are built
       # with the patched Go release pinned there, not the go directive's minimum.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
 
@@ -48,7 +51,7 @@ jobs:
           "$(go env GOPATH)/bin/govulncheck" ./...
           GOOS=windows "$(go env GOPATH)/bin/govulncheck" ./...
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -60,6 +63,32 @@ jobs:
       - name: Build release assets
         run: make dist BUMP=0  # release.sh already bumped VERSION for this release
 
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: bin/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0  # release.sh checks whether the tag is on alpha (pre-release)
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: bin/dist/
+
+      # With a release signing key configured (internal/update/release.pub),
+      # this creates a draft: scripts/release.sh --sign signs SHA256SUMS with
+      # the key, which never leaves the maintainer's machine, and publishes it.
       - name: Publish
         run: scripts/release.sh --publish
         env:

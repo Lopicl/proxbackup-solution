@@ -108,12 +108,12 @@ func (s *Server) syncLocalTargets(ctx context.Context) error {
 		if t.AdminAuthID != l.AuthID {
 			continue
 		}
-		old, _ := s.sealer.Open(t.adminSecretEnc)
+		old, _ := s.sealer.Open(t.adminSecretEnc, colTargetSecret, t.ID)
 		if t.Fingerprint == fp && old == secret && t.Host == l.PublicHost {
 			continue
 		}
-		t.Fingerprint, t.Host, t.adminSecretEnc = fp, l.PublicHost, s.sealer.Seal(secret)
-		if err := s.store.SaveTarget(ctx, t); err != nil {
+		t.Fingerprint, t.Host = fp, l.PublicHost
+		if err := s.store.SaveTarget(ctx, t, s.sealer.sealFor(secret, colTargetSecret)); err != nil {
 			return err
 		}
 		s.log.Info("updated local PBS target", "target", t.Name, "fingerprint", fp)
@@ -139,8 +139,8 @@ func (s *Server) syncLocalTargets(ctx context.Context) error {
 			continue
 		}
 		t := &Target{Name: ds.Store, Host: l.PublicHost, Fingerprint: fp, Datastore: ds.Store, RootNS: "pcs",
-			AdminAuthID: l.AuthID, PBSUser: "proxbackup@pbs", adminSecretEnc: s.sealer.Seal(secret)}
-		if err := s.store.SaveTarget(ctx, t); err != nil {
+			AdminAuthID: l.AuthID, PBSUser: "proxbackup@pbs"}
+		if err := s.store.SaveTarget(ctx, t, s.sealer.sealFor(secret, colTargetSecret)); err != nil {
 			return err
 		}
 		s.log.Info("registered local PBS datastore", "datastore", ds.Store)

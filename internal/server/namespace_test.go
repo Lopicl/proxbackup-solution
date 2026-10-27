@@ -27,11 +27,11 @@ func TestMoveClientNamespace(t *testing.T) {
 	ctx := context.Background()
 	tg := &Target{Name: "pbs", Host: "pbs", Datastore: "ds", RootNS: "pcs", AdminAuthID: "root@pam!x", PBSUser: "proxbackup@pbs",
 		adminSecretEnc: []byte("x")}
-	if err := st.SaveTarget(ctx, tg); err != nil {
+	if err := st.SaveTarget(ctx, tg, nil); err != nil {
 		t.Fatal(err)
 	}
 	c := &Client{Name: "pc1", TargetID: tg.ID, Namespace: "pcs/pc1", TokenID: "proxbackup@pbs!pc1"}
-	if err := st.CreateClient(ctx, c); err != nil {
+	if err := st.CreateClient(ctx, c, nil); err != nil {
 		t.Fatal(err)
 	}
 	load := func() *Client {

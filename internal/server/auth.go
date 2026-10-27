@@ -111,8 +111,7 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 			httpError(w, http.StatusUnauthorized, errors.New("session expired"))
 			return
 		}
-		if r.Method != http.MethodGet && r.Header.Get(csrfHeader) == "" {
-			httpError(w, http.StatusForbidden, fmt.Errorf("missing %s header", csrfHeader))
+		if !csrfOK(w, r) {
 			return
 		}
 		if u.MustChange && r.URL.Path != "/api/me" && r.URL.Path != "/api/password" {
@@ -126,6 +125,24 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r.WithContext(ctx))
 		if ai.pattern != "" && (r.Method != http.MethodGet || ai.force) {
 			s.recordAudit(r, u, ai, rec.status)
+		}
+	})
+}
+
+// csrfOK rejects state-changing requests without the custom header, which a
+// cross-site page can't set.
+func csrfOK(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Header.Get(csrfHeader) == "" {
+		httpError(w, http.StatusForbidden, fmt.Errorf("missing %s header", csrfHeader))
+		return false
+	}
+	return true
+}
+
+func requireCSRFHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if csrfOK(w, r) {
+			next.ServeHTTP(w, r)
 		}
 	})
 }

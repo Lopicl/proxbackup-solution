@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -81,6 +82,11 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if n, err := store.BindSealedValues(context.Background(), sealer); err != nil {
+		return nil, fmt.Errorf("re-seal secrets: %w", err)
+	} else if n > 0 {
+		log.Info("re-sealed stored secrets, bound to their rows", "count", n)
+	}
 	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{},
 		rotateFailed: map[int64]time.Time{}}
 	s.notify = &Notifier{s: s}
@@ -130,7 +136,8 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	errc := make(chan error, len(servers))
 	for _, hs := range servers {
-		hs.TLSConfig, hs.ReadHeaderTimeout, hs.IdleTimeout = tlsConf, 10*time.Second, 2*time.Minute
+		// No WriteTimeout: agent long polls and binary downloads run for minutes.
+		hs.TLSConfig, hs.ReadHeaderTimeout, hs.ReadTimeout, hs.IdleTimeout = tlsConf, 10*time.Second, time.Minute, 2*time.Minute
 		go func() { errc <- hs.ListenAndServeTLS("", "") }()
 	}
 	s.log.Info("proxbackup-server listening", "ui", "https://"+displayAddr(s.cfg.UIAddr), "agents", cmp.Or(s.cfg.AgentAddr, s.cfg.UIAddr), "public_url", s.cfg.PublicURL)
@@ -178,8 +185,10 @@ func displayAddr(a string) string {
 
 func (s *Server) uiRoutes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/login", s.handleLogin)
-	mux.HandleFunc("POST /api/logout", s.handleLogout)
+	// No session yet, so requireUser's CSRF check doesn't cover these:
+	// without it a cross-site form could sign a victim into another account.
+	mux.Handle("POST /api/login", requireCSRFHeader(http.HandlerFunc(s.handleLogin)))
+	mux.Handle("POST /api/logout", requireCSRFHeader(http.HandlerFunc(s.handleLogout)))
 
 	// Every route states the permission it needs (see users.go). Client-level
 	// handlers also check the client they act on, list handlers filter.
@@ -269,7 +278,9 @@ func securityHeaders(h http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		// React's style props go through the CSSOM, which needs no 'unsafe-inline'.
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		h.ServeHTTP(w, r)
 	})
 }
@@ -344,6 +355,13 @@ func httpError(w http.ResponseWriter, code int, err error) {
 }
 
 func decodeJSON(r *http.Request, v any) error {
+	// Cross-site forms can only send text/plain, urlencoded or multipart
+	// bodies. The CSRF header is what blocks them; this is a second check.
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+			return fmt.Errorf("invalid request body: Content-Type must be application/json, not %q", ct)
+		}
+	}
 	dec := json.NewDecoder(io.LimitReader(r.Body, 4<<20))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {

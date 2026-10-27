@@ -73,7 +73,7 @@ func rotationTestClient(t *testing.T, s *Server, f http.Handler) *Client {
 	sum := sha256.Sum256(srv.Certificate().Raw)
 	tg, _ := s.store.Target(ctx, c.TargetID)
 	tg.Host, tg.Fingerprint = strings.TrimPrefix(srv.URL, "https://"), pbs.FormatFingerprint(sum)
-	if err := s.store.SaveTarget(ctx, tg); err != nil {
+	if err := s.store.SaveTarget(ctx, tg, nil); err != nil {
 		t.Fatal(err)
 	}
 	return c

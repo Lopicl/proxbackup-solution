@@ -71,7 +71,7 @@ func TestRevokeAndUnrevoke(t *testing.T) {
 		t.Fatalf("revoked list = %v, %v", list, err)
 	}
 
-	if err := s.store.UnrevokeClient(ctx, rc, "pc-1", "proxbackup@pbs!pc-1", s.sealer.Seal("new")); err != nil {
+	if err := s.store.UnrevokeClient(ctx, rc, "pc-1", "proxbackup@pbs!pc-1", s.sealer.Seal("new", colClientToken, rc.ID)); err != nil {
 		t.Fatal(err)
 	}
 	uc, err := s.store.ClientBySerial(ctx, c.CertSerial)

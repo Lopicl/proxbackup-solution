@@ -140,8 +140,12 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	nsChanged := t.ID != 0 && t.RootNS != req.RootNS
 	t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser =
 		req.Name, req.Host, fp, req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser
+	var sealSecret func(id int64) []byte
 	if req.AdminSecret != "" {
-		t.adminSecretEnc = s.sealer.Seal(req.AdminSecret)
+		sealSecret = s.sealer.sealFor(req.AdminSecret, colTargetSecret)
+		if t.ID != 0 {
+			t.adminSecretEnc = sealSecret(t.ID) // adminClient below uses it
+		}
 	}
 	var pc *pbs.Client
 	if nsChanged {
@@ -154,7 +158,7 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.store.SaveTarget(ctx, t); err != nil {
+	if err := s.store.SaveTarget(ctx, t, sealSecret); err != nil {
 		httpError(w, 500, err)
 		return
 	}
@@ -209,7 +213,7 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 	// Stored and local secrets are only sent to the PBS they belong to.
 	if req.AdminSecret == "" && req.ID > 0 {
 		if t, err := s.store.Target(ctx, req.ID); err == nil && t.sameEndpoint(req.Host, req.Fingerprint, req.AdminAuthID) {
-			req.AdminSecret, _ = s.sealer.Open(t.adminSecretEnc)
+			req.AdminSecret, _ = s.sealer.Open(t.adminSecretEnc, colTargetSecret, t.ID)
 		}
 	}
 	if req.AdminSecret == "" {
@@ -381,7 +385,7 @@ func (s *Server) handleUnrevokeClient(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := s.store.UnrevokeClient(ctx, c, name, tokenID, s.sealer.Seal(secret)); err != nil {
+	if err := s.store.UnrevokeClient(ctx, c, name, tokenID, s.sealer.Seal(secret, colClientToken, c.ID)); err != nil {
 		pc.DeleteToken(ctx, t.PBSUser, name)
 		httpError(w, statusFor(err), err)
 		return
@@ -522,7 +526,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint()})
 	enc := base64.RawURLEncoding.EncodeToString(tok)
 	command := `proxbackup-agent.exe enroll ` + enc
-	if err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, time.Duration(req.TTLHours)*time.Hour, s.sealer.Seal(command)); err != nil {
+	if err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, time.Duration(req.TTLHours)*time.Hour, s.sealer.sealFor(command, colEnrollCmd)); err != nil {
 		httpError(w, 500, err)
 		return
 	}
@@ -541,7 +545,7 @@ func (s *Server) handleEnrollmentCommand(w http.ResponseWriter, r *http.Request)
 		httpError(w, statusFor(err), errors.New("enrollment not pending (used, expired or created before this was stored)"))
 		return
 	}
-	command, err := s.sealer.Open(enc)
+	command, err := s.sealer.Open(enc, colEnrollCmd, id)
 	if err != nil {
 		httpError(w, 500, err)
 		return
@@ -610,7 +614,7 @@ func (s *Server) handleCreateSetupToken(w http.ResponseWriter, r *http.Request) 
 	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint(),
 		Multi: true, Expires: expires, Host: s.agentFacingIP(ctx)})
 	enc := base64.RawURLEncoding.EncodeToString(tok)
-	id, err := s.store.CreateSetupToken(ctx, hashToken(code), req.TargetID, expires, s.sealer.Seal(enc))
+	id, err := s.store.CreateSetupToken(ctx, hashToken(code), req.TargetID, expires, s.sealer.sealFor(enc, colSetupToken))
 	if err != nil {
 		httpError(w, 500, err)
 		return
@@ -669,7 +673,7 @@ func (s *Server) setupTokenString(r *http.Request) (string, error) {
 		}
 		return "", err
 	}
-	return s.sealer.Open(sealed)
+	return s.sealer.Open(sealed, colSetupToken, id)
 }
 
 // handleSetupDownload serves the console's Windows agent with the setup token
