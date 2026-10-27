@@ -31,6 +31,8 @@ import (
 const (
 	catalogIdle    = 10 * time.Minute
 	catalogMaxOpen = 8
+	// catalogMaxSize caps the temp file of one catalog (about 15 million files).
+	catalogMaxSize = 512 << 20
 )
 
 var errNoCatalog = errors.New("this snapshot has no file catalog or .mpxar archive (it was taken by an older agent, or building the catalog failed)")
@@ -72,16 +74,9 @@ func (cc *catalogCache) get(ctx context.Context, key string, load func(context.C
 			// Not tied to the request: a reload of the page shouldn't abort a download others wait for.
 			lctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			f, err := load(lctx)
-			if err == nil {
-				var st os.FileInfo
-				if st, err = f.Stat(); err == nil {
-					e.r, err = pbs.NewCatalogReader(f, st.Size())
-				}
-				e.f = f
-			}
+			f, r, err := loadCatalog(lctx, load)
 			cc.mu.Lock()
-			e.err = err
+			e.f, e.r, e.err = f, r, err
 			if err != nil {
 				e.close()
 				if cc.entries[key] == e {
@@ -100,6 +95,25 @@ func (cc *catalogCache) get(ctx context.Context, key string, load func(context.C
 		return nil, ctx.Err()
 	}
 	return e.r, e.err
+}
+
+// loadCatalog runs load and opens the catalog it wrote. The catalog is data
+// the PC wrote, parsed outside any request, so a panic becomes an error
+// rather than ending the process.
+func loadCatalog(ctx context.Context, load func(context.Context) (*os.File, error)) (f *os.File, r *pbs.CatalogReader, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("reading the catalog failed: %v", p)
+		}
+	}()
+	if f, err = load(ctx); err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err == nil {
+		r, err = pbs.NewCatalogReader(f, st.Size())
+	}
+	return f, r, err
 }
 
 // evictLocked drops idle catalogs and, above catalogMaxOpen, the least recently used.
@@ -263,19 +277,40 @@ func (s *Server) downloadCatalog(ctx context.Context, t *Target, c *Client, ref 
 	if err != nil {
 		return nil, err
 	}
+	done := false
+	defer func() { // also on a panic
+		if !done {
+			f.Close()
+			os.Remove(f.Name())
+		}
+	}()
+	w := &limitedWriter{w: f, n: catalogMaxSize}
 	if i >= 0 {
-		err = copyArchive(ctx, rs, f, meta[0])
+		err = copyArchive(ctx, rs, w, meta[0])
 	} else {
-		err = buildCatalog(f, meta, func(fi *pbs.FileInfo, fn func(io.Reader) error) error {
+		err = buildCatalog(w, meta, func(fi *pbs.FileInfo, fn func(io.Reader) error) error {
 			return withArchive(ctx, rs, fi, fn)
 		})
 	}
 	if err != nil {
-		f.Close()
-		os.Remove(f.Name())
 		return nil, fmt.Errorf("download catalog: %w", err)
 	}
+	done = true
 	return f, nil
+}
+
+// limitedWriter fails writes past n bytes.
+type limitedWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > l.n {
+		return 0, fmt.Errorf("catalog larger than %d MiB", catalogMaxSize>>20)
+	}
+	l.n -= int64(len(p))
+	return l.w.Write(p)
 }
 
 // withArchive calls fn with the decoded contents of the dynamic archive fi.
@@ -303,6 +338,7 @@ func buildCatalog(w io.Writer, archives []*pbs.FileInfo, open func(*pbs.FileInfo
 	if err != nil {
 		return err
 	}
+	cw.Limit = pbs.MaxCatalogTable // a larger directory couldn't be listed anyway
 	for _, fi := range archives {
 		cw.StartDirectory(fi.Filename)
 		if err := open(fi, func(r io.Reader) error { return catalogMetadata(cw, r) }); err != nil {
@@ -320,12 +356,16 @@ func buildCatalog(w io.Writer, archives []*pbs.FileInfo, open func(*pbs.FileInfo
 // next entry is outside it.
 func catalogMetadata(cw *pbs.CatalogWriter, r io.Reader) error {
 	d := pxar.NewDecoder(r)
-	var open []string // open directories, relative paths
+	// The open directories, as path lengths: each is a prefix of cur, the
+	// innermost one's path. Not one string each, which would grow
+	// quadratically with the nesting depth.
+	var cur string
+	var open []int
 	parent := func() string {
 		if len(open) == 0 {
 			return ""
 		}
-		return open[len(open)-1]
+		return cur[:open[len(open)-1]]
 	}
 	for {
 		e, err := d.Next()
@@ -333,6 +373,9 @@ func catalogMetadata(cw *pbs.CatalogWriter, r io.Reader) error {
 			break
 		}
 		if err != nil {
+			return err
+		}
+		if err := cw.Err(); err != nil {
 			return err
 		}
 		if e.Path == "" {
@@ -350,7 +393,7 @@ func catalogMetadata(cw *pbs.CatalogWriter, r io.Reader) error {
 		switch e.Kind {
 		case pxar.KindDir:
 			cw.StartDirectory(name)
-			open = append(open, e.Path)
+			cur, open = e.Path, append(open, len(e.Path))
 		case pxar.KindFile:
 			cw.AddFile(name, e.Size, e.Meta.MtimeSecs)
 		case pxar.KindSymlink:

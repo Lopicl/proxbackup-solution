@@ -54,7 +54,9 @@ func (r *ReaderSession) Manifest(ctx context.Context) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := DecodeBlob(raw, nil)
+	// A manifest is a few KiB; the chunk limit keeps a crafted one from
+	// expanding to the 128 MiB a blob may have.
+	data, err := decodeChunk(raw, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +104,7 @@ func (r *ReaderSession) Chunk(ctx context.Context, digest [32]byte) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	data, err := DecodeBlob(raw, r.crypt)
+	data, err := decodeChunk(raw, r.crypt)
 	if err != nil {
 		return nil, err
 	}

@@ -39,11 +39,17 @@ const (
 	blobHeaderSize          = 12      // magic(8) + crc(4)
 	encryptedBlobHeaderSize = 12 + 32 // + iv(16) + tag(16)
 	maxBlobSize             = 128 << 20
+	// MaxChunkSize is the largest chunk PBS accepts and the dynamic chunker
+	// makes (4 times its average).
+	MaxChunkSize = 16 << 20
 )
 
+// The decoders cap the decoded size while decoding: PBS can't check what an
+// encrypted chunk contains, so a client could store a tiny zstd bomb.
 var (
-	zstdEnc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
-	zstdDec, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0))
+	zstdEnc, _      = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1))
+	zstdBlobDec, _  = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0), zstd.WithDecoderMaxMemory(maxBlobSize))
+	zstdChunkDec, _ = zstd.NewReader(nil, zstd.WithDecoderConcurrency(0), zstd.WithDecoderMaxMemory(MaxChunkSize))
 )
 
 // CryptConfig holds the AES-256-GCM key used for client-side encryption.
@@ -133,6 +139,15 @@ func EncodeBlob(data []byte, crypt *CryptConfig, compress bool) ([]byte, error) 
 
 // DecodeBlob verifies the CRC and returns the decoded (decrypted, decompressed) data.
 func DecodeBlob(raw []byte, crypt *CryptConfig) ([]byte, error) {
+	return decodeBlob(raw, crypt, zstdBlobDec)
+}
+
+// decodeChunk is DecodeBlob for chunks, which decode to at most MaxChunkSize.
+func decodeChunk(raw []byte, crypt *CryptConfig) ([]byte, error) {
+	return decodeBlob(raw, crypt, zstdChunkDec)
+}
+
+func decodeBlob(raw []byte, crypt *CryptConfig, dec *zstd.Decoder) ([]byte, error) {
 	if len(raw) < blobHeaderSize {
 		return nil, errors.New("pbs: blob too short")
 	}
@@ -152,7 +167,7 @@ func DecodeBlob(raw []byte, crypt *CryptConfig) ([]byte, error) {
 	case MagicUncompressed:
 		return bytes.Clone(raw[hdr:]), nil
 	case MagicCompressed:
-		return zstdDec.DecodeAll(raw[hdr:], nil)
+		return decompress(dec, raw[hdr:])
 	}
 	if crypt == nil {
 		return nil, errDecryptNeedsConfig
@@ -164,9 +179,17 @@ func DecodeBlob(raw []byte, crypt *CryptConfig) ([]byte, error) {
 		return nil, fmt.Errorf("pbs: blob decryption failed: %w", err)
 	}
 	if magic == MagicEncrCompr {
-		return zstdDec.DecodeAll(plain, nil)
+		return decompress(dec, plain)
 	}
 	return plain, nil
+}
+
+func decompress(dec *zstd.Decoder, b []byte) ([]byte, error) {
+	out, err := dec.DecodeAll(b, nil)
+	if errors.Is(err, zstd.ErrDecoderSizeExceeded) || errors.Is(err, zstd.ErrWindowSizeExceeded) {
+		return nil, errors.New("pbs: blob decompresses to more than its size limit")
+	}
+	return out, err
 }
 
 // BlobIsEncrypted reports whether raw has an encrypted blob magic.

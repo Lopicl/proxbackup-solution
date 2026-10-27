@@ -64,6 +64,10 @@ const (
 	maxFilenameLen             = 4 * 1024
 	maxXattrLen                = 64*1024 + 255 + 1
 	maxSymlinkLen              = 4 * 1024
+	// Decoder limits on untrusted archives, well above what a file system
+	// holds (Windows paths are at most 32767 UTF-16 units).
+	maxPathLen = 128 * 1024
+	maxDepth   = 16 * 1024
 )
 
 // Mode bits (Linux st_mode).

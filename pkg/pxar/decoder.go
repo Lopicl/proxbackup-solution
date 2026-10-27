@@ -46,9 +46,10 @@ type Entry struct {
 type Decoder struct {
 	r       *bufio.Reader
 	pos     uint64
-	dirs    []string // path stack; len 0 before root
-	pending []byte   // FILENAME seen, waiting for its ENTRY
-	payload int64    // unread payload bytes of the current file
+	dir     string // path of the innermost open directory
+	dirs    []int  // path lengths of the open directories (prefixes of dir); len 0 before root
+	pending []byte // FILENAME seen, waiting for its ENTRY
+	payload int64  // unread payload bytes of the current file
 	started bool
 	done    bool
 	version uint64 // 1, or 2 after a FORMAT_VERSION item
@@ -216,7 +217,11 @@ func (d *Decoder) Next() (*Entry, error) {
 			if len(b) < 9 {
 				return nil, errors.New("pxar: short hardlink")
 			}
-			e := &Entry{Path: d.childPath(), Kind: KindHardlink, Target: string(bytes.TrimRight(b[8:], "\x00"))}
+			p, err := d.childPath()
+			if err != nil {
+				return nil, err
+			}
+			e := &Entry{Path: p, Kind: KindHardlink, Target: string(bytes.TrimRight(b[8:], "\x00"))}
 			d.pending = nil
 			return e, nil
 		case TypeGoodbye:
@@ -274,11 +279,15 @@ func (d *Decoder) seekPayload(e *Entry) error {
 	return nil
 }
 
-func (d *Decoder) childPath() string {
+func (d *Decoder) childPath() (string, error) {
 	if len(d.dirs) == 0 {
-		return ""
+		return "", nil
 	}
-	return path.Join(d.dirs[len(d.dirs)-1], string(d.pending))
+	parent := d.dir[:d.dirs[len(d.dirs)-1]]
+	if len(parent)+1+len(d.pending) > maxPathLen {
+		return "", fmt.Errorf("pxar: path longer than %d bytes", maxPathLen)
+	}
+	return path.Join(parent, string(d.pending)), nil
 }
 
 func (d *Decoder) entry() (*Entry, error) {
@@ -298,7 +307,10 @@ func (d *Decoder) entry() (*Entry, error) {
 	if d.started && d.pending == nil {
 		return nil, errors.New("pxar: entry without filename")
 	}
-	e.Path = d.childPath()
+	var err error
+	if e.Path, err = d.childPath(); err != nil {
+		return nil, err
+	}
 	d.pending = nil
 	d.started = true
 
@@ -368,7 +380,11 @@ func (d *Decoder) entry() (*Entry, error) {
 			switch e.Meta.Mode & ModeIFMT {
 			case ModeIFDIR:
 				e.Kind = KindDir
-				d.dirs = append(d.dirs, e.Path)
+				if len(d.dirs) >= maxDepth {
+					return nil, fmt.Errorf("pxar: directories nested more than %d deep", maxDepth)
+				}
+				d.dir = e.Path
+				d.dirs = append(d.dirs, len(e.Path))
 			case ModeIFIFO:
 				e.Kind = KindFifo
 			case ModeIFSOCK:

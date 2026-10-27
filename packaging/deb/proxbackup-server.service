@@ -27,6 +27,9 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# Snapshot catalogs are cached in temp files: keep them out of a tmpfs /tmp,
+# whose pages would count against MemoryMax.
+Environment=TMPDIR=/var/tmp
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

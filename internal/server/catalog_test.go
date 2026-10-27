@@ -72,6 +72,12 @@ func TestCatalogCache(t *testing.T) {
 		t.Fatalf("retry: %v", err)
 	}
 
+	// A panic while loading fails the request instead of the process.
+	boom := func(context.Context) (*os.File, error) { panic("crafted catalog") }
+	if _, err := cc.get(context.Background(), "p", boom); err == nil || !strings.Contains(err.Error(), "crafted catalog") {
+		t.Fatalf("panic: err = %v", err)
+	}
+
 	// The least recently used catalog goes once too many are open.
 	for i := range catalogMaxOpen + 2 {
 		if _, err := cc.get(context.Background(), string(rune('c'+i)), load); err != nil {

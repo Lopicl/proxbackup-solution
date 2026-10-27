@@ -37,7 +37,19 @@ type CatalogWriter struct {
 	pos   uint64
 	stack []*catalogDir
 	err   error
+	// Limit, when set, caps the bytes of entries buffered for the open
+	// directories (each directory's table is held until it is closed).
+	Limit   int
+	pending int
+	scratch []byte
 }
+
+// Limits on what CatalogReader reads from one directory table. Catalogs come
+// from the PCs, so their sizes and counts aren't trusted.
+const (
+	MaxCatalogTable   = 64 << 20 // bytes
+	maxCatalogEntries = 1 << 20
+)
 
 type catalogDir struct {
 	name    string
@@ -64,13 +76,22 @@ func (c *CatalogWriter) write(p []byte) {
 
 func (c *CatalogWriter) cur() *catalogDir { return c.stack[len(c.stack)-1] }
 
-func (c *CatalogWriter) addEntry(typ byte, name string) *catalogDir {
+// entry starts encoding an entry; add appends it to the current directory.
+func (c *CatalogWriter) entry(typ byte, name string) []byte {
+	b := append(c.scratch[:0], typ)
+	b = binary.AppendUvarint(b, uint64(len(name)))
+	return append(b, name...)
+}
+
+func (c *CatalogWriter) add(b []byte) {
 	d := c.cur()
-	d.entries = append(d.entries, typ)
-	d.entries = binary.AppendUvarint(d.entries, uint64(len(name)))
-	d.entries = append(d.entries, name...)
+	d.entries = append(d.entries, b...)
 	d.count++
-	return d
+	c.scratch = b
+	c.pending += len(b)
+	if c.Limit > 0 && c.pending > c.Limit && c.err == nil {
+		c.err = errors.New("pbs: catalog: directories too large")
+	}
 }
 
 // StartDirectory opens a subdirectory of the current directory. Entries must be
@@ -87,21 +108,19 @@ func (c *CatalogWriter) EndDirectory() error {
 	d := c.cur()
 	c.stack = c.stack[:len(c.stack)-1]
 	start := c.writeTable(d)
-	p := c.addEntry(CatalogDir, d.name)
 	// Distance from the parent's table (written later, at a higher offset) back
 	// to this one. The parent's offset is unknown yet, so store the absolute
 	// position for now and convert it in writeTable.
-	p.entries = binary.AppendUvarint(p.entries, start)
+	c.add(binary.AppendUvarint(c.entry(CatalogDir, d.name), start))
 	return c.err
 }
 
 func (c *CatalogWriter) AddFile(name string, size uint64, mtime int64) {
-	d := c.addEntry(CatalogFile, name)
-	d.entries = binary.AppendUvarint(d.entries, size)
-	d.entries = appendCatalogI64(d.entries, mtime)
+	b := binary.AppendUvarint(c.entry(CatalogFile, name), size)
+	c.add(appendCatalogI64(b, mtime))
 }
 
-func (c *CatalogWriter) AddSymlink(name string) { c.addEntry(CatalogSymlink, name) }
+func (c *CatalogWriter) AddSymlink(name string) { c.add(c.entry(CatalogSymlink, name)) }
 
 // Finish writes the root table and the trailing root offset.
 func (c *CatalogWriter) Finish() error {
@@ -141,6 +160,7 @@ func (c *CatalogWriter) writeTable(d *catalogDir) uint64 {
 	}
 	c.write(binary.AppendUvarint(nil, uint64(len(table))))
 	c.write(table)
+	c.pending -= len(d.entries)
 	return start
 }
 
@@ -201,6 +221,7 @@ type CatalogEntry struct {
 // CatalogReader reads a catalog from random-access storage.
 type CatalogReader struct {
 	r    io.ReaderAt
+	size uint64
 	root uint64
 }
 
@@ -218,31 +239,44 @@ func NewCatalogReader(r io.ReaderAt, size int64) (*CatalogReader, error) {
 	if _, err := r.ReadAt(b[:], size-8); err != nil {
 		return nil, err
 	}
-	return &CatalogReader{r: r, root: binary.LittleEndian.Uint64(b[:])}, nil
+	return &CatalogReader{r: r, size: uint64(size), root: binary.LittleEndian.Uint64(b[:])}, nil
 }
 
 func (c *CatalogReader) readTable(start uint64) ([]CatalogEntry, error) {
+	bad := fmt.Errorf("pbs: catalog: corrupt table at %d", start)
+	if start >= c.size {
+		return nil, bad
+	}
 	var hdr [binary.MaxVarintLen64]byte
 	n, _ := c.r.ReadAt(hdr[:], int64(start))
 	tlen, k := binary.Uvarint(hdr[:n])
-	if k <= 0 || tlen > 1<<30 {
-		return nil, fmt.Errorf("pbs: catalog: bad table at %d", start)
+	if k <= 0 || tlen > c.size-start-uint64(k) {
+		return nil, bad
+	}
+	if tlen > MaxCatalogTable {
+		return nil, fmt.Errorf("pbs: catalog: directory too large to list (%d bytes)", tlen)
 	}
 	b := make([]byte, tlen)
 	if _, err := c.r.ReadAt(b, int64(start)+int64(k)); err != nil {
 		return nil, err
 	}
 	count, k := binary.Uvarint(b)
+	if k <= 0 {
+		return nil, bad
+	}
 	b = b[k:]
-	bad := fmt.Errorf("pbs: catalog: corrupt table at %d", start)
-	entries := make([]CatalogEntry, 0, count)
+	if count > maxCatalogEntries {
+		return nil, fmt.Errorf("pbs: catalog: directory too large to list (%d entries)", count)
+	}
+	// Every entry takes at least 2 bytes.
+	entries := make([]CatalogEntry, 0, min(count, uint64(len(b)/2)))
 	for i := uint64(0); i < count; i++ {
 		if len(b) < 2 {
 			return nil, bad
 		}
 		e := CatalogEntry{Type: b[0]}
 		nlen, k := binary.Uvarint(b[1:])
-		if k <= 0 || uint64(len(b)) < 1+uint64(k)+nlen {
+		if k <= 0 || nlen > uint64(len(b)) || uint64(len(b)) < 1+uint64(k)+nlen {
 			return nil, bad
 		}
 		e.Name = string(b[1+k : 1+k+int(nlen)])
@@ -250,7 +284,7 @@ func (c *CatalogReader) readTable(start uint64) ([]CatalogEntry, error) {
 		switch e.Type {
 		case CatalogDir:
 			off, k := binary.Uvarint(b)
-			if k <= 0 || off > start {
+			if k <= 0 || off == 0 || off > start {
 				return nil, bad
 			}
 			e.table = start - off

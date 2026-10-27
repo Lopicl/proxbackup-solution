@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -255,5 +256,49 @@ func TestShortAndGrowingFiles(t *testing.T) {
 	b, _ = io.ReadAll(dec.Contents())
 	if e.Path != "short" || !bytes.Equal(b, []byte("abc\x00\x00\x00\x00\x00\x00\x00")) {
 		t.Fatalf("short contents %q", b)
+	}
+}
+
+// Archives come from the PCs: nesting and path length are bounded on decode.
+func TestDecoderLimits(t *testing.T) {
+	nested := func(depth int, name string) []byte {
+		var buf bytes.Buffer
+		enc, err := NewEncoder(&buf, dirMeta())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range depth {
+			if err := enc.CreateDir([]byte(name), dirMeta()); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for range depth {
+			enc.FinishDir()
+		}
+		if err := enc.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buf.Bytes()
+	}
+	decode := func(data []byte) (int, error) {
+		dec := NewDecoder(bytes.NewReader(data))
+		for n := 0; ; n++ {
+			if _, err := dec.Next(); err != nil {
+				if err == io.EOF {
+					err = nil
+				}
+				return n, err
+			}
+		}
+	}
+	if n, err := decode(nested(maxDepth-1, "d")); err != nil || n != maxDepth {
+		t.Fatalf("depth %d: %d entries, %v", maxDepth-1, n, err)
+	}
+	if _, err := decode(nested(maxDepth, "d")); err == nil || !strings.Contains(err.Error(), "nested") {
+		t.Fatalf("depth %d: err = %v", maxDepth, err)
+	}
+	long := strings.Repeat("n", maxFilenameLen-1)
+	if _, err := decode(nested(maxPathLen/maxFilenameLen+1, long)); err == nil || !strings.Contains(err.Error(), "longer than") {
+		t.Fatalf("long path: err = %v", err)
 	}
 }

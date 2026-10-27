@@ -7,10 +7,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"hash/crc32"
 	"io"
 	"math/rand/v2"
 	"sync/atomic"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestMagicsMatchUpstreamDerivation(t *testing.T) {
@@ -269,4 +272,55 @@ func TestZeroChunkDigestCache(t *testing.T) {
 			t.Errorf("cached %d sizes, want 2", len(b.zeroDigests))
 		}
 	}
+}
+
+// A chunk the client encrypted can hide a zstd bomb from PBS: decoding stops
+// at the size limit instead of allocating whatever the frame expands to.
+func TestBlobDecompressionLimit(t *testing.T) {
+	var key [32]byte
+	c, _ := NewCryptConfig(key)
+	big := make([]byte, MaxChunkSize+1)
+
+	// With and without a declared content size.
+	frames := [][]byte{zstdEnc.EncodeAll(big, nil)}
+	var buf bytes.Buffer
+	zw, _ := zstd.NewWriter(&buf, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	zw.Write(big)
+	zw.Close()
+	frames = append(frames, buf.Bytes())
+	for i, frame := range frames {
+		for _, crypt := range []*CryptConfig{nil, c} {
+			raw := rawCompressedBlob(t, frame, crypt)
+			if _, err := decodeChunk(raw, crypt); err == nil {
+				t.Errorf("frame %d, encrypted %v: oversized chunk decoded", i, crypt != nil)
+			}
+			if out, err := DecodeBlob(raw, crypt); err != nil || len(out) != len(big) {
+				t.Errorf("frame %d, encrypted %v: blob: %d bytes, %v", i, crypt != nil, len(out), err)
+			}
+		}
+	}
+	ok, _ := EncodeBlob(big[:MaxChunkSize], c, true)
+	if out, err := decodeChunk(ok, c); err != nil || len(out) != MaxChunkSize {
+		t.Errorf("max size chunk: %d bytes, %v", len(out), err)
+	}
+}
+
+// rawCompressedBlob wraps an already compressed payload as a blob.
+func rawCompressedBlob(t *testing.T, payload []byte, crypt *CryptConfig) []byte {
+	t.Helper()
+	magic := MagicCompressed
+	var out []byte
+	if crypt != nil {
+		magic = MagicEncrCompr
+		var iv [16]byte
+		sealed := crypt.gcm.Seal(nil, iv[:], payload, nil)
+		out = make([]byte, encryptedBlobHeaderSize)
+		copy(out[28:44], sealed[len(sealed)-16:])
+		out = append(out, sealed[:len(sealed)-16]...)
+	} else {
+		out = append(make([]byte, blobHeaderSize), payload...)
+	}
+	copy(out, magic[:])
+	binary.LittleEndian.PutUint32(out[8:12], crc32.ChecksumIEEE(out[headerSize(magic):]))
+	return out
 }

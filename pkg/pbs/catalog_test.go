@@ -5,7 +5,10 @@ package pbs
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"io"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -117,5 +120,63 @@ func TestCatalogRoundtrip(t *testing.T) {
 	check("/c-data.pxar.didx", "f:ünïcödé ファイル.txt")
 	if _, err := r.ListDir("/drive-c.img.fidx/pagefile.sys"); err == nil {
 		t.Error("listing a file should fail")
+	}
+}
+
+// Catalogs come from the PCs: corrupt tables fail cleanly, without
+// allocating what their counts claim.
+func TestCatalogReaderCorrupt(t *testing.T) {
+	catalog := func(table []byte) *CatalogReader {
+		b := append([]byte{}, MagicCatalogFile[:]...)
+		b = binary.AppendUvarint(b, uint64(len(table)))
+		b = append(b, table...)
+		b = binary.LittleEndian.AppendUint64(b, 8)
+		r, err := NewCatalogReader(bytes.NewReader(b), int64(len(b)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	for name, table := range map[string][]byte{
+		"huge count":     binary.AppendUvarint(nil, 1<<62),
+		"count too high": append(binary.AppendUvarint(nil, 1000), 'l', 0),
+		"name overflow":  append(append(binary.AppendUvarint(nil, 1), 'f'), binary.AppendUvarint(nil, math.MaxUint64)...),
+		"self reference": append(binary.AppendUvarint(nil, 1), 'd', 0, 0),
+		"bad count":      bytes.Repeat([]byte{0xff}, 11),
+	} {
+		if _, err := catalog(table).ListDir("/"); err == nil {
+			t.Errorf("%s: no error", name)
+		}
+	}
+
+	// A table length past the end of the file.
+	b := append([]byte{}, MagicCatalogFile[:]...)
+	b = binary.AppendUvarint(b, 1<<29)
+	b = binary.LittleEndian.AppendUint64(b, 8)
+	r, _ := NewCatalogReader(bytes.NewReader(b), int64(len(b)))
+	if _, err := r.ListDir("/"); err == nil || !strings.Contains(err.Error(), "corrupt") {
+		t.Errorf("table past EOF: %v", err)
+	}
+}
+
+func TestCatalogWriterLimit(t *testing.T) {
+	c, _ := NewCatalogWriter(io.Discard)
+	c.Limit = 1000
+	c.StartDirectory("a")
+	for i := range 100 {
+		c.AddFile(fmt.Sprintf("file%03d", i), 1, 1)
+	}
+	if c.Err() == nil {
+		t.Fatal("limit not enforced")
+	}
+	c, _ = NewCatalogWriter(io.Discard)
+	c.Limit = 1000
+	for range 100 { // closed directories don't count
+		c.StartDirectory("d")
+		c.AddFile("file", 1, 1)
+		c.EndDirectory()
+	}
+	if c.Err() != nil {
+		t.Fatal(c.Err())
 	}
 }
