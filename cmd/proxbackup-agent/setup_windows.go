@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,10 +47,24 @@ func elevate() (relaunched bool, err error) {
 	return true, nil
 }
 
-// installService copies the agent to Program Files (without the setup token
-// a setup .exe carries) and installs and starts the service from there. An
-// existing service is stopped and pointed at the new copy.
+// installService installs the agent (see installAgent) and starts the service.
 func installService(dataDir string) error {
+	if err := installAgent(dataDir); err != nil {
+		return err
+	}
+	if err := serviceCommand("start", dataDir, slog.Default(), nil); err != nil {
+		return fmt.Errorf("start service: %w", err)
+	}
+	fmt.Println("The ProxBackup Agent service is running. This PC now appears under Clients in the ProxBackup Console.")
+	return nil
+}
+
+// installAgent copies the agent to Program Files (without the setup token a
+// setup .exe carries) and installs the service from there, wherever this copy
+// was started from: a service run by SYSTEM must not live in a folder users
+// can write to. An existing service is stopped and pointed at the new copy;
+// one already set up that way is left as it is.
+func installAgent(dataDir string) error {
 	if _, err := agent.SecureDataDir(dataDir); err != nil {
 		return err
 	}
@@ -58,6 +73,8 @@ func installService(dataDir string) error {
 		return err
 	}
 	dst := filepath.Join(cmp.Or(os.Getenv("ProgramFiles"), `C:\Program Files`), "ProxBackup", "proxbackup-agent.exe")
+	fromDst := strings.EqualFold(filepath.Clean(src), dst)
+	binPath := syscall.EscapeArg(dst) + " run -data-dir " + syscall.EscapeArg(dataDir)
 
 	m, err := mgr.Connect()
 	if err != nil {
@@ -67,12 +84,20 @@ func installService(dataDir string) error {
 	s, err := m.OpenService(serviceName)
 	if err == nil {
 		defer s.Close()
+		cfg, err := s.Config()
+		if err != nil {
+			return err
+		}
+		if fromDst && strings.EqualFold(cfg.BinaryPathName, binPath) {
+			fmt.Println("service install: already installed in", filepath.Dir(dst))
+			return nil
+		}
 		fmt.Println("Stopping the existing ProxBackup Agent service ...")
 		if err := stopService(s); err != nil {
 			return err
 		}
 	}
-	if !strings.EqualFold(filepath.Clean(src), dst) {
+	if !fromDst {
 		fmt.Println("Installing", dst)
 		if err := copyAgent(src, dst); err != nil {
 			return err
@@ -83,26 +108,21 @@ func installService(dataDir string) error {
 		if err != nil {
 			return err
 		}
-		cfg.BinaryPathName = syscall.EscapeArg(dst) + " run -data-dir " + syscall.EscapeArg(dataDir)
+		cfg.BinaryPathName = binPath
 		cfg.StartType = mgr.StartAutomatic
 		if err := s.UpdateConfig(cfg); err != nil {
 			return fmt.Errorf("update service: %w", err)
-		}
-		if err := s.Start(); err != nil {
-			return fmt.Errorf("start service: %w", err)
 		}
 	} else {
 		sv, err := newService(&program{dataDir: dataDir}, dataDir, dst)
 		if err != nil {
 			return err
 		}
-		for _, c := range []string{"install", "start"} {
-			if err := service.Control(sv, c); err != nil {
-				return fmt.Errorf("service %s: %w", c, err)
-			}
+		if err := service.Control(sv, "install"); err != nil {
+			return fmt.Errorf("service install: %w", err)
 		}
 	}
-	fmt.Println("The ProxBackup Agent service is running. This PC now appears under Clients in the ProxBackup Console.")
+	fmt.Printf("service install: ok (%s)\n", dst)
 	return nil
 }
 

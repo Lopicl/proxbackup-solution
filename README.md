@@ -75,8 +75,10 @@ older snapshots stay listed and restorable.
 proxbackup-agent.exe enroll <token> && proxbackup-agent.exe install && proxbackup-agent.exe start
 ```
 
-The console creates the namespace `pcs/<client>` and a PBS token with **DatastoreBackup on that
-namespace only**. Running the command again re-enrolls the PC.
+`install` copies the agent to `C:\Program Files\ProxBackup` and registers the service there,
+wherever the `.exe` was run from, so the download folder can be cleaned up afterwards. The console
+creates the namespace `pcs/<client>` and a PBS token with **DatastoreBackup on that namespace
+only**. Running the command again re-enrolls the PC.
 
 **Many PCs:** *Clients → Create agent setup* creates a temporary token (4 h by default) and a setup
 `.exe`. On each PC, double-click it, confirm the client name and console address, and it enrolls

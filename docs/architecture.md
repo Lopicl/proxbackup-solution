@@ -184,8 +184,10 @@ read on every run.
 ### 3. `proxbackup-agent`: ProxBackup Agent (Windows service)
 
 * Runs as `LocalSystem` (needed for VSS and for reading every file), installed with
-  `proxbackup-agent install`. Re-running the enrollment command on an enrolled PC keeps the
-  existing service and restarts it.
+  `proxbackup-agent install`. That copies the agent to `%ProgramFiles%\ProxBackup` and installs
+  the service from there, or repoints an existing one, so SYSTEM never runs a binary from a
+  folder users can write to (such as Downloads). Re-running the enrollment command on an
+  enrolled PC keeps the existing service and restarts it.
 * **Enrollment.** An admin creates a one-time enrollment code in the UI. The code bundles the
   server URL, a secret, and the server CA fingerprint. The agent generates an ECDSA key and
   CSR, and the server returns a client certificate signed by its internal CA. Every later

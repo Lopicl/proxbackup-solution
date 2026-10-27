@@ -108,7 +108,9 @@ func main() {
 		for _, p := range removed {
 			log.Warn("removed a link from the data directory", "path", p)
 		}
-		if err = serviceCommand(cmd, *dataDir, log, dirErr); err != nil && cmd == "run" {
+		if cmd == "install" {
+			err = installAgent(*dataDir)
+		} else if err = serviceCommand(cmd, *dataDir, log, dirErr); err != nil && cmd == "run" {
 			log.Error("agent stopped", "err", err)
 		}
 	case "backup", "image", "restore":
