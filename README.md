@@ -124,6 +124,9 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 - Restores never write through a junction or symbolic link in the target folder (that entry is
   skipped with a warning), and refuse a target whose path contains one. A folder the agent creates
   directly on a drive (like `C:\Restore`) is open only to SYSTEM and administrators.
+- Backup sources, volumes and restore targets must be on a local drive (`C:\...`). Network paths
+  (`\\server\share`) are refused by the console and the agent, so the agent never signs in to
+  another machine with the PC's account.
 
 ### 7. Users
 

@@ -81,7 +81,10 @@ func Run(ctx context.Context, spec api.JobSpec, rep Reporter) api.Result {
 		}
 	}()
 	var res api.Result
-	err := j.initCrypt()
+	err := checkLocalSpec(spec)
+	if err == nil {
+		err = j.initCrypt()
+	}
 	switch {
 	case err != nil:
 	case spec.Kind == api.KindFiles:
@@ -108,6 +111,27 @@ func Run(ctx context.Context, spec api.JobSpec, rep Reporter) api.Result {
 		res.State = api.RunSuccess
 	}
 	return res
+}
+
+// checkLocalSpec refuses sources, volumes and restore targets that aren't on
+// a local drive, whatever the console sent (see api.LocalPath): the agent
+// runs as SYSTEM and must not open network paths. Other platforms only run
+// tests and development builds, with their own path syntax.
+func checkLocalSpec(spec api.JobSpec) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	switch spec.Kind {
+	case api.KindFiles:
+		return api.CheckLocalPaths("source", spec.Sources...)
+	case api.KindImage:
+		return api.CheckLocalVolumes(spec.Volumes...)
+	case api.KindRestore:
+		if spec.Restore != nil {
+			return api.CheckLocalPaths("target folder", spec.Restore.TargetDir)
+		}
+	}
+	return nil
 }
 
 func (j *job) pbsClient() (*pbs.Client, error) {

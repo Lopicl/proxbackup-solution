@@ -204,6 +204,8 @@ func sendMail(ns NotifySettings, pass, subject, body string) error {
 			to = append(to, t)
 		}
 	}
+	// A line break in the subject (from a job or client name) would start new headers.
+	subject = strings.Join(strings.Fields(subject), " ")
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s",
 		ns.SMTPFrom, strings.Join(to, ", "), subject, time.Now().Format(time.RFC1123Z), strings.ReplaceAll(body, "\n", "\r\n"))
 

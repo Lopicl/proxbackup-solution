@@ -249,6 +249,11 @@ func TestValidateGroupJob(t *testing.T) {
 		"backup id":  func(g *GroupJob) { g.BackupID = "a/b" },
 		"no sources": func(g *GroupJob) { g.Sources = nil },
 		"schedule":   func(g *GroupJob) { g.Schedule = "nonsense" },
+		"unc source": func(g *GroupJob) { g.Sources = []string{`\\attacker\share`} },
+		"rel source": func(g *GroupJob) { g.Sources = []string{`Users`} },
+		"unc volume": func(g *GroupJob) { g.Kind, g.Volumes = api.KindImage, []string{`\\?\UNC\attacker\share`} },
+		"dir volume": func(g *GroupJob) { g.Kind, g.Volumes = api.KindImage, []string{`C:\Users`} },
+		"crlf name":  func(g *GroupJob) { g.Name = "x\r\nBcc: a@example.com" },
 	} {
 		g := ok
 		mod(&g)

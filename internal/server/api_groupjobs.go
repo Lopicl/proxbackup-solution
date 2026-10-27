@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strings"
 
 	"proxbackup/internal/api"
 	"proxbackup/internal/schedule"
@@ -156,6 +157,8 @@ func validateGroupJob(g *GroupJob) error {
 	switch {
 	case g.Name == "":
 		return errors.New("name is required")
+	case strings.ContainsAny(g.Name, "\r\n"):
+		return errors.New("name must be a single line")
 	case g.Kind != api.KindFiles && g.Kind != api.KindImage:
 		return errors.New("kind must be files or image")
 	case g.Kind == api.KindFiles && len(g.Sources) == 0:
@@ -172,6 +175,12 @@ func validateGroupJob(g *GroupJob) error {
 		return fmt.Errorf("backups per day must be between 0 and %d", maxDailyCap)
 	case g.SpreadMinutes < 0 || g.SpreadMinutes > maxSpreadMinutes:
 		return fmt.Errorf("start spread must be between 0 and %d minutes", maxSpreadMinutes)
+	}
+	if err := api.CheckLocalPaths("source", g.Sources...); err != nil {
+		return err
+	}
+	if err := api.CheckLocalVolumes(g.Volumes...); err != nil {
+		return err
 	}
 	if g.Schedule != "" {
 		if err := schedule.Validate(g.Schedule); err != nil {

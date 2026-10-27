@@ -279,6 +279,9 @@ func validateRestore(req *api.RestoreSpec, c *Client) error {
 	if req.BackupID == "" || req.BackupTime == 0 || req.Archive == "" || req.TargetDir == "" {
 		return errors.New("backup_id, backup_time, archive and target_dir are required")
 	}
+	if err := api.CheckLocalPaths("target folder", req.TargetDir); err != nil {
+		return err
+	}
 	if !pbs.ValidArchiveName(req.Archive) || strings.HasSuffix(req.Archive, ".blob") {
 		return errors.New("archive must be a .pxar.didx, .mpxar.didx or .img.fidx archive")
 	}

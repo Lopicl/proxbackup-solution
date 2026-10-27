@@ -106,6 +106,14 @@ func TestSelfRestore(t *testing.T) {
 		t.Fatalf("runs = %s", w.Body)
 	}
 
+	// Network targets are refused for everyone (SMB would authenticate as the PC).
+	for _, target := range []string{`\\attacker\share`, `//attacker/share`, `\\?\UNC\attacker\share`, `\\.\C:\x`, `C:`, `Users`} {
+		req := spec([]string{"x"}, target)
+		if err := validateRestore(&req, c); err == nil {
+			t.Errorf("validateRestore accepted target %s", target)
+		}
+	}
+
 	// A console admin's restore can't carry a session (the agent would treat it as the user's).
 	req := spec([]string{"x"}, `D:\x`)
 	if err := validateRestore(&req, c); err != nil || req.Session != "" || req.RequestedBy != "" {
