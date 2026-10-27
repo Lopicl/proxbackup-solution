@@ -79,18 +79,61 @@ func rotationTestClient(t *testing.T, s *Server, f http.Handler) *Client {
 	return c
 }
 
-// poll runs one poll of c with req (wait=0) and returns the response.
-func testPoll(t *testing.T, s *Server, c *Client, req api.PollRequest) api.PollResponse {
+// agentCert issues c a certificate and makes it the client's current one.
+func agentCert(t *testing.T, s *Server, c *Client) *x509.Certificate {
+	t.Helper()
+	_, csrPEM := testCSR(t)
+	certPEM, serial, err := s.pki.SignClientCSR(csrPEM, c.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.store.db.Exec(`UPDATE clients SET cert_serial=? WHERE id=?`, serial, c.ID)
+	return parseCertPEM(t, certPEM)
+}
+
+// agentCall sends a request with the client certificate cert through requireAgent.
+func agentCall(s *Server, cert *x509.Certificate, h agentHandler, target, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", target, strings.NewReader(body))
+	req.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{cert}}}
+	s.requireAgent(h).ServeHTTP(rec, req)
+	return rec
+}
+
+// testPoll runs one poll with cert and req (wait=0) and returns the response.
+func testPoll(t *testing.T, s *Server, cert *x509.Certificate, req api.PollRequest) api.PollResponse {
 	t.Helper()
 	b, _ := json.Marshal(req)
-	rec := httptest.NewRecorder()
-	s.handlePoll(rec, httptest.NewRequest("POST", "/agent/v1/poll?wait=0", strings.NewReader(string(b))), c)
+	rec := agentCall(s, cert, s.handlePoll, "/agent/v1/poll?wait=0", string(b))
 	if rec.Code != 200 {
 		t.Fatalf("poll: %d %s", rec.Code, rec.Body)
 	}
 	var resp api.PollResponse
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	return resp
+}
+
+func csrBody(csr []byte) string {
+	b, _ := json.Marshal(api.RenewCertRequest{CSR: string(csr)})
+	return string(b)
+}
+
+// renewCert has the console sign csr for the holder of cert.
+func renewCert(s *Server, cert *x509.Certificate, csr []byte) *httptest.ResponseRecorder {
+	return agentCall(s, cert, s.handleRenewCert, "/agent/v1/cert", csrBody(csr))
+}
+
+// renewedCert renews cert with a new key and returns the new certificate.
+func renewedCert(t *testing.T, s *Server, cert *x509.Certificate) *x509.Certificate {
+	t.Helper()
+	_, csr := testCSR(t)
+	rec := renewCert(s, cert, csr)
+	if rec.Code != 200 {
+		t.Fatalf("renewal: %d %s", rec.Code, rec.Body)
+	}
+	var resp api.RenewCertResponse
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	return parseCertPEM(t, []byte(resp.CertPEM))
 }
 
 var (
@@ -104,44 +147,61 @@ func TestExposedCredentialsRotateOnUpdatedAgent(t *testing.T) {
 	ctx := context.Background()
 	f := &fakeTokenPBS{}
 	c := rotationTestClient(t, s, f)
+	cert := agentCert(t, s, c)
 
 	// An old Windows agent marks its credentials exposed but can't fix them.
-	resp := testPoll(t, s, c, oldAgent)
+	resp := testPoll(t, s, cert, oldAgent)
 	c, _ = s.store.Client(ctx, c.ID)
 	if !c.CredsExposed || c.TokenRotatedAt != 0 || resp.RenewCert || len(f.calls) != 0 {
 		t.Fatalf("after old agent: exposed=%v rotated=%d renew=%v calls=%v", c.CredsExposed, c.TokenRotatedAt, resp.RenewCert, f.calls)
 	}
 
-	// The updated agent gets a new token secret and is asked for a new certificate.
-	resp = testPoll(t, s, c, newAgent)
+	// The updated agent is asked for a new certificate first; its token stays
+	// until it uses it, so whoever else holds the old certificate can't get the new one.
+	resp = testPoll(t, s, cert, newAgent)
 	c, _ = s.store.Client(ctx, c.ID)
-	if c.CredsExposed || c.TokenRotatedAt == 0 || !c.CertRenew || !resp.RenewCert {
-		t.Fatalf("after new agent: %+v, renew=%v", c, resp.RenewCert)
+	if !c.CredsExposed || !c.RotateToken || !c.CertRenew || !resp.RenewCert || len(f.calls) != 0 {
+		t.Fatalf("after new agent: %+v, renew=%v, calls=%v", c, resp.RenewCert, f.calls)
+	}
+	if resp = testPoll(t, s, cert, newAgent); len(f.calls) != 0 || !resp.RenewCert {
+		t.Fatalf("token rotated before the certificate: %v", f.calls)
+	}
+
+	// The first poll with the new certificate gets the new token secret.
+	newCert := renewedCert(t, s, cert)
+	resp = testPoll(t, s, newCert, newAgent)
+	c, _ = s.store.Client(ctx, c.ID)
+	if c.CredsExposed || c.TokenRotatedAt == 0 || c.CertRenew || c.RotateToken || resp.RenewCert {
+		t.Fatalf("after renewal: %+v, renew=%v", c, resp.RenewCert)
 	}
 	if resp.Config == nil || resp.Config.Target.Secret != f.secret || !strings.HasPrefix(f.secret, "regenerated-") ||
 		resp.Config.Target.AuthID != "proxbackup@pbs!pc-1" {
 		t.Fatalf("config target = %+v, PBS secret %q", resp.Config, f.secret)
 	}
+	if rec := agentCall(s, cert, s.handlePoll, "/agent/v1/poll?wait=0", "{}"); rec.Code != http.StatusForbidden {
+		t.Fatalf("old certificate after the renewal: %d", rec.Code)
+	}
 
 	// Later polls don't rotate again.
 	n := len(f.calls)
-	testPoll(t, s, c, newAgent)
+	testPoll(t, s, newCert, newAgent)
 	if len(f.calls) != n {
 		t.Fatalf("rotated again: %v", f.calls[n:])
 	}
 	// A Linux agent never counts as exposed.
-	s.store.TouchClient(ctx, c.ID, api.PollRequest{OS: "linux/amd64"})
+	s.store.TouchClient(ctx, c.ID, api.PollRequest{OS: "linux/amd64"}, true)
 	if c, _ = s.store.Client(ctx, c.ID); c.CredsExposed {
 		t.Fatal("linux agent marked exposed")
 	}
 }
 
-func TestManualRotationOfOldAgentStaysExposed(t *testing.T) {
+func TestManualRotationWaitsForCertificate(t *testing.T) {
 	s := newTestServer(t, "")
 	ctx := context.Background()
 	f := &fakeTokenPBS{noRegenerate: true}
 	c := rotationTestClient(t, s, f)
-	testPoll(t, s, c, oldAgent)
+	cert := agentCert(t, s, c)
+	testPoll(t, s, cert, oldAgent)
 
 	rec := httptest.NewRecorder()
 	req := asAdmin(httptest.NewRequest("POST", "/api/clients/1/rotate-credentials", nil))
@@ -150,22 +210,26 @@ func TestManualRotationOfOldAgentStaysExposed(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("rotate: %d %s", rec.Code, rec.Body)
 	}
-	resp := testPoll(t, s, c, oldAgent)
+	// An old agent can't renew its certificate, so it keeps its token too.
+	resp := testPoll(t, s, cert, oldAgent)
+	c, _ = s.store.Client(ctx, c.ID)
+	if len(f.calls) != 0 || !c.CredsExposed || !c.RotateToken || !c.CertRenew || !resp.RenewCert {
+		t.Fatalf("client = %+v, renew=%v, calls %v", c, resp.RenewCert, f.calls)
+	}
+	// What a poll with the certificate being replaced reports isn't taken.
+	testPoll(t, s, cert, newAgent)
+	if c, _ = s.store.Client(ctx, c.ID); len(c.Features) != 0 {
+		t.Fatalf("features taken from the old certificate: %v", c.Features)
+	}
+	// Once updated, it renews the certificate and gets the new token with it.
+	resp = testPoll(t, s, renewedCert(t, s, cert), newAgent)
 	c, _ = s.store.Client(ctx, c.ID)
 	// PBS without regenerate: the token was replaced under the same id.
 	if !strings.HasPrefix(f.secret, "created-") || resp.Config == nil || resp.Config.Target.Secret != f.secret {
 		t.Fatalf("secret %q, config %+v, calls %v", f.secret, resp.Config, f.calls)
 	}
-	// The old agent keeps the new secret readable and can't renew its certificate.
-	if !c.CredsExposed || c.RotateToken || !c.CertRenew || resp.RenewCert {
-		t.Fatalf("client = %+v, renew=%v", c, resp.RenewCert)
-	}
-	// Once updated, it rotates again and renews the certificate.
-	if resp = testPoll(t, s, c, newAgent); !resp.RenewCert {
-		t.Fatal("updated agent not asked to renew its certificate")
-	}
-	if c, _ = s.store.Client(ctx, c.ID); c.CredsExposed {
-		t.Fatal("still exposed after the update")
+	if c.CredsExposed || c.RotateToken || c.CertRenew {
+		t.Fatalf("client after rotation = %+v", c)
 	}
 }
 
@@ -173,8 +237,9 @@ func TestRotationRetriesAfterPBSFailure(t *testing.T) {
 	s := newTestServer(t, "")
 	ctx := context.Background()
 	c := rotationTestClient(t, s, http.NotFoundHandler())
+	cert := agentCert(t, s, c)
 	s.store.RequestRotation(ctx, c.ID)
-	resp := testPoll(t, s, c, newAgent)
+	resp := testPoll(t, s, renewedCert(t, s, cert), newAgent)
 	if c, _ = s.store.Client(ctx, c.ID); !c.RotateToken || resp.Config == nil || resp.Config.Target.Secret != "tok" {
 		t.Fatalf("failed rotation: %+v", c)
 	}
@@ -191,7 +256,7 @@ func TestBulkRotation(t *testing.T) {
 	s := newTestServer(t, "")
 	ctx := context.Background()
 	cs := groupTestClients(t, s, "a", "b", "c")
-	s.store.TouchClient(ctx, cs[1].ID, oldAgent)
+	s.store.TouchClient(ctx, cs[1].ID, oldAgent, true)
 	for _, tc := range []struct {
 		body string
 		want []bool
@@ -221,28 +286,21 @@ func TestCertRenewal(t *testing.T) {
 	s.store.db.Exec(`UPDATE clients SET cert_serial=? WHERE id=?`, oldSerial, c.ID)
 	oldCert := parseCertPEM(t, oldPEM)
 
-	call := func(cert *x509.Certificate, h agentHandler, body string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/agent/v1/cert", strings.NewReader(body))
-		req.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{cert}}}
-		s.requireAgent(h).ServeHTTP(rec, req)
-		return rec
-	}
-	csrBody := func(csr []byte) string {
-		b, _ := json.Marshal(api.RenewCertRequest{CSR: string(csr)})
-		return string(b)
-	}
 	_, newCSR := testCSR(t)
-	if rec := call(oldCert, s.handleRenewCert, csrBody(newCSR)); rec.Code != http.StatusConflict {
+	if rec := renewCert(s, oldCert, newCSR); rec.Code != http.StatusConflict {
 		t.Fatalf("renewal without a request: %d %s", rec.Code, rec.Body)
 	}
 	s.store.RequestRotation(ctx, c.ID)
-	if rec := call(oldCert, s.handleRenewCert, csrBody(csrPEM)); rec.Code != http.StatusBadRequest {
+	if rec := renewCert(s, oldCert, csrPEM); rec.Code != http.StatusBadRequest {
 		t.Fatalf("renewal with the old key: %d %s", rec.Code, rec.Body)
 	}
-	rec := call(oldCert, s.handleRenewCert, csrBody(newCSR))
+	rec := renewCert(s, oldCert, newCSR)
 	if rec.Code != 200 {
 		t.Fatalf("renewal: %d %s", rec.Code, rec.Body)
+	}
+	// The agent retrying after a lost reply (same key) gets a certificate again.
+	if rec = renewCert(s, oldCert, newCSR); rec.Code != 200 {
+		t.Fatalf("repeated renewal: %d %s", rec.Code, rec.Body)
 	}
 	var resp api.RenewCertResponse
 	json.Unmarshal(rec.Body.Bytes(), &resp)
@@ -250,25 +308,114 @@ func TestCertRenewal(t *testing.T) {
 
 	ok := func(w http.ResponseWriter, r *http.Request, c *Client) { w.WriteHeader(204) }
 	// Both certificates work until the new one is used.
-	if rec := call(oldCert, ok, ""); rec.Code != 204 {
+	if rec := agentCall(s, oldCert, ok, "/", ""); rec.Code != 204 {
 		t.Fatalf("old certificate before the switch: %d", rec.Code)
 	}
-	if rec := call(newCert, ok, ""); rec.Code != 204 {
+	if rec := agentCall(s, newCert, ok, "/", ""); rec.Code != 204 {
 		t.Fatalf("new certificate: %d", rec.Code)
 	}
-	if rec := call(oldCert, ok, ""); rec.Code != http.StatusForbidden {
+	if rec := agentCall(s, oldCert, ok, "/", ""); rec.Code != http.StatusForbidden {
 		t.Fatalf("old certificate after the switch: %d", rec.Code)
 	}
 	c, _ = s.store.Client(ctx, c.ID)
-	if c.CertRenew || c.CertRenewedAt == 0 || c.CertSerial != newCert.SerialNumber.Text(16) {
+	if c.CertRenew || c.CertRenewedAt == 0 || c.CertSerial != newCert.SerialNumber.Text(16) || c.Revoked {
 		t.Fatalf("client after renewal = %+v", c)
 	}
 	// Revoking keeps the new serial for un-revoking.
 	if err := s.store.RevokeClient(ctx, c.ID); err != nil {
 		t.Fatal(err)
 	}
-	if rec := call(newCert, ok, ""); rec.Code != http.StatusForbidden {
+	if rec := agentCall(s, newCert, ok, "/", ""); rec.Code != http.StatusForbidden {
 		t.Fatalf("revoked: %d", rec.Code)
+	}
+	if c, _ = s.store.Client(ctx, c.ID); !c.Restorable || c.RevokedReason != "" {
+		t.Fatalf("revoked client = %+v", c)
+	}
+}
+
+// Two parties with the same certificate: the second CSR of a renewal, before
+// or after the first party switched, revokes the client for good.
+func TestCertRenewalIsOneShot(t *testing.T) {
+	ok := func(w http.ResponseWriter, r *http.Request, c *Client) { w.WriteHeader(204) }
+	for _, tc := range []struct {
+		name      string
+		switched  bool // the first party used its new certificate before the second CSR
+		ago       time.Duration
+		wantRevok bool
+	}{
+		{"pending", false, 0, true},
+		{"switched", true, 0, true},
+		{"switched long ago", true, renewalRaceWindow + time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, "")
+			ctx := context.Background()
+			f := &fakeTokenPBS{}
+			c := rotationTestClient(t, s, f)
+			cert := agentCert(t, s, c)
+			s.store.RequestRotation(ctx, c.ID)
+			first := renewedCert(t, s, cert)
+			if tc.switched {
+				if rec := agentCall(s, first, ok, "/", ""); rec.Code != 204 {
+					t.Fatalf("first party's certificate: %d", rec.Code)
+				}
+				s.store.db.Exec(`UPDATE clients SET cert_renewed_at=? WHERE id=?`, time.Now().Add(-tc.ago).Unix(), c.ID)
+			}
+			_, csr := testCSR(t)
+			if rec := renewCert(s, cert, csr); rec.Code != http.StatusForbidden {
+				t.Fatalf("second CSR: %d %s", rec.Code, rec.Body)
+			}
+			c, _ = s.store.Client(ctx, c.ID)
+			if !tc.wantRevok {
+				if c.Revoked || agentCall(s, first, ok, "/", "").Code != 204 {
+					t.Fatalf("revoked by a late CSR with the replaced certificate: %+v", c)
+				}
+				return
+			}
+			if !c.Revoked || c.Restorable || !strings.Contains(c.RevokedReason, "possible credential theft") {
+				t.Fatalf("client = %+v", c)
+			}
+			for _, crt := range []*x509.Certificate{cert, first} {
+				if rec := agentCall(s, crt, ok, "/", ""); rec.Code != http.StatusForbidden {
+					t.Fatalf("certificate still accepted: %d", rec.Code)
+				}
+			}
+			if !strings.Contains(strings.Join(f.calls, " "), "DELETE access/users/proxbackup@pbs/token/pc-1") {
+				t.Fatalf("PBS token not deleted: %v", f.calls)
+			}
+			rec := httptest.NewRecorder()
+			req := asAdmin(httptest.NewRequest("POST", "/", nil))
+			req.SetPathValue("id", strconv.FormatInt(c.ID, 10))
+			s.handleUnrevokeClient(rec, req)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("un-revoke: %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// A poll waiting with the old certificate while the renewal completes ends
+// without config: the new token only goes to the new certificate.
+func TestWaitingPollEndsWhenCertificateRenewed(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	c := rotationTestClient(t, s, &fakeTokenPBS{})
+	cert := agentCert(t, s, c)
+	s.store.RequestRotation(ctx, c.ID)
+	cfg, _ := s.agentConfig(ctx, c)
+	body, _ := json.Marshal(api.PollRequest{OS: "windows/amd64", ConfigRev: cfg.Rev})
+	done := make(chan *httptest.ResponseRecorder)
+	go func() { done <- agentCall(s, cert, s.handlePoll, "/agent/v1/poll?wait=30", string(body)) }()
+	time.Sleep(200 * time.Millisecond)
+	testPoll(t, s, renewedCert(t, s, cert), newAgent)
+	s.wakeClient(c.ID)
+	select {
+	case rec := <-done:
+		if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "regenerated") {
+			t.Fatalf("waiting poll: %d %s", rec.Code, rec.Body)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiting poll didn't end")
 	}
 }
 

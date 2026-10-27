@@ -220,7 +220,17 @@ export function Clients() {
                     <Link to={`/clients/${c.id}`}>{clientName(c)}</Link>
                   </td>
                   <td>{c.hostname}</td>
-                  <td>{ago(c.revoked_at)}</td>
+                  <td>
+                    {ago(c.revoked_at)}
+                    {c.revoked_reason && (
+                      <>
+                        {' '}
+                        <span className="badge bad" title={c.revoked_reason}>
+                          possible credential theft
+                        </span>
+                      </>
+                    )}
+                  </td>
                   <td>{ago(c.last_seen)}</td>
                   <td className="row-actions">
                     {!perms.can('clients.manage', c) ? null : c.restorable ? (

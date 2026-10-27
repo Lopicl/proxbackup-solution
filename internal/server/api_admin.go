@@ -316,16 +316,7 @@ func (s *Server) handleRevokeClient(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, errors.New("client is already revoked"))
 		return
 	}
-	// Remove the PBS token so the agent can no longer write; existing snapshots stay.
-	if t, err := s.store.Target(ctx, c.TargetID); err == nil {
-		if pc, err := s.adminClient(t); err == nil {
-			if user, name, ok := strings.Cut(c.TokenID, "!"); ok {
-				if err := pc.DeleteToken(ctx, user, name); err != nil {
-					s.log.Warn("could not delete PBS token", "token", c.TokenID, "err", err)
-				}
-			}
-		}
-	}
+	s.deleteClientToken(ctx, c)
 	if err := s.store.RevokeClient(ctx, id); err != nil {
 		if errors.Is(err, errNotFound) {
 			httpError(w, http.StatusConflict, errors.New("client is already revoked"))
@@ -336,6 +327,24 @@ func (s *Server) handleRevokeClient(w http.ResponseWriter, r *http.Request) {
 	}
 	s.wakeClient(id)
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// deleteClientToken removes the client's PBS token so its agent can no longer
+// write; existing snapshots stay.
+func (s *Server) deleteClientToken(ctx context.Context, c *Client) {
+	t, err := s.store.Target(ctx, c.TargetID)
+	if err != nil {
+		return
+	}
+	pc, err := s.adminClient(t)
+	if err != nil {
+		return
+	}
+	if user, name, ok := strings.Cut(c.TokenID, "!"); ok {
+		if err := pc.DeleteToken(ctx, user, name); err != nil {
+			s.log.Warn("could not delete PBS token", "token", c.TokenID, "err", err)
+		}
+	}
 }
 
 // revokedListDays is how long revoked clients are listed (and can be
@@ -364,6 +373,10 @@ func (s *Server) handleUnrevokeClient(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), c.ID
 	if !c.Revoked {
 		httpError(w, http.StatusConflict, errors.New("client is not revoked"))
+		return
+	}
+	if c.RevokedReason != "" {
+		httpError(w, http.StatusConflict, fmt.Errorf("%s: the client can't be restored; enroll the PC again", c.RevokedReason))
 		return
 	}
 	if !c.Restorable {

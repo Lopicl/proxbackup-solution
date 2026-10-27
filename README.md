@@ -91,9 +91,10 @@ enrollment created in the console can.
 
 **Credentials:** agents up to 0.2.14 left `%ProgramData%\proxbackup` (PBS token, certificate key,
 encryption key) readable by every user of the PC. The console flags those clients as
-*credentials exposed* and gives each a new PBS token secret and client certificate the first time
-its updated agent connects. *Rotate* on the client page does the same for any client. The
-encryption key stays: earlier backups need it.
+*credentials exposed* and gives each a new client certificate, then a new PBS token secret, the
+first time its updated agent connects. *Rotate* on the client page does the same for any client.
+If a copy of the old certificate also asks for a new one, the console revokes the client as
+*possible credential theft*; enroll the PC again. The encryption key stays: earlier backups need it.
 
 ### 5. Create jobs
 

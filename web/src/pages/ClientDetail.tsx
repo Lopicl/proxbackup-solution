@@ -75,6 +75,12 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
           </button>
         )}
       </div>
+      {c.revoked_reason && (
+        <p className="warn-text">
+          Revoked by the console — {c.revoked_reason}. Two parties used this PC&apos;s certificate during a credential rotation,
+          so neither certificate is accepted and the PBS token was deleted. Enroll the PC again.
+        </p>
+      )}
       <div className="facts">
         <span>
           Host <b>{c.hostname || '—'}</b>
@@ -650,16 +656,19 @@ export function CredentialState({ c }: { c: Client }) {
         possibly exposed — {fixed ? 'rotating' : 'update the agent to rotate them'}
       </b>
     )
+  if (c.cert_renew)
+    return (
+      <b
+        className="warn-text"
+        title="The old certificate is accepted until the agent connects with its new one. A new PBS token follows only then, so it can't reach a copy of the old certificate."
+      >
+        new certificate pending{renews ? (c.online ? '' : ' — applied when the PC connects') : ' — needs an agent update'}
+      </b>
+    )
   if (c.rotate_token)
     return (
       <b className="warn-text" title="The old PBS token secret works until the agent gets the new one">
         new PBS token pending{c.online ? '' : ' — applied when the PC connects'}
-      </b>
-    )
-  if (c.cert_renew)
-    return (
-      <b className="warn-text" title="The old certificate is accepted until the agent connects with its new one">
-        new certificate pending{renews ? '' : ' — needs an agent update'}
       </b>
     )
   const last = Math.max(c.token_rotated_at, c.cert_renewed_at)

@@ -6,11 +6,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,7 +236,7 @@ func TestPushAgentUpdateWakesPoll(t *testing.T) {
 	if err := s.store.SaveTarget(ctx, tg, nil); err != nil {
 		t.Fatal(err)
 	}
-	c := &Client{Name: "pc", OS: "windows/amd64", TargetID: tg.ID}
+	c := &Client{Name: "pc", OS: "windows/amd64", TargetID: tg.ID, CertSerial: "1"}
 	if err := s.store.CreateClient(ctx, c, s.sealer.sealFor("secret", colClientToken)); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +245,9 @@ func TestPushAgentUpdateWakesPoll(t *testing.T) {
 		cfg, _ := s.agentConfig(ctx, c)
 		body, _ := json.Marshal(api.PollRequest{OS: c.OS, AgentVersion: c.AgentVersion, ConfigRev: cfg.Rev})
 		w := httptest.NewRecorder()
-		s.handlePoll(w, httptest.NewRequest("POST", "/agent/v1/poll?wait=30", bytes.NewReader(body)), c)
+		req := httptest.NewRequest("POST", "/agent/v1/poll?wait=30", bytes.NewReader(body))
+		req.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{{SerialNumber: big.NewInt(1)}}}}
+		s.handlePoll(w, req, c)
 		var resp api.PollResponse
 		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("poll: %d %s", w.Code, w.Body)

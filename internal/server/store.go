@@ -180,6 +180,12 @@ func (s *Store) migrate() error {
 		{"clients", "cert_renewed_at", "INTEGER NOT NULL DEFAULT 0"},
 		{"clients", "pending_serial", "TEXT NOT NULL DEFAULT ''"},
 		{"clients", "agent_features", "TEXT NOT NULL DEFAULT '[]'"},
+		// One-shot renewal: the key of the pending certificate (SHA-256 of its
+		// SPKI), the serial a renewal replaced, and why a client was revoked
+		// automatically ("" = by an admin).
+		{"clients", "pending_key", "TEXT NOT NULL DEFAULT ''"},
+		{"clients", "prev_serial", "TEXT NOT NULL DEFAULT ''"},
+		{"clients", "revoked_reason", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -298,8 +304,10 @@ type Client struct {
 	Revoked   bool     `json:"revoked"`
 	RevokedAt int64    `json:"revoked_at"`
 	// Restorable: revoked with its certificate serial kept (see UnrevokeClient).
-	Restorable bool  `json:"restorable"`
-	CreatedAt  int64 `json:"created_at"`
+	Restorable bool `json:"restorable"`
+	// RevokedReason: why the console revoked the client itself ("" = an admin did).
+	RevokedReason string `json:"revoked_reason"`
+	CreatedAt     int64  `json:"created_at"`
 	// Derived for the UI.
 	Online      bool   `json:"online"`
 	LastRun     *Run   `json:"last_run,omitempty"`
@@ -340,6 +348,8 @@ type Client struct {
 
 	tokenSecretEnc []byte
 	pendingSerial  string
+	pendingKey     string // SHA-256 of the pending certificate's public key
+	prevSerial     string // the serial the last renewal replaced
 	cryptKeyEnc    []byte
 	revokedSerial  string
 	revokedJobs    []int64
@@ -504,7 +514,7 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
 	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags, paused_until, paused_by,
 	tray_error, revoked_at, revoked_serial, revoked_jobs, bandwidth, creds_exposed, rotate_token, token_rotated_at, cert_renew, cert_renewed_at,
-	pending_serial, agent_features`
+	pending_serial, agent_features, pending_key, prev_serial, revoked_reason`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
@@ -513,7 +523,7 @@ func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
 		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags, &c.PausedUntil, &c.PausedBy,
 		&c.TrayError, &c.RevokedAt, &c.revokedSerial, &revJobs, &bw, &c.CredsExposed, &c.RotateToken, &c.TokenRotatedAt, &c.CertRenew,
-		&c.CertRenewedAt, &c.pendingSerial, &features)
+		&c.CertRenewedAt, &c.pendingSerial, &features, &c.pendingKey, &c.prevSerial, &c.RevokedReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -559,6 +569,12 @@ func (s *Store) Client(ctx context.Context, id int64) (*Client, error) {
 func (s *Store) ClientBySerial(ctx context.Context, serial string) (*Client, error) {
 	return scanClient(s.db.QueryRowContext(ctx, `SELECT `+clientCols+` FROM clients WHERE (cert_serial=? OR pending_serial=? AND pending_serial<>'') AND revoked=0`,
 		serial, serial))
+}
+
+// ClientByPrevSerial finds the active client whose last certificate renewal
+// replaced serial.
+func (s *Store) ClientByPrevSerial(ctx context.Context, serial string) (*Client, error) {
+	return scanClient(s.db.QueryRowContext(ctx, `SELECT `+clientCols+` FROM clients WHERE prev_serial=? AND prev_serial<>'' AND revoked=0`, serial))
 }
 
 func (s *Store) ClientNameTaken(ctx context.Context, name string) bool {
@@ -635,19 +651,23 @@ func (s *Store) MoveClientNamespace(ctx context.Context, c *Client, ns string) e
 	return nil
 }
 
-func (s *Store) TouchClient(ctx context.Context, id int64, req api.PollRequest) {
+// TouchClient records a poll. trusted=false keeps the stored features (and
+// exposure): the poll came with a certificate that is being replaced, which
+// may be a stolen copy.
+func (s *Store) TouchClient(ctx context.Context, id int64, req api.PollRequest, trusted bool) {
 	sched, _ := json.Marshal(nonNilStates(req.Schedule))
 	features, _ := json.Marshal(nonNil(req.Features))
 	// A Windows agent without the data directory fix exposes its credentials
 	// (again, if they were rotated before it was updated).
-	exposed := strings.HasPrefix(req.OS, "windows") && !slices.Contains(req.Features, api.FeatureDataDirACL)
+	exposed := trusted && strings.HasPrefix(req.OS, "windows") && !slices.Contains(req.Features, api.FeatureDataDirACL)
 	s.db.ExecContext(ctx, `UPDATE clients SET last_seen=?, hostname=?, os=?, agent_version=?, config_rev=?, schedule_state=?, time_zone=?,
-		paused_until=?, paused_by=?, tray_error=?, agent_features=?, creds_exposed=MAX(creds_exposed, ?) WHERE id=?`, now(), req.Hostname, req.OS,
-		req.AgentVersion, req.ConfigRev, sched, req.TimeZone, req.PausedUntil, req.PausedBy, req.TrayError, string(features), exposed, id)
+		paused_until=?, paused_by=?, tray_error=?, agent_features=CASE WHEN ? THEN ? ELSE agent_features END, creds_exposed=MAX(creds_exposed, ?)
+		WHERE id=?`, now(), req.Hostname, req.OS, req.AgentVersion, req.ConfigRev, sched, req.TimeZone, req.PausedUntil, req.PausedBy,
+		req.TrayError, trusted, string(features), exposed, id)
 }
 
-// RequestRotation makes the client's next poll issue a new PBS token secret
-// and ask its agent for a new certificate.
+// RequestRotation asks the client's agent for a new certificate, and for a
+// new PBS token secret once it uses it.
 func (s *Store) RequestRotation(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE clients SET rotate_token=1, cert_renew=1 WHERE id=? AND revoked=0`, id)
 	if err != nil {
@@ -659,27 +679,33 @@ func (s *Store) RequestRotation(ctx context.Context, id int64) error {
 	return nil
 }
 
-// SetRotatedToken stores a new PBS token for the client and asks its agent for
-// a new certificate too. secure: the agent keeps its credentials from local
-// users, so they no longer count as exposed.
+// SetRotatedToken stores a new PBS token for the client. secure: the agent
+// keeps its credentials from local users, so they no longer count as exposed.
 func (s *Store) SetRotatedToken(ctx context.Context, id int64, tokenID string, tokenSecretEnc []byte, secure bool) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE clients SET token_id=?, token_secret_enc=?, rotate_token=0, token_rotated_at=?, cert_renew=1,
+	_, err := s.db.ExecContext(ctx, `UPDATE clients SET token_id=?, token_secret_enc=?, rotate_token=0, token_rotated_at=?,
 		creds_exposed=CASE WHEN ? THEN 0 ELSE creds_exposed END WHERE id=? AND revoked=0`, tokenID, tokenSecretEnc, now(), secure, id)
 	return err
 }
 
-// SetPendingSerial records a renewed certificate: both serials are accepted
-// until the agent uses the new one.
-func (s *Store) SetPendingSerial(ctx context.Context, id int64, serial string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE clients SET pending_serial=? WHERE id=? AND revoked=0`, serial, id)
-	return err
+// SetPendingSerial records a renewed certificate for the public key with
+// SHA-256 keyHash: both serials are accepted until the agent uses the new one.
+// A renewal is one-shot: it returns false if the renewal already issued a
+// certificate for another key.
+func (s *Store) SetPendingSerial(ctx context.Context, id int64, serial, keyHash string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE clients SET pending_serial=?, pending_key=?
+		WHERE id=? AND revoked=0 AND cert_renew=1 AND (pending_serial='' OR pending_key=?)`, serial, keyHash, id, keyHash)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
 }
 
 // PromoteSerial makes the renewed certificate the client's only one, once the
 // agent connected with it. The old certificate is no longer accepted.
 func (s *Store) PromoteSerial(ctx context.Context, id int64, serial string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE clients SET cert_serial=pending_serial, pending_serial='', cert_renew=0, cert_renewed_at=?
-		WHERE id=? AND pending_serial=? AND pending_serial<>''`, now(), id, serial)
+	_, err := s.db.ExecContext(ctx, `UPDATE clients SET prev_serial=COALESCE(cert_serial,''), cert_serial=pending_serial, pending_serial='',
+		pending_key='', cert_renew=0, cert_renewed_at=? WHERE id=? AND pending_serial=? AND pending_serial<>''`, now(), id, serial)
 	return err
 }
 
@@ -706,6 +732,17 @@ func nonNilStates(s []api.JobState) []api.JobState {
 // name can be reused. The certificate serial and the enabled jobs are kept for
 // UnrevokeClient. Revoking a revoked client is errNotFound.
 func (s *Store) RevokeClient(ctx context.Context, id int64) error {
+	return s.revokeClient(ctx, id, "")
+}
+
+// RevokeCompromisedClient revokes a client whose certificate is held by
+// someone else, for reason. Unlike RevokeClient it keeps no serial, so the
+// client can't be un-revoked: the PC has to be enrolled again.
+func (s *Store) RevokeCompromisedClient(ctx context.Context, id int64, reason string) error {
+	return s.revokeClient(ctx, id, reason)
+}
+
+func (s *Store) revokeClient(ctx context.Context, id int64, reason string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -719,8 +756,10 @@ func (s *Store) RevokeClient(ctx context.Context, id int64) error {
 		enabled = []int64{}
 	}
 	b, _ := json.Marshal(enabled)
-	res, err := tx.ExecContext(ctx, `UPDATE clients SET revoked=1, revoked_at=?, revoked_serial=COALESCE(cert_serial,''), revoked_jobs=?,
-		cert_serial=NULL, pending_serial='', token_secret_enc=NULL, name=name||'#revoked-'||id WHERE id=? AND revoked=0`, now(), string(b), id)
+	res, err := tx.ExecContext(ctx, `UPDATE clients SET revoked=1, revoked_at=?, revoked_reason=?,
+		revoked_serial=CASE WHEN ?='' THEN COALESCE(cert_serial,'') ELSE '' END, revoked_jobs=?, cert_serial=NULL, pending_serial='',
+		pending_key='', prev_serial='', token_secret_enc=NULL, name=name||'#revoked-'||id WHERE id=? AND revoked=0`,
+		now(), reason, reason, string(b), id)
 	if err != nil {
 		return err
 	}
@@ -760,7 +799,7 @@ func (s *Store) UnrevokeClient(ctx context.Context, c *Client, name, tokenID str
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE clients SET revoked=0, revoked_at=0, revoked_serial='', revoked_jobs='[]',
+	res, err := tx.ExecContext(ctx, `UPDATE clients SET revoked=0, revoked_at=0, revoked_reason='', revoked_serial='', revoked_jobs='[]',
 		cert_serial=revoked_serial, name=?, token_id=?, token_secret_enc=? WHERE id=? AND revoked=1 AND revoked_serial<>''`,
 		name, tokenID, tokenSecretEnc, c.ID)
 	if err != nil {

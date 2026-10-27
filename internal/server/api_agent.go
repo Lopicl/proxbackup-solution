@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -51,9 +50,10 @@ func (s *Server) requireAgent(h agentHandler) http.Handler {
 			httpError(w, http.StatusUnauthorized, errors.New("client certificate required"))
 			return
 		}
-		serial := r.TLS.VerifiedChains[0][0].SerialNumber.Text(16)
+		serial := connSerial(r)
 		c, err := s.store.ClientBySerial(r.Context(), serial)
 		if err != nil {
+			s.replacedCertUsed(r, serial)
 			httpError(w, http.StatusForbidden, errors.New("unknown or revoked client"))
 			return
 		}
@@ -67,6 +67,28 @@ func (s *Server) requireAgent(h agentHandler) http.Handler {
 		}
 		h(w, r, c)
 	})
+}
+
+// connSerial is the serial of the client certificate r came with.
+func connSerial(r *http.Request) string {
+	return r.TLS.VerifiedChains[0][0].SerialNumber.Text(16)
+}
+
+// replacedCertUsed handles a request with a certificate that a renewal
+// replaced. The agent stops using it once it has the new one, so its holder
+// is someone else. Asking for a certificate with it shortly after the renewal
+// means that someone else completed the renewal first: the client is revoked.
+func (s *Server) replacedCertUsed(r *http.Request, serial string) {
+	c, err := s.store.ClientByPrevSerial(r.Context(), serial)
+	if err != nil {
+		return
+	}
+	if r.URL.Path == "/agent/v1/cert" && time.Since(time.Unix(c.CertRenewedAt, 0)) < renewalRaceWindow {
+		s.revokeCompromised(r.Context(), c, "two parties renewed the client certificate", "remote", r.RemoteAddr)
+		return
+	}
+	s.log.Warn("a replaced client certificate was used: possible credential theft", "client", c.Name, "id", c.ID,
+		"serial", serial, "remote", r.RemoteAddr)
 }
 
 var clientNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
@@ -196,9 +218,13 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		return
 	}
 	ctx := r.Context()
-	s.store.TouchClient(ctx, c.ID, req)
+	serial := connSerial(r)
+	// A certificate due for renewal may be a stolen copy: what its polls report
+	// about the agent (features) isn't taken.
+	s.store.TouchClient(ctx, c.ID, req, !c.CertRenew)
 	s.store.MarkMissingLost(ctx, c.ID, req.RunningRuns)
 	agentRev := req.ConfigRev
+	renewing := c.CertRenew
 
 	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
 	wait = min(max(wait, 0), 55)
@@ -207,6 +233,15 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		wake := s.wakeChan(c.ID)
 		if fresh, err := s.store.Client(ctx, c.ID); err == nil {
 			c = fresh // e.g. moved to another namespace while this poll waited
+		}
+		// The certificate was renewed (or the client revoked) while this poll
+		// waited: config and a new token go only to the current certificate.
+		if c.Revoked || c.CertSerial != serial {
+			httpError(w, http.StatusForbidden, errors.New("client certificate replaced or revoked"))
+			return
+		}
+		if err := s.startExposedRotation(ctx, c); err != nil {
+			s.log.Warn("could not request credential rotation", "client", c.Name, "err", err)
 		}
 		if s.tokenRotationDue(c) {
 			if err := s.rotateClientToken(ctx, c); err != nil {
@@ -218,7 +253,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		offer := s.updater.agentOffer(ctx, c.ID, req.OS, req.AgentVersion)
 		resp := api.PollResponse{Jobs: []api.JobSpec{}, Cancel: s.store.CancelRequestedFor(ctx, c.ID), Update: offer,
 			ServerURL: strings.TrimRight(s.cfg.PublicURL, "/"),
-			RenewCert: c.CertRenew && slices.Contains(c.Features, api.FeatureCertRenewal)}
+			RenewCert: c.CertRenew}
 		cfg, err := s.agentConfig(ctx, c)
 		if err != nil {
 			httpError(w, http.StatusInternalServerError, err)
@@ -240,7 +275,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 			}
 			resp.Jobs = append(resp.Jobs, *spec)
 		}
-		if len(resp.Jobs) > 0 || len(resp.Cancel) > 0 || resp.Config != nil || offer != nil && offer.Force {
+		// A renewal requested meanwhile is answered at once (agents that can't
+		// renew ignore RenewCert; they'd poll again right away if every reply did).
+		if len(resp.Jobs) > 0 || len(resp.Cancel) > 0 || resp.Config != nil || offer != nil && offer.Force || resp.RenewCert && !renewing {
 			writeJSON(w, resp)
 			return
 		}

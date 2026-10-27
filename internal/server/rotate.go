@@ -5,7 +5,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -21,19 +23,43 @@ import (
 // Credential rotation. Windows agents up to 0.2.14 left their data directory
 // readable by every local user, so the PBS token in jobs.json and the
 // certificate key in client.key may have been copied. Their clients are marked
-// CredsExposed; once the agent reports api.FeatureDataDirACL, its next poll
-// gets a new PBS token secret and the agent is asked for a new certificate,
-// after which the old certificate serial is no longer accepted. Admins can
+// CredsExposed; once the agent reports api.FeatureDataDirACL, it is asked for a
+// new certificate. The first request with the new certificate makes the old
+// serial invalid, and the next poll gets a new PBS token secret. Admins can
 // request the same rotation for any client. The client encryption key can't be
 // rotated: existing snapshots stay encrypted with it.
+//
+// The order matters against someone who uses a copied certificate: the new
+// token only goes to the new certificate, which only the party that sent the
+// CSR can use. A renewal signs one key: a CSR for a second key means two
+// parties hold the old certificate, and the client is revoked.
 
 // rotateRetry is how long a failed token rotation waits before the next poll retries it.
 const rotateRetry = 10 * time.Minute
 
+// renewalRaceWindow: a CSR made with the replaced certificate this soon after
+// a renewal is the loser of a race between the agent and a copy of its
+// certificate (see replacedCertUsed). Later ones are only logged, so that a
+// stolen certificate can't revoke the client long after it was replaced.
+const renewalRaceWindow = time.Hour
+
+// startExposedRotation requests rotation for an exposed client whose agent
+// now keeps its credentials from local users.
+func (s *Server) startExposedRotation(ctx context.Context, c *Client) error {
+	if !c.CredsExposed || c.RotateToken || c.CertRenew || !slices.Contains(c.Features, api.FeatureDataDirACL) {
+		return nil
+	}
+	if err := s.store.RequestRotation(ctx, c.ID); err != nil {
+		return err
+	}
+	c.RotateToken, c.CertRenew = true, true
+	return nil
+}
+
 // tokenRotationDue reports whether the client's PBS token secret should be
-// replaced at this poll.
+// replaced at this poll: requested, and the certificate already renewed.
 func (s *Server) tokenRotationDue(c *Client) bool {
-	if !c.RotateToken && !(c.CredsExposed && slices.Contains(c.Features, api.FeatureDataDirACL)) {
+	if !c.RotateToken || c.CertRenew {
 		return false
 	}
 	s.rotateMu.Lock()
@@ -107,7 +133,9 @@ func (s *Server) recreateToken(ctx context.Context, pc *pbs.Client, t *Target, c
 
 // handleRenewCert signs a new client certificate for an agent the console
 // asked to renew it. The old certificate keeps working until the agent
-// connects with the new one (see requireAgent).
+// connects with the new one (see requireAgent). A repeated CSR for the same
+// key (the agent retrying after a lost reply) gets a certificate again; one
+// for another key revokes the client.
 func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request, c *Client) {
 	if !c.CertRenew {
 		httpError(w, http.StatusConflict, errors.New("no certificate renewal requested"))
@@ -118,28 +146,68 @@ func (s *Server) handleRenewCert(w http.ResponseWriter, r *http.Request, c *Clie
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	blk, _ := pem.Decode([]byte(req.CSR))
+	if blk == nil {
+		httpError(w, http.StatusBadRequest, errors.New("no PEM certificate request"))
+		return
+	}
+	csr, err := x509.ParseCertificateRequest(blk.Bytes)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
 	// A new certificate must come with a new key.
-	if blk, _ := pem.Decode([]byte(req.CSR)); blk != nil {
-		if csr, err := x509.ParseCertificateRequest(blk.Bytes); err == nil {
-			oldKey, _ := x509.MarshalPKIXPublicKey(r.TLS.VerifiedChains[0][0].PublicKey)
-			newKey, _ := x509.MarshalPKIXPublicKey(csr.PublicKey)
-			if bytes.Equal(oldKey, newKey) {
-				httpError(w, http.StatusBadRequest, errors.New("the CSR reuses the current key"))
-				return
-			}
-		}
+	oldKey, _ := x509.MarshalPKIXPublicKey(r.TLS.VerifiedChains[0][0].PublicKey)
+	newKey, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if bytes.Equal(oldKey, newKey) {
+		httpError(w, http.StatusBadRequest, errors.New("the CSR reuses the current key"))
+		return
+	}
+	sum := sha256.Sum256(newKey)
+	keyHash := hex.EncodeToString(sum[:])
+	if c.pendingSerial != "" && c.pendingKey != keyHash {
+		s.revokeCompromised(r.Context(), c, "a second certificate request for the same renewal", "remote", r.RemoteAddr)
+		httpError(w, http.StatusForbidden, errors.New("unknown or revoked client"))
+		return
 	}
 	certPEM, serial, err := s.pki.SignClientCSR([]byte(req.CSR), c.Name)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := s.store.SetPendingSerial(r.Context(), c.ID, serial); err != nil {
+	ok, err := s.store.SetPendingSerial(r.Context(), c.ID, serial, keyHash)
+	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !ok {
+		// Another CSR got in between (or the renewal completed or the client was revoked meanwhile).
+		if fresh, err := s.store.Client(r.Context(), c.ID); err == nil && !fresh.Revoked && fresh.CertRenew {
+			s.revokeCompromised(r.Context(), fresh, "a second certificate request for the same renewal", "remote", r.RemoteAddr)
+		}
+		httpError(w, http.StatusForbidden, errors.New("unknown or revoked client"))
 		return
 	}
 	s.log.Info("client certificate issued", "client", c.Name, "id", c.ID, "serial", serial)
 	writeJSON(w, api.RenewCertResponse{CertPEM: string(certPEM)})
+}
+
+// revokeCompromised revokes a client whose certificate someone else holds and
+// uses: its PBS token is deleted and neither serial is accepted any more. The
+// PC has to be enrolled again.
+func (s *Server) revokeCompromised(ctx context.Context, c *Client, reason string, logArgs ...any) {
+	s.deleteClientToken(ctx, c)
+	if err := s.store.RevokeCompromisedClient(ctx, c.ID, "possible credential theft: "+reason); err != nil {
+		s.log.Error("could not revoke a client with a stolen certificate", "client", c.Name, "id", c.ID, "err", err)
+		return
+	}
+	s.log.Warn("possible credential theft: client revoked; enroll the PC again", append([]any{"client", c.Name, "id", c.ID,
+		"reason", reason}, logArgs...)...)
+	s.wakeClient(c.ID)
 }
 
 // handleRotateCredentials requests a new PBS token secret and client

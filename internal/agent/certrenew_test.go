@@ -199,12 +199,20 @@ func TestFinishCertRenewal(t *testing.T) {
 		return string(b)
 	}
 
-	// Interrupted before the swap: the new pair is dropped.
+	// Interrupted before the swap: the new pair replaces the old one.
 	c := &Config{dir: t.TempDir()}
 	write(c, map[string]string{"client.key": "old key", "client.pem": "old cert", "client.renew.key": "new key", "client.renew.pem": "new cert"})
 	finishCertRenewal(c)
-	if read(c, "client.key") != "old key" || read(c, "client.pem") != "old cert" || read(c, "client.renew.key") != "-" || read(c, "client.renew.pem") != "-" {
-		t.Fatal("interrupted renewal not discarded")
+	if read(c, "client.key") != "new key" || read(c, "client.pem") != "new cert" || read(c, "client.renew.key") != "-" || read(c, "client.renew.pem") != "-" {
+		t.Fatal("interrupted renewal not completed")
+	}
+
+	// Interrupted before the console replied: the key is kept for the retry.
+	c = &Config{dir: t.TempDir()}
+	write(c, map[string]string{"client.key": "old key", "client.pem": "old cert", "client.renew.key": "new key"})
+	finishCertRenewal(c)
+	if read(c, "client.key") != "old key" || read(c, "client.pem") != "old cert" || read(c, "client.renew.key") != "new key" {
+		t.Fatal("pending renewal key not kept")
 	}
 
 	// Interrupted after the key was swapped: the certificate follows.
@@ -213,5 +221,36 @@ func TestFinishCertRenewal(t *testing.T) {
 	finishCertRenewal(c)
 	if read(c, "client.key") != "new key" || read(c, "client.pem") != "new cert" || read(c, "client.renew.pem") != "-" {
 		t.Fatal("interrupted renewal not completed")
+	}
+}
+
+// A retried renewal asks for the same key: the console revokes the client
+// on a CSR for a second key.
+func TestRenewalRetryKeepsKey(t *testing.T) {
+	c := &Config{dir: t.TempDir()}
+	pub := func(csrPEM []byte) string {
+		blk, _ := pem.Decode(csrPEM)
+		csr, err := x509.ParseCertificateRequest(blk.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := x509.MarshalPKIXPublicKey(csr.PublicKey)
+		return string(b)
+	}
+	key1, csr1, err := renewalKeyAndCSR(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key2, csr2, err := renewalKeyAndCSR(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(key1) != string(key2) || pub(csr1) != pub(csr2) {
+		t.Fatal("retry made a new key")
+	}
+	// After the swap, the next renewal gets a new key.
+	os.Rename(c.path("client.renew.key"), c.path("client.key"))
+	if _, csr3, err := renewalKeyAndCSR(c); err != nil || pub(csr3) == pub(csr1) {
+		t.Fatalf("next renewal reused the key (err %v)", err)
 	}
 }

@@ -185,12 +185,26 @@ func newKeyAndCSR(hostname string) (keyPEM, csrPEM []byte, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	csrPEM, err = csrFor(keyPEM, hostname)
+	return keyPEM, csrPEM, err
+}
+
+// csrFor creates a certificate signing request for the PEM private key.
+func csrFor(keyPEM []byte, hostname string) ([]byte, error) {
+	blk, _ := pem.Decode(keyPEM)
+	if blk == nil {
+		return nil, errors.New("no PEM private key")
+	}
+	key, err := x509.ParseECPrivateKey(blk.Bytes)
+	if err != nil {
+		return nil, err
+	}
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 		Subject: pkix.Name{CommonName: hostname, Organization: []string{"proxbackup-agent"}},
 	}, key)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr}), nil
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr}), nil
 }
