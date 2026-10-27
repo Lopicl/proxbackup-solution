@@ -4,6 +4,7 @@ package agent
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -83,6 +84,22 @@ func (l *LogFile) rotate() {
 		l.f, _ = os.OpenFile(l.path+".1", os.O_WRONLY|os.O_APPEND, 0o644)
 		l.size = 0
 	}
+}
+
+// WithConsole returns a writer that writes to l and copies to console when it
+// can. A Windows service has no valid stderr, so console writes fail there;
+// that must not cost the file its log (io.MultiWriter would stop at the
+// first failing writer).
+func (l *LogFile) WithConsole(console io.Writer) io.Writer {
+	return consoleTee{file: l, console: console}
+}
+
+type consoleTee struct{ file, console io.Writer }
+
+func (t consoleTee) Write(p []byte) (int, error) {
+	n, err := t.file.Write(p)
+	t.console.Write(p) // best effort, see WithConsole
+	return n, err
 }
 
 // Close closes the file.

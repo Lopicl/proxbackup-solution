@@ -4,6 +4,7 @@ package agent
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,5 +51,34 @@ func TestLogFileRotation(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(LogDir(dir), "agent.log")); string(b) != "hello\nhello\n" {
 		t.Errorf("reopen: %q", b)
+	}
+}
+
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("no console") }
+
+// A service has no valid stderr: the file must still get every line.
+func TestLogFileWithBrokenConsole(t *testing.T) {
+	dir := t.TempDir()
+	l, err := OpenLogFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := l.WithConsole(failWriter{})
+	if _, err := w.Write([]byte("hello\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var nilFile *os.File // what os.Stderr is when the process has no stderr handle
+	if _, err := l.WithConsole(nilFile).Write([]byte("world\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	l.Close()
+	b, err := os.ReadFile(filepath.Join(LogDir(dir), "agent.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "hello\nworld\n" {
+		t.Errorf("log file = %q", b)
 	}
 }

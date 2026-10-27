@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -101,7 +100,7 @@ func main() {
 			// The service has no console: also log to <data dir>\logs\agent.log.
 			if lf, lerr := agent.OpenLogFile(*dataDir); lerr == nil {
 				defer lf.Close()
-				log = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, lf), nil))
+				log = slog.New(slog.NewTextHandler(lf.WithConsole(os.Stderr), nil))
 			} else {
 				log.Warn("can't open the log file; logging to stderr only", "err", lerr)
 			}
