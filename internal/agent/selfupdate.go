@@ -79,15 +79,7 @@ func (r *Runner) selfUpdate(ctx context.Context, u *api.AgentUpdate) error {
 		os.Remove(next)
 		return fmt.Errorf("downloaded agent reports version %q (%v), want %s", got, err, u.Version)
 	}
-	// A running .exe can be renamed but not overwritten on Windows.
-	old := exe + ".old"
-	os.Remove(old)
-	if err := os.Rename(exe, old); err != nil {
-		os.Remove(next)
-		return err
-	}
-	if err := os.Rename(next, exe); err != nil {
-		os.Rename(old, exe)
+	if err := ReplaceExe(next, exe); err != nil {
 		os.Remove(next)
 		return err
 	}
@@ -148,10 +140,50 @@ func (r *Runner) download(ctx context.Context, u *api.AgentUpdate, dst string) e
 	return nil
 }
 
-// cleanupUpdate removes the previous binary left behind by an update.
+// maxOld bounds the names ReplaceExe moves a replaced binary to: exe.old,
+// then exe.old1 … while older ones still run (a tray not yet restarted).
+const maxOld = 10
+
+func oldName(exe string, i int) string {
+	if i == 0 {
+		return exe + ".old"
+	}
+	return fmt.Sprintf("%s.old%d", exe, i)
+}
+
+// ReplaceExe moves next to exe. A running .exe (the service, or a tray app
+// started from it) can be renamed but not overwritten on Windows, so exe is
+// first moved aside to a free .old name; cleanupUpdate removes it later. If
+// next can't be moved in, exe is put back.
+func ReplaceExe(next, exe string) error {
+	var old string
+	if _, err := os.Lstat(exe); err == nil {
+		for i := 0; i < maxOld; i++ {
+			os.Remove(oldName(exe, i)) // fails while that copy still runs
+			if err = os.Rename(exe, oldName(exe, i)); err == nil {
+				old = oldName(exe, i)
+				break
+			}
+		}
+		if old == "" {
+			return err
+		}
+	}
+	if err := os.Rename(next, exe); err != nil {
+		if old != "" {
+			os.Rename(old, exe)
+		}
+		return err
+	}
+	return nil
+}
+
+// cleanupUpdate removes the previous binaries left behind by an update.
 func cleanupUpdate() {
 	if exe, err := os.Executable(); err == nil {
-		os.Remove(exe + ".old")
+		for i := 0; i < maxOld; i++ {
+			os.Remove(oldName(exe, i))
+		}
 		os.Remove(exe + ".new")
 	}
 }

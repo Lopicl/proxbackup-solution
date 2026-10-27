@@ -63,8 +63,9 @@ func installService(dataDir string) error {
 // setup .exe carries) and installs the service from there, wherever this copy
 // was started from: a service run by SYSTEM must not live in a folder users
 // can write to. An existing service is stopped and pointed at the new copy;
-// one already set up that way is left as it is.
-func installAgent(dataDir string) error {
+// one already set up that way is left as it is. If anything fails after the
+// service was stopped, it is started again as it was.
+func installAgent(dataDir string) (retErr error) {
 	if _, err := agent.SecureDataDir(dataDir); err != nil {
 		return err
 	}
@@ -92,9 +93,24 @@ func installAgent(dataDir string) error {
 			fmt.Println("service install: already installed in", filepath.Dir(dst))
 			return nil
 		}
+		running := false
+		if st, err := s.Query(); err == nil && st.State != svc.Stopped {
+			running = true
+		}
 		fmt.Println("Stopping the existing ProxBackup Agent service ...")
 		if err := stopService(s); err != nil {
 			return err
+		}
+		if running {
+			defer func() {
+				if retErr != nil {
+					if err := s.Start(); err != nil {
+						retErr = fmt.Errorf("%w (and restarting the previous service failed: %v)", retErr, err)
+					} else {
+						fmt.Println("Restarted the previous ProxBackup Agent service.")
+					}
+				}
+			}()
 		}
 	}
 	if !fromDst {
@@ -194,8 +210,10 @@ func stopService(s *mgr.Service) error {
 	return errors.New("the ProxBackup Agent service did not stop within 45s")
 }
 
-// copyAgent writes the plain agent (src without a setup trailer) to dst. The
-// stopped service's process may hold the old file for a moment: retry.
+// copyAgent writes the plain agent (src without a setup trailer) to dst. A
+// running copy of dst (the tray app) is moved aside, as self-update does; the
+// stopped service's process may hold the old file for a moment: retry. The
+// tray notices the new file and restarts from it.
 func copyAgent(src, dst string) error {
 	size := int64(-1)
 	if _, n, ok := embeddedSetupToken(); ok {
@@ -227,7 +245,7 @@ func copyAgent(src, dst string) error {
 		return err
 	}
 	for i := 0; ; i++ {
-		if err = os.Rename(tmp, dst); err == nil || i == 20 {
+		if err = agent.ReplaceExe(tmp, dst); err == nil || i == 20 {
 			break
 		}
 		time.Sleep(500 * time.Millisecond)

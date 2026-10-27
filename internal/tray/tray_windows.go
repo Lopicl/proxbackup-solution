@@ -33,6 +33,7 @@ func Run(version, dataDir string, replace bool) int {
 		return ipc.TrayExitDuplicate
 	}
 	t := &app{version: version, dataDir: dataDir, exit: ipc.TrayExitQuit}
+	t.self = selfInfo()
 	systray.Run(t.ready, func() {})
 	return t.exit
 }
@@ -60,6 +61,7 @@ func singleInstance(replace bool) bool {
 type app struct {
 	version, dataDir string
 	exit             int
+	self             os.FileInfo // this tray's executable when it started (nil: unknown)
 
 	mu     sync.Mutex
 	status *ipc.Status
@@ -144,8 +146,8 @@ func (t *app) poll() {
 
 // apply updates the menu and icon for st (nil = agent unreachable).
 func (t *app) apply(st *ipc.Status) {
-	if st != nil && st.Exe != "" && (st.Version != t.version || !sameFile(st.Exe)) {
-		t.replace(st.Exe) // the agent was updated or moved: run the new tray
+	if st != nil && st.Exe != "" && (st.Version != t.version || !t.sameFile(st.Exe)) {
+		t.replace(st.Exe) // the agent was updated, reinstalled or moved: run the new tray
 		return
 	}
 	v := buildView(st, time.Now())
@@ -235,10 +237,36 @@ func (t *app) openRestore() {
 	}
 }
 
-// sameFile reports whether exe is this tray's executable.
-func sameFile(exe string) bool {
+// selfInfo identifies this tray's executable file. os.Stat would look up
+// the file id by path only when compared, after a reinstall replaced it, so
+// read it from an open handle now.
+func selfInfo() os.FileInfo {
 	self, err := os.Executable()
-	return err != nil || strings.EqualFold(filepath.Clean(self), filepath.Clean(exe))
+	if err != nil {
+		return nil
+	}
+	f, err := os.Open(self)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	fi, _ := f.Stat()
+	return fi
+}
+
+// sameFile reports whether exe is this tray's executable. Reinstalling the
+// same version moves the running file aside (to .old) and puts a new one at
+// the same path, so the path alone doesn't tell.
+func (t *app) sameFile(exe string) bool {
+	self, err := os.Executable()
+	if err != nil {
+		return true
+	}
+	if !strings.EqualFold(filepath.Clean(self), filepath.Clean(exe)) {
+		return false
+	}
+	fi, err := os.Stat(exe)
+	return t.self == nil || err != nil || os.SameFile(t.self, fi)
 }
 
 // replace starts the tray of the updated agent and exits this one.
