@@ -18,6 +18,11 @@ StateDirectory=proxbackup
 StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=5s
+# Keep a fault or a request flood from taking the PBS host's memory.
+Environment=GOMEMLIMIT=640MiB
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=512
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

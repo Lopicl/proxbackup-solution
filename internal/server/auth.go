@@ -15,8 +15,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"golang.org/x/crypto/argon2"
 )
 
 const (
@@ -32,7 +30,7 @@ var errInvalidLogin = errors.New("invalid username or password")
 func HashPassword(pw string) string {
 	salt := make([]byte, 16)
 	rand.Read(salt)
-	h := argon2.IDKey([]byte(pw), salt, 2, 64*1024, 2, 32)
+	h := argonKey(pw, salt, 32)
 	return "argon2id$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + base64.RawStdEncoding.EncodeToString(h)
 }
 
@@ -46,7 +44,7 @@ func checkPassword(hash, pw string) bool {
 	if err1 != nil || err2 != nil {
 		return false
 	}
-	got := argon2.IDKey([]byte(pw), salt, 2, 64*1024, 2, uint32(len(want)))
+	got := argonKey(pw, salt, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
@@ -275,11 +273,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	req.Username = strings.TrimSpace(req.Username)
+	wait, done := s.logins.begin(clientIP(r), req.Username)
+	if done == nil {
+		tooManyAttempts(w, wait)
+		return
+	}
 	id, hash, enabled, err := s.store.UserByName(ctx, req.Username)
 	if err != nil {
 		hash = dummyHash
 	}
 	ok := checkPassword(hash, req.Password) && err == nil
+	done(ok)
 	entry := &AuditEntry{UserID: id, Username: req.Username, Action: "sign-in", IP: clientIP(r)}
 	if !ok || !enabled {
 		entry.Status, entry.Detail = http.StatusUnauthorized, "wrong username or password"
@@ -348,8 +352,15 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, errors.New("this account signs in through an external identity provider"))
 		return
 	}
+	wait, done := s.logins.begin(clientIP(r), u.Name)
+	if done == nil {
+		tooManyAttempts(w, wait)
+		return
+	}
 	hash, err := s.store.UserPasswordHash(r.Context(), u.ID)
-	if err != nil || !checkPassword(hash, req.Current) {
+	ok := err == nil && checkPassword(hash, req.Current)
+	done(ok)
+	if !ok {
 		time.Sleep(500 * time.Millisecond)
 		httpError(w, http.StatusBadRequest, errors.New("current password is wrong"))
 		return

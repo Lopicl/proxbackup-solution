@@ -129,7 +129,8 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 
 *Console Settings* (gear icon) → *Users* adds console users and gives them roles: Administrator, Operator, Restore-only,
 Read-only or custom ones, each for all clients or only chosen clients and tags. Its *Audit log* tab lists
-sign-ins and every change. Users change their own password under the profile menu.
+sign-ins and every change. Users change their own password under the profile menu. Repeated failed
+sign-ins from one address or for one username are slowed down (HTTP 429 with the time to wait).
 
 ### 8. Monitor
 

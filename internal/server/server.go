@@ -64,6 +64,7 @@ type Server struct {
 	versions pbsVersions
 	catalogs catalogCache // snapshot catalogs open in the restore browser
 	storage  storageCache // datastore usage shown on the dashboard
+	logins   loginLimiter // sign-in throttling (loginlimit.go)
 }
 
 // New opens the data directory and prepares the server.
@@ -129,7 +130,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	errc := make(chan error, len(servers))
 	for _, hs := range servers {
-		hs.TLSConfig, hs.ReadHeaderTimeout = tlsConf, 10*time.Second
+		hs.TLSConfig, hs.ReadHeaderTimeout, hs.IdleTimeout = tlsConf, 10*time.Second, 2*time.Minute
 		go func() { errc <- hs.ListenAndServeTLS("", "") }()
 	}
 	s.log.Info("proxbackup-server listening", "ui", "https://"+displayAddr(s.cfg.UIAddr), "agents", cmp.Or(s.cfg.AgentAddr, s.cfg.UIAddr), "public_url", s.cfg.PublicURL)
@@ -316,6 +317,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 			}
 		}
 		s.store.PruneRestoreSessions(ctx)
+		s.logins.prune(time.Now())
 		if time.Since(lastDaily) > 24*time.Hour {
 			lastDaily = time.Now()
 			s.store.PruneHistory(ctx, 180*24*time.Hour)

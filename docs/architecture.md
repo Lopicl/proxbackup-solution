@@ -687,7 +687,13 @@ sequenceDiagram
 * **Admin UI:** session cookie plus a custom request header (`X-PROXBACKUP-Request`) against
   CSRF. Console users (argon2id, forced change of the generated initial password) with
   granular, client-scoped roles, enforced on every API route, and an audit log; optional OIDC
-  in phase 5 (SSO with MFA for the MSP console in phase 6).
+  in phase 5 (SSO with MFA for the MSP console in phase 6). Password checks are throttled
+  (`internal/server/loginlimit.go`): after 5 failures per client address (IPv6 by /64) or per
+  username, each further attempt waits twice as long (up to 15 min per address, 5 min per
+  username), with at most 4 concurrent attempts per address. An address that signed in to an
+  account before ignores that account's backoff, so a flood can't lock its owner out. At most
+  4 argon2id hashes (64 MiB each) run at once, and the systemd unit caps the console at
+  `MemoryMax=1G`, so a sign-in flood can't exhaust the PBS host's memory.
 * **Updates:** the console and its root helper only install release assets whose SHA-256
   matches the release's `SHA256SUMS`, and never downgrade. Agents verify the binary's size,
   hash and reported version and only fetch it from the console over mTLS. Releases are not
