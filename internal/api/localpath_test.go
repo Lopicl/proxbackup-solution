@@ -2,7 +2,10 @@
 
 package api
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLocalPath(t *testing.T) {
 	for p, want := range map[string]bool{
@@ -25,5 +28,25 @@ func TestLocalPath(t *testing.T) {
 	}
 	if CheckLocalPaths("source", `C:\Users`, `\\x\y`) == nil || CheckLocalPaths("source", `C:\a`, `D:\b`) != nil {
 		t.Error("CheckLocalPaths")
+	}
+}
+
+func TestQuotePath(t *testing.T) {
+	for p, want := range map[string]string{
+		`\\192.0.2.1\share`:  `"\\192.0.2.1\share"`,
+		`C:\Users\anna`:      `"C:\Users\anna"`,
+		"C:\\a\nb":           `"C:\\a\nb"`,
+		`C:\say "hi"`:        `"C:\\say \"hi\""`,
+		"C:\\x\u202egpj.exe": `"C:\\x\u202egpj.exe"`,
+		"C:\\\xff":           `"C:\\\xff"`,
+	} {
+		if got := QuotePath(p); got != want {
+			t.Errorf("QuotePath(%q) = %s, want %s", p, got, want)
+		}
+	}
+	// The console sends this message as JSON; once decoded it reads as typed.
+	err := CheckLocalPaths("target folder", `\\192.0.2.1\share`)
+	if err == nil || !strings.Contains(err.Error(), `target folder "\\192.0.2.1\share" must be`) {
+		t.Errorf("message: %v", err)
 	}
 }

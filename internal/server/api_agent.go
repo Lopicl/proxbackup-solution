@@ -360,6 +360,16 @@ func (s *Server) handleRegisterRun(w http.ResponseWriter, r *http.Request, c *Cl
 		return
 	}
 	ctx := r.Context()
+	if id, ok := s.store.RegisteredRun(ctx, c.ID, reg.UUID); ok { // a retry
+		writeJSON(w, api.RunRegisterResponse{RunID: id})
+		return
+	}
+	if !s.runRegs.allow(c.ID, time.Now()) {
+		// Agents retry a 429 later (spooled runs stay spooled).
+		w.Header().Set("Retry-After", "60")
+		httpError(w, http.StatusTooManyRequests, errors.New("too many run registrations; try again later"))
+		return
+	}
 	if reg.JobID > 0 {
 		if j, err := s.store.Job(ctx, reg.JobID); err != nil || j.ClientID != c.ID {
 			reg.JobID = 0 // job deleted meanwhile; keep the run for the record
@@ -431,6 +441,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, c *Client)
 	var events []api.Event
 	if err := decodeJSON(r, &events); err != nil {
 		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	// A finished run takes no more events. Lost runs still do: their report
+	// may have been spooled while the console was unreachable. The agent
+	// resends a batch whose answer it missed, so this isn't an error.
+	if api.Terminal(run.State) && run.State != api.RunLost {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	var logs []LogLine

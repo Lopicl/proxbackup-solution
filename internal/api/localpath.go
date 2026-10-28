@@ -5,6 +5,9 @@ package api
 import (
 	"fmt"
 	"regexp"
+	"strconv"
+	"strings"
+	"unicode/utf8"
 )
 
 // The agent runs as SYSTEM, so opening a UNC path (\\server\share) makes it
@@ -28,7 +31,7 @@ func LocalVolume(v string) bool { return localVolumeRe.MatchString(v) }
 func CheckLocalPaths(what string, paths ...string) error {
 	for _, p := range paths {
 		if !LocalPath(p) {
-			return fmt.Errorf(`%s %q must be a full path on a local drive, like C:\Folder (network paths are not allowed)`, what, p)
+			return fmt.Errorf(`%s %s must be a full path on a local drive, like C:\Folder (network paths are not allowed)`, what, QuotePath(p))
 		}
 	}
 	return nil
@@ -39,8 +42,19 @@ func CheckLocalPaths(what string, paths ...string) error {
 func CheckLocalVolumes(vols ...string) error {
 	for _, v := range vols {
 		if !LocalVolume(v) {
-			return fmt.Errorf(`volume %q must be a drive letter, like C:`, v)
+			return fmt.Errorf(`volume %s must be a drive letter, like C:`, QuotePath(v))
 		}
 	}
 	return nil
+}
+
+// QuotePath quotes a Windows path for a message. Unlike %q it leaves
+// backslashes alone, so `\\server\share` doesn't read as
+// `\\\\server\\share`. Paths with quotes, invalid UTF-8 or unprintable
+// characters (such as text direction overrides) are still escaped.
+func QuotePath(p string) string {
+	if !utf8.ValidString(p) || strings.ContainsFunc(p, func(r rune) bool { return !strconv.IsPrint(r) || r == '"' }) {
+		return strconv.Quote(p)
+	}
+	return `"` + p + `"`
 }

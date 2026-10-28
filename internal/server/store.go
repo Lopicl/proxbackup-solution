@@ -186,6 +186,9 @@ func (s *Store) migrate() error {
 		{"clients", "pending_key", "TEXT NOT NULL DEFAULT ''"},
 		{"clients", "prev_serial", "TEXT NOT NULL DEFAULT ''"},
 		{"clients", "revoked_reason", "TEXT NOT NULL DEFAULT ''"},
+		// What a run's log holds so far, for the caps in AddLogs.
+		{"runs", "log_lines", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "log_bytes", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -1190,6 +1193,13 @@ func (s *Store) QueueRun(ctx context.Context, jobID, clientID int64, kind, trigg
 	return res.LastInsertId()
 }
 
+// RegisteredRun returns the id of the run the client registered as uuid.
+func (s *Store) RegisteredRun(ctx context.Context, clientID int64, uuid string) (int64, bool) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM runs WHERE client_id=? AND uuid=?`, clientID, uuid).Scan(&id)
+	return id, err == nil
+}
+
 // RegisterRun records a run the agent started (or skipped) on its own.
 // It is idempotent on (client, uuid) so agents can retry safely.
 func (s *Store) RegisterRun(ctx context.Context, clientID int64, reg api.RunRegister) (int64, bool, error) {
@@ -1318,22 +1328,107 @@ func (s *Store) MarkMissingLost(ctx context.Context, clientID int64, running []i
 	s.db.ExecContext(ctx, q, args...)
 }
 
+// A run's log holds at most this much, and a client's run logs together at
+// most maxClientLogBytes (see TrimClientLogs), so an agent can't fill the
+// console's disk with log lines.
+const (
+	maxRunLogLines    = 20000
+	maxRunLogBytes    = 8 << 20
+	maxClientLogBytes = 256 << 20
+)
+
+// AddLogs appends lines to a run's log. Past maxRunLogLines or
+// maxRunLogBytes the rest is dropped, after one line saying so.
 func (s *Store) AddLogs(ctx context.Context, runID int64, lines []LogLine) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var n, size int
+	if err := tx.QueryRowContext(ctx, `SELECT log_lines, log_bytes FROM runs WHERE id=?`, runID).Scan(&n, &size); err != nil {
+		return err
+	}
+	if n > maxRunLogLines { // truncated before
+		return nil
+	}
 	st, err := tx.PrepareContext(ctx, `INSERT INTO run_logs(run_id, ts, level, msg) VALUES(?,?,?,?)`)
 	if err != nil {
 		return err
 	}
 	for _, l := range lines {
+		if n >= maxRunLogLines || size+len(l.Msg) > maxRunLogBytes {
+			l = LogLine{Time: l.Time, Level: "warn", Msg: fmt.Sprintf("log truncated: a run's log keeps at most %d lines or %d MiB; the rest was dropped",
+				maxRunLogLines, maxRunLogBytes>>20)}
+			if _, err := st.ExecContext(ctx, runID, l.Time, l.Level, l.Msg); err != nil {
+				return err
+			}
+			n = maxRunLogLines + 1
+			break
+		}
 		if _, err := st.ExecContext(ctx, runID, l.Time, l.Level, l.Msg); err != nil {
 			return err
 		}
+		n, size = n+1, size+len(l.Msg)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET log_lines=?, log_bytes=? WHERE id=?`, n, size, runID); err != nil {
+		return err
 	}
 	return tx.Commit()
+}
+
+// TrimClientLogs keeps the run logs of each client under maxBytes in total
+// by clearing the logs of its oldest runs. It returns how many it cleared.
+func (s *Store) TrimClientLogs(ctx context.Context, maxBytes int64) (int, error) {
+	type over struct{ client, bytes int64 }
+	var overs []over
+	rows, err := s.db.QueryContext(ctx, `SELECT client_id, SUM(log_bytes) FROM runs GROUP BY client_id HAVING SUM(log_bytes)>?`, maxBytes)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var o over
+		if err := rows.Scan(&o.client, &o.bytes); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		overs = append(overs, o)
+	}
+	rows.Close() // one connection: read everything before writing
+	var clear []int64
+	for _, o := range overs {
+		rows, err := s.db.QueryContext(ctx, `SELECT id, log_bytes FROM runs WHERE client_id=? AND log_bytes>0 ORDER BY id`, o.client)
+		if err != nil {
+			return 0, err
+		}
+		for excess := o.bytes - maxBytes; excess > 0 && rows.Next(); {
+			var id, n int64
+			if err := rows.Scan(&id, &n); err != nil {
+				rows.Close()
+				return 0, err
+			}
+			clear, excess = append(clear, id), excess-n
+		}
+		rows.Close()
+	}
+	msg := fmt.Sprintf("log removed: this client's run logs exceeded %d MiB, so the oldest were removed", maxBytes>>20)
+	for _, id := range clear {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return 0, err
+		}
+		_, err1 := tx.ExecContext(ctx, `DELETE FROM run_logs WHERE run_id=?`, id)
+		_, err2 := tx.ExecContext(ctx, `INSERT INTO run_logs(run_id, ts, level, msg) VALUES(?,?,?,?)`, id, now(), "warn", msg)
+		_, err3 := tx.ExecContext(ctx, `UPDATE runs SET log_lines=?, log_bytes=0 WHERE id=?`, maxRunLogLines+1, id)
+		if err := errors.Join(err1, err2, err3); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+	}
+	return len(clear), nil
 }
 
 func (s *Store) Logs(ctx context.Context, runID, afterID int64) ([]LogLine, error) {

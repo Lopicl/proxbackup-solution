@@ -16,6 +16,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"proxbackup/internal/api"
 )
 
 // restoreRoot is the target folder of a restore. Restores run as SYSTEM with
@@ -165,7 +167,7 @@ func openRestoreRoot(dir string) (*restoreRoot, error) {
 	dir = filepath.Clean(dir)
 	vol := filepath.VolumeName(dir)
 	if vol == "" || !filepath.IsAbs(dir) {
-		return nil, fmt.Errorf("target folder %q is not a full path", dir)
+		return nil, fmt.Errorf("target folder %s is not a full path", api.QuotePath(dir))
 	}
 	h, err := windows.CreateFile(windows.StringToUTF16Ptr(vol+`\`), dirAccess, shareAll, nil,
 		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)

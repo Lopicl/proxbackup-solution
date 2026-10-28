@@ -15,7 +15,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"net/url"
+	"strings"
 	"time"
 
 	"proxbackup/internal/api"
@@ -186,4 +189,22 @@ func Call(ctx context.Context, dataDir string, req Request) (*Response, error) {
 		return &resp, errors.New(resp.Error)
 	}
 	return &resp, nil
+}
+
+// CheckRestoreURL returns the restore page link u, made canonical, if it is
+// an https URL on the console's host (console is the console's URL; ""
+// skips that check). The tray opens it with the shell, which would just as
+// well run a program or open a network path.
+func CheckRestoreURL(u, console string) (string, error) {
+	p, err := url.Parse(u)
+	if err != nil || p.Scheme != "https" || p.Host == "" || p.Opaque != "" || p.User != nil {
+		return "", fmt.Errorf("the console sent an invalid restore page link %q", u)
+	}
+	if console != "" {
+		c, err := url.Parse(console)
+		if err != nil || !strings.EqualFold(c.Hostname(), p.Hostname()) {
+			return "", fmt.Errorf("the console sent a restore page link to another host (%s)", p.Hostname())
+		}
+	}
+	return p.String(), nil
 }

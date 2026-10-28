@@ -524,6 +524,8 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		ClientName string `json:"client_name"`
 		TargetID   int64  `json:"target_id"`
 		TTLHours   int    `json:"ttl_hours"`
+		// The name belonged to a revoked client and the user confirmed reusing it.
+		ReuseRevoked bool `json:"reuse_revoked"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpError(w, 400, err)
@@ -539,6 +541,16 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	if s.store.ClientNameTaken(ctx, name) {
 		httpError(w, 400, fmt.Errorf("client %q already exists or is waiting to enroll", name))
 		return
+	}
+	// The new client gets the revoked one's PBS token name and namespace, and
+	// with them read access to its backups: make the user confirm that (409).
+	if s.store.RevokedClientNamed(ctx, name) {
+		if !req.ReuseRevoked {
+			httpError(w, http.StatusConflict, fmt.Errorf("%q belonged to a revoked client: the PC enrolled under this name will see and can restore that client's backups", name))
+			return
+		}
+		auditDetail(r, "reuses the name of a revoked client, with access to its backups")
+		s.log.Warn("enrollment reuses a revoked client's name", "client", name)
 	}
 	if _, err := s.store.Target(ctx, req.TargetID); err != nil {
 		httpError(w, 400, errors.New("unknown target"))

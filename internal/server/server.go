@@ -66,6 +66,7 @@ type Server struct {
 	catalogs catalogCache // snapshot catalogs open in the restore browser
 	storage  storageCache // datastore usage shown on the dashboard
 	logins   loginLimiter // sign-in throttling (loginlimit.go)
+	runRegs  runLimiter   // agent run registrations (runlimit.go)
 }
 
 // New opens the data directory and prepares the server.
@@ -312,7 +313,7 @@ func (s *Server) wakeChan(id int64) <-chan struct{} {
 func (s *Server) housekeeping(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
-	lastDaily := time.Time{}
+	lastDaily, lastLogTrim := time.Time{}, time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -329,6 +330,15 @@ func (s *Server) housekeeping(ctx context.Context) {
 		}
 		s.store.PruneRestoreSessions(ctx)
 		s.logins.prune(time.Now())
+		s.runRegs.prune(time.Now())
+		if time.Since(lastLogTrim) > 10*time.Minute {
+			lastLogTrim = time.Now()
+			if n, err := s.store.TrimClientLogs(ctx, maxClientLogBytes); err != nil {
+				s.log.Error("trim run logs", "err", err)
+			} else if n > 0 {
+				s.log.Warn("removed the oldest run logs of clients over their log quota", "runs", n)
+			}
+		}
 		if time.Since(lastDaily) > 24*time.Hour {
 			lastDaily = time.Now()
 			s.store.PruneHistory(ctx, 180*24*time.Hour)

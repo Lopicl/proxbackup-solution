@@ -39,8 +39,9 @@ const (
 // loginLimiter throttles password checks per client address and per username:
 // after loginFreeFails failures the next attempt has to wait, twice as long
 // after each further failure. An address that signed in to an account before
-// isn't held back by that account's backoff, so failures from elsewhere can't
-// lock its owner out.
+// (a trusted pair) isn't held back by that account's or that address's
+// backoff, so failures from elsewhere, or from others behind the same NAT,
+// can't lock the account's owner out. Its own failures back off per pair.
 type loginLimiter struct {
 	mu      sync.Mutex
 	keys    map[string]*loginState
@@ -89,9 +90,13 @@ func (l *loginLimiter) begin(addr, user string) (wait time.Duration, done func(o
 		l.keys, l.trusted = map[string]*loginState{}, map[string]time.Time{}
 	}
 	a, u := l.state(addrKey, now), l.state(userKey, now)
-	wait = a.wait(now, loginMaxAddrDelay)
-	if _, ok := l.trusted[pair]; !ok {
-		wait = max(wait, u.wait(now, loginMaxUserDelay))
+	states := []*loginState{a, u}
+	if _, ok := l.trusted[pair]; ok {
+		p := l.state(pair, now)
+		states = append(states, p)
+		wait = p.wait(now, loginMaxAddrDelay)
+	} else {
+		wait = max(a.wait(now, loginMaxAddrDelay), u.wait(now, loginMaxUserDelay))
 	}
 	if wait <= 0 && a.inflight >= loginMaxInflight {
 		wait = time.Second
@@ -99,19 +104,24 @@ func (l *loginLimiter) begin(addr, user string) (wait time.Duration, done func(o
 	if wait > 0 {
 		return wait, nil
 	}
-	a.inflight++
-	u.inflight++
+	for _, st := range states {
+		st.inflight++
+	}
 	return 0, func(ok bool) {
 		l.mu.Lock()
 		defer l.mu.Unlock()
-		a.inflight--
-		u.inflight--
+		for _, st := range states {
+			st.inflight--
+		}
 		if ok {
 			u.fails = 0
+			if len(states) > 2 {
+				states[2].fails = 0
+			}
 			l.trusted[pair] = time.Now()
 			return
 		}
-		for _, st := range []*loginState{a, u} {
+		for _, st := range states {
 			st.fails++
 			st.last = time.Now()
 		}

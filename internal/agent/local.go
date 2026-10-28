@@ -290,9 +290,15 @@ func (r *Runner) restoreLink(ctx context.Context, peer *ipc.Peer) (string, error
 	var resp api.RestoreSessionResponse
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if err := postJSON(ctx, r.client(), r.serverURL()+"/agent/v1/restore-sessions", req, &resp); err != nil {
+	server := r.serverURL()
+	if err := postJSON(ctx, r.client(), server+"/agent/v1/restore-sessions", req, &resp); err != nil {
 		kept.Close()
 		return "", fmt.Errorf("the ProxBackup Console is unreachable: %w", err)
+	}
+	link, err := ipc.CheckRestoreURL(resp.URL, server)
+	if err != nil {
+		kept.Close()
+		return "", err
 	}
 	r.local.mu.Lock()
 	for k, s := range r.local.sessions {
@@ -304,7 +310,7 @@ func (r *Runner) restoreLink(ctx context.Context, peer *ipc.Peer) (string, error
 	r.local.sessions[ref] = sess
 	r.local.mu.Unlock()
 	r.log.Info("restore page opened from the tray", "user", peer.User, "admin", peer.Admin)
-	return resp.URL, nil
+	return link, nil
 }
 
 // restoreAs runs a restore a PC user requested on their restore page. It

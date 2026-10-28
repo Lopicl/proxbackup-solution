@@ -134,7 +134,10 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 *Console Settings* (gear icon) → *Users* adds console users and gives them roles: Administrator, Operator, Restore-only,
 Read-only or custom ones, each for all clients or only chosen clients and tags. Its *Audit log* tab lists
 sign-ins and every change. Users change their own password under the profile menu. Repeated failed
-sign-ins from one address or for one username are slowed down (HTTP 429 with the time to wait). Changing the host or
+sign-ins from one address or for one username are slowed down (HTTP 429 with the time to wait).
+Users who signed in from an address before aren't slowed down by others' failures there (shared
+NAT); only their own failed attempts count. Adding a client under the name of a revoked one asks
+for confirmation, because the new PC gets access to the revoked client's backups. Changing the host or
 fingerprint of a datastore that clients use needs *Restore* for all clients too, because clients send their
 PBS tokens to that host.
 
@@ -142,6 +145,8 @@ PBS tokens to that host.
 
 The *Dashboard* shows the usage of each datastore (now and over the last day, week, month or
 year) and how much data each client's latest backups hold. *Runs* lists active and recent runs.
+A run's log keeps at most 20,000 lines (8 MiB). Each client keeps at most 256 MiB of run logs, and the
+oldest are removed first, so a misbehaving agent can't fill the console's disk.
 
 ### Troubleshooting
 
@@ -257,13 +262,15 @@ release notes shown in consoles.
 | `proxbackup-server-linux-{amd64,arm64}` | standalone consoles |
 | `proxbackup-agent-windows-{amd64,arm64}.exe` | agents (served by the console) |
 | `SHA256SUMS` | integrity check for every download |
-| `SHA256SUMS.minisig` | its signature, once releases are signed (see below) |
+| `SHA256SUMS.minisig` | its signature (see below) |
 
-**Signed releases (not on yet):** put a minisign public key (`minisign -G -p
-internal/update/release.pub -s ~/.minisign/proxbackup.key`) in `internal/update/release.pub`.
-Builds carrying it only install signed releases from then on. The workflow then publishes drafts:
-`scripts/release.sh --sign <version>` signs `SHA256SUMS` on your machine and publishes the draft.
-Keep the secret key off GitHub and backed up. Without it, consoles can't install updates anymore.
+**Signed releases:** `internal/update/release.pub` holds the minisign public key. Builds carrying it
+only install releases whose `SHA256SUMS.minisig` checks out. The secret key stays on the
+maintainer's machine (`~/.minisign/proxbackup.key`, or `$PROXBACKUP_SIGNING_KEY`). Keep it, and its
+password, backed up offline and off GitHub: without it, consoles can't install updates anymore.
+The Release workflow therefore publishes drafts, and `scripts/release.sh --sign <version>` signs
+`SHA256SUMS` on your machine and publishes the draft (`--local` signs before uploading). Both need
+`minisign` (`brew install minisign`).
 
 **Pre-releases:** releases of `alpha` commits are published as GitHub pre-releases, installed only
 by consoles that opt in. Packages built from `alpha` are opted in by default ("Include

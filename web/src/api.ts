@@ -531,8 +531,9 @@ export const api = {
   enrollments: () => request<Enrollment[]>('GET', '/enrollments'),
   enrollmentCommand: (id: number) => request<{ command: string }>('GET', `/enrollments/${id}/command`),
   deleteEnrollment: (id: number) => request('DELETE', `/enrollments/${id}`),
-  createEnrollment: (client_name: string, target_id: number, ttl_hours: number) =>
-    request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours }),
+  // reuse_revoked confirms reusing a revoked client's name (refused with 409 otherwise).
+  createEnrollment: (client_name: string, target_id: number, ttl_hours: number, reuse_revoked = false) =>
+    request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours, reuse_revoked }),
 
   setupTokens: () => request<SetupToken[]>('GET', '/setup-tokens'),
   setupToken: (id: number) => request<{ token: string; command: string }>('GET', `/setup-tokens/${id}`),

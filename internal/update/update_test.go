@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"proxbackup/internal/update/updatetest"
 )
 
 func TestNewer(t *testing.T) {
@@ -74,27 +76,32 @@ func TestWindow(t *testing.T) {
 func TestLatestAndDownload(t *testing.T) {
 	payload := []byte("agent binary")
 	sum := sha256.Sum256(payload)
+	sumsFile := []byte(fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), AgentAsset("amd64")))
+	signer := updatetest.NewSigner(1)
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/repos/o/r/releases":
+		switch {
+		case r.URL.Path == "/repos/o/r/releases":
 			rel := func(tag string, pre bool) Release {
 				return Release{Tag: tag, Prerelease: pre, Assets: []Asset{
 					{Name: SumsAsset, URL: srv.URL + "/dl/sums"},
+					{Name: SigAsset, URL: srv.URL + "/dl/sig/" + tag},
 					{Name: AgentAsset("amd64"), URL: srv.URL + "/dl/agent"},
 				}}
 			}
 			json.NewEncoder(w).Encode([]Release{rel("v0.1.2.3", false), rel("v0.3.0.9", true), rel("v0.2.0.5", false), rel("nightly", false)})
-		case "/dl/sums":
-			fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(sum[:]), AgentAsset("amd64"))
-		case "/dl/agent":
+		case r.URL.Path == "/dl/sums":
+			w.Write(sumsFile)
+		case strings.HasPrefix(r.URL.Path, "/dl/sig/v"):
+			w.Write(signer.Sign(sumsFile, SumsComment(strings.TrimPrefix(r.URL.Path, "/dl/sig/v")), true))
+		case r.URL.Path == "/dl/agent":
 			w.Write(payload)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	defer srv.Close()
-	c := &Client{Repo: "o/r", API: srv.URL}
+	c := &Client{Repo: "o/r", API: srv.URL, Key: signer.Pub}
 	ctx := context.Background()
 	r, err := c.Latest(ctx, false)
 	if err != nil || r.Tag != "v0.2.0.5" {

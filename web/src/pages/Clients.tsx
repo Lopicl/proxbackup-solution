@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState } from 'react'
-import { api, clientName, type Enrollment, type SetupToken, type Target } from '../api'
+import { api, ApiError, clientName, type Enrollment, type SetupToken, type Target } from '../api'
 import { usePerms } from '../perms'
 import { ago, Card, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
 
@@ -340,6 +340,16 @@ function AddClient({ onClose }: { onClose: () => void }) {
             try {
               setResult(await api.createEnrollment(name, tid, ttl))
             } catch (err) {
+              // 409: the name belonged to a revoked client, whose backups the new PC would see.
+              if (err instanceof ApiError && err.status === 409) {
+                if (!confirm(`${err.message}.\n\nOnly reuse it if the new PC's users may see the old PC's files. Enroll under this name anyway?`)) return
+                try {
+                  setResult(await api.createEnrollment(name, tid, ttl, true))
+                } catch (err2) {
+                  setError((err2 as Error).message)
+                }
+                return
+              }
               setError((err as Error).message)
             }
           }}

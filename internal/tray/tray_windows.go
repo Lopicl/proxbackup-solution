@@ -232,8 +232,20 @@ func (t *app) openRestore() {
 		message("The restore page can't be opened: "+err.Error(), true)
 		return
 	}
-	if err := windows.ShellExecute(0, windows.StringToUTF16Ptr("open"), windows.StringToUTF16Ptr(resp.URL), nil, nil, windows.SW_SHOWNORMAL); err != nil {
-		message(fmt.Sprintf("Open %s in your browser to restore files (%v).", resp.URL, err), true)
+	// The agent checked the link already; check again before the shell sees it.
+	server := ""
+	t.mu.Lock()
+	if t.status != nil {
+		server = t.status.Server
+	}
+	t.mu.Unlock()
+	link, err := ipc.CheckRestoreURL(resp.URL, server)
+	if err != nil {
+		message("The restore page can't be opened: "+err.Error(), true)
+		return
+	}
+	if err := windows.ShellExecute(0, windows.StringToUTF16Ptr("open"), windows.StringToUTF16Ptr(link), nil, nil, windows.SW_SHOWNORMAL); err != nil {
+		message(fmt.Sprintf("Open %s in your browser to restore files (%v).", link, err), true)
 	}
 }
 

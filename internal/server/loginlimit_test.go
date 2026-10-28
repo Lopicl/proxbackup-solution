@@ -80,6 +80,37 @@ func TestLoginLimiterTrustedAddress(t *testing.T) {
 	done(true)
 }
 
+func TestLoginLimiterSharedAddress(t *testing.T) {
+	var l loginLimiter
+	_, done := l.begin("192.0.2.1", "alice")
+	done(true)
+	// Someone else behind the same address fails a lot.
+	failLogins(t, &l, "192.0.2.1", "mallory", loginFreeFails)
+	if _, done := l.begin("192.0.2.1", "bob"); done != nil {
+		t.Fatal("address not throttled for an account that never signed in from it")
+	}
+	_, done = l.begin("192.0.2.1", "alice")
+	if done == nil {
+		t.Fatal("trusted user locked out by failures of others on the same address")
+	}
+	done(true)
+	// Guessing alice's password from her address still backs off.
+	failLogins(t, &l, "192.0.2.1", "alice", loginFreeFails)
+	if _, done := l.begin("192.0.2.1", "alice"); done != nil {
+		t.Fatal("failures on a trusted pair not throttled")
+	}
+	// A success after the wait resets the pair's backoff.
+	l.keys["user:"+hashToken("alice")+"@addr:192.0.2.1"].last = time.Now().Add(-2 * time.Second)
+	_, done = l.begin("192.0.2.1", "alice")
+	if done == nil {
+		t.Fatal("trusted pair still throttled after its wait")
+	}
+	done(true)
+	if st := l.keys["user:"+hashToken("alice")+"@addr:192.0.2.1"]; st.fails != 0 {
+		t.Fatalf("pair failures after a success = %d", st.fails)
+	}
+}
+
 func TestLoginLimiterConcurrency(t *testing.T) {
 	var l loginLimiter
 	var dones []func(bool)

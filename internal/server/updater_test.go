@@ -24,18 +24,26 @@ import (
 
 	"proxbackup/internal/api"
 	"proxbackup/internal/update"
+	"proxbackup/internal/update/updatetest"
 )
 
 // fakeGitHub serves releases v0.1.0.1 (the running console), the newer
 // v0.1.0.5 and v0.1.1.2, and the older v0.0.9.0.
+// releaseSigner signs fakeGitHub's releases (newTestServer trusts its key).
+var releaseSigner = updatetest.NewSigner(1)
+
 func fakeGitHub(t *testing.T) *httptest.Server {
 	agent := []byte("agent 0.1.0.1")
 	sum := sha256.Sum256(agent)
+	var sums []byte
+	for _, a := range []string{"amd64", "arm64"} {
+		sums = fmt.Appendf(sums, "%s  %s\n", hex.EncodeToString(sum[:]), update.AgentAsset(a))
+	}
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rel := func(v string) update.Release {
 			var assets []update.Asset
-			for _, n := range []string{update.SumsAsset, update.AgentAsset("amd64"), update.AgentAsset("arm64")} {
+			for _, n := range []string{update.SumsAsset, update.SigAsset, update.AgentAsset("amd64"), update.AgentAsset("arm64")} {
 				assets = append(assets, update.Asset{Name: n, URL: srv.URL + "/dl/" + v + "/" + n})
 			}
 			return update.Release{Tag: "v" + v, HTMLURL: "https://example/" + v, Assets: assets}
@@ -46,9 +54,10 @@ func fakeGitHub(t *testing.T) *httptest.Server {
 		case strings.HasPrefix(r.URL.Path, "/repos/o/r/releases/tags/v"):
 			json.NewEncoder(w).Encode(rel(strings.TrimPrefix(r.URL.Path, "/repos/o/r/releases/tags/v")))
 		case strings.HasSuffix(r.URL.Path, "/"+update.SumsAsset):
-			for _, a := range []string{"amd64", "arm64"} {
-				fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(sum[:]), update.AgentAsset(a))
-			}
+			w.Write(sums)
+		case strings.HasSuffix(r.URL.Path, "/"+update.SigAsset):
+			v := strings.Split(strings.TrimPrefix(r.URL.Path, "/dl/"), "/")[0]
+			w.Write(releaseSigner.Sign(sums, update.SumsComment(v), true))
 		case strings.Contains(r.URL.Path, "/dl/"):
 			w.Write(agent)
 		default:
@@ -67,7 +76,7 @@ func newTestServer(t *testing.T, mode string) *Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.store.Close() })
-	s.updater.gh.API = fakeGitHub(t).URL
+	s.updater.gh.API, s.updater.gh.Key = fakeGitHub(t).URL, releaseSigner.Pub
 	return s
 }
 
