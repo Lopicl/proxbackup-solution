@@ -23,7 +23,9 @@ export function Targets() {
           canManage && (
             <button
               className="primary"
-              onClick={() => setEdit({ pbs_user: 'proxbackup@pbs', root_ns: 'pcs', ...(local && { host: local.host, admin_auth_id: local.auth_id }) })}
+              onClick={() =>
+                setEdit({ pbs_user: 'proxbackup@pbs', admin_auth_id: 'proxbackup@pbs', root_ns: 'pcs', ...(local && { host: local.host, admin_auth_id: local.auth_id }) })
+              }
             >
               Add datastore
             </button>
@@ -39,7 +41,7 @@ export function Targets() {
                 <th>Name</th>
                 <th>Host</th>
                 <th>Datastore / namespace</th>
-                <th>Admin token</th>
+                <th>PBS admin</th>
                 <th>Agent user</th>
                 <th></th>
               </tr>
@@ -80,19 +82,20 @@ export function Targets() {
       </Card>
       <Card title="How agents are provisioned">
         <p className="muted-text">
-          When a PC enrolls, the server uses the admin token to create namespace <code>&lt;root namespace&gt;/&lt;client&gt;</code>, an API token{' '}
+          When a PC enrolls, the server signs in as the PBS admin to create namespace <code>&lt;root namespace&gt;/&lt;client&gt;</code>, an API token{' '}
           <code>&lt;agent user&gt;!&lt;client&gt;</code> and grants it <b>DatastoreBackup</b> on that namespace only. Agents can create and restore their own
           snapshots, but cannot delete, prune or read other clients' backups. Retention (prune) is run by this server.
         </p>
         <p className="muted-text">
-          The admin token needs permission to manage users, tokens, ACLs, namespaces and to prune and delete snapshots — e.g. a token of <code>root@pam</code>{' '}
-          without privilege separation, or a dedicated user with the <b>Admin</b> role on <code>/</code>.
+          Use the agent user itself as PBS admin, with its password and the <b>DatastoreAdmin</b> role on <code>/datastore</code> (or on the datastore) and
+          nothing else: PBS lets it set ACLs only for its own tokens and never gives them more than it has. On this PBS the console's own user{' '}
+          <code>proxbackup@pbs</code> is set up like that. An API token as admin needs the <b>Admin</b> role on <code>/</code>.
         </p>
       </Card>
       {edit && (
         <TargetEditor
           t={edit}
-          localAuthID={local?.auth_id}
+          local={local}
           onClose={() => {
             setEdit(null)
             reload()
@@ -103,9 +106,9 @@ export function Targets() {
   )
 }
 
-function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?: string; onClose: () => void }) {
-  const isLocal = !!localAuthID && init.admin_auth_id === localAuthID
+function TargetEditor({ t: init, local, onClose }: { t: Form; local?: { auth_id: string; host: string }; onClose: () => void }) {
   const [t, setT] = useState<Form>(init)
+  const isLocal = init.id ? !!init.local : !!local && t.admin_auth_id === local.auth_id && t.host === local.host
   const [error, setError] = useState('')
   const [test, setTest] = useState('')
   const set = (p: Form) => setT({ ...t, ...p })
@@ -152,16 +155,16 @@ function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?
           </Field>
         </div>
         <div className="grid2">
-          <Field label="Admin API token ID">
-            <input value={t.admin_auth_id ?? ''} onChange={(e) => set({ admin_auth_id: e.target.value })} required placeholder="root@pam!proxbackup" />
+          <Field label="PBS admin" hint="The agent user (recommended), or an API token ID (user@realm!token).">
+            <input value={t.admin_auth_id ?? ''} onChange={(e) => set({ admin_auth_id: e.target.value })} required placeholder="proxbackup@pbs" />
           </Field>
           <Field
-            label="Admin API token secret"
+            label="Password or token secret"
             hint={
               isLocal
-                ? 'Not needed: this is the token created when the console was installed on this PBS.'
+                ? 'Not needed: this is the PBS user created when the console was installed on this PBS.'
                 : t.id
-                  ? 'Leave empty to keep the stored secret (enter it again when changing host, fingerprint or token ID).'
+                  ? 'Leave empty to keep the stored one (enter it again when changing host, fingerprint or PBS admin).'
                   : 'Stored encrypted.'
             }
           >
@@ -174,7 +177,7 @@ function TargetEditor({ t: init, localAuthID, onClose }: { t: Form; localAuthID?
             />
           </Field>
         </div>
-        <Field label="PBS user owning the agent tokens" hint="Created automatically if missing (no password, cannot log in).">
+        <Field label="PBS user owning the agent tokens" hint="Must be the PBS admin when that is a user. With a token as admin, created if missing (without a password).">
           <input value={t.pbs_user ?? ''} onChange={(e) => set({ pbs_user: e.target.value })} placeholder="proxbackup@pbs" />
         </Field>
         {test && <div className="notice">{test}</div>}

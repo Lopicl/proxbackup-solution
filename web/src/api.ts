@@ -197,6 +197,8 @@ export interface Target {
   root_ns: string
   admin_auth_id: string
   pbs_user: string
+  // This console's own PBS: fingerprint and credentials follow the install.
+  local: boolean
 }
 
 export interface Snapshot {

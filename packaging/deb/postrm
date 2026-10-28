@@ -1,6 +1,7 @@
 #!/bin/sh
-# purge removes the console's settings, database and its PBS admin token.
-# Backups, namespaces and the per-PC tokens in PBS are left untouched.
+# purge removes the console's settings and database, and with them the only
+# copy of the proxbackup@pbs password. Backups, namespaces, that user and the
+# per-PC tokens it owns are left untouched, so agents keep backing up.
 set -e
 case "$1" in
 remove)
@@ -8,6 +9,7 @@ remove)
 	;;
 purge)
 	if command -v proxmox-backup-manager >/dev/null 2>&1; then
+		# The root token of packages up to 0.2.16, if one is left.
 		proxmox-backup-manager user delete-token root@pam proxbackup-console >/dev/null 2>&1 || true
 	fi
 	rm -rf /etc/proxbackup /var/lib/proxbackup

@@ -25,16 +25,31 @@ import (
 	"proxbackup/pkg/pbs"
 )
 
-// fakePBS answers the calls the target test makes and records the tokens it
-// was sent. Each one has its own certificate (httptest shares one).
+// fakePBS answers the calls the target test makes and records the credentials
+// it was sent: token headers, and "password:<pw>" for sign-ins. Each one has
+// its own certificate (httptest shares one).
 func fakePBS(t *testing.T) (*httptest.Server, string, func() []string) {
 	t.Helper()
 	var mu sync.Mutex
 	var auths []string
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		auths = append(auths, r.Header.Get("Authorization"))
-		mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/access/ticket") {
+			var in struct{ Password string }
+			json.NewDecoder(r.Body).Decode(&in)
+			mu.Lock()
+			auths = append(auths, "password:"+in.Password)
+			mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"ticket": "PBS:t", "CSRFPreventionToken": "c"}})
+			return
+		}
+		if r.Header.Get("Authorization") != "" {
+			mu.Lock()
+			auths = append(auths, r.Header.Get("Authorization"))
+			mu.Unlock()
+		} else if r.Header.Get("Cookie") == "" {
+			http.Error(w, "no credentials", http.StatusUnauthorized)
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/version") {
 			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"version": "4.0", "release": "1"}})
 			return
@@ -61,8 +76,8 @@ func TestTargetSecretsStayWithTheirPBS(t *testing.T) {
 	evil, evilFP, evilAuths := fakePBS(t)
 	localHost, evilHost := local.Listener.Addr().String(), evil.Listener.Addr().String()
 	secretFile := filepath.Join(t.TempDir(), "secret")
-	os.WriteFile(secretFile, []byte("local-root-secret\n"), 0o600)
-	const localID = "root@pam!proxbackup-console"
+	os.WriteFile(secretFile, []byte("local-password\n"), 0o600)
+	const localID = "proxbackup@pbs"
 	s.cfg.LocalPBS = &LocalPBS{APIAddr: localHost, PublicHost: localHost, AuthID: localID, SecretFile: secretFile}
 
 	stored := &Target{Name: "remote", Host: localHost, Fingerprint: localFP, Datastore: "ds", AdminAuthID: "admin@pbs!t",
@@ -110,7 +125,7 @@ func TestTargetSecretsStayWithTheirPBS(t *testing.T) {
 		t.Fatalf("local target test: %d", c)
 	}
 	a := localAuths()
-	if len(a) != 4 || !strings.HasSuffix(a[0], ":stored-secret") || !strings.HasSuffix(a[2], ":local-root-secret") {
+	if len(a) != 3 || !strings.HasSuffix(a[0], ":stored-secret") || a[2] != "password:local-password" {
 		t.Fatalf("local PBS received %q", a)
 	}
 
@@ -139,6 +154,86 @@ func TestTargetSecretsStayWithTheirPBS(t *testing.T) {
 	}
 	if c := save(0, map[string]any{"name": "l", "host": localHost, "datastore": "ds", "admin_auth_id": localID}); c != 200 {
 		t.Fatalf("new local target: %d", c)
+	}
+	ts, _ := s.store.Targets(ctx)
+	for _, tg := range ts {
+		if tg.Local != (tg.Name == "l") {
+			t.Fatalf("target %s local=%v", tg.Name, tg.Local)
+		}
+	}
+
+	// A remote PBS with a user of the same name gets neither the local
+	// fingerprint nor its password.
+	remote := map[string]any{"name": "r", "host": evilHost, "datastore": "ds", "admin_auth_id": localID, "pbs_user": localID}
+	if c := save(0, remote); c != 400 {
+		t.Fatalf("remote target with the local user and no password: %d", c)
+	}
+	remote["admin_secret"] = "remote-password"
+	if c := save(0, remote); c != 200 {
+		t.Fatalf("remote target with the local user's name: %d", c)
+	}
+	if a := evilAuths(); len(a) != 0 {
+		t.Fatalf("other host received %q", a)
+	}
+	ts, _ = s.store.Targets(ctx)
+	for _, tg := range ts {
+		if tg.Name == "r" && (tg.Local || tg.Fingerprint != "") {
+			t.Fatalf("remote target %+v", tg)
+		}
+	}
+	// A user admin must own the agent tokens.
+	if c := save(0, map[string]any{"name": "u", "host": evilHost, "datastore": "ds", "admin_auth_id": "admin@pbs",
+		"pbs_user": "proxbackup@pbs", "admin_secret": "x"}); c != 400 {
+		t.Fatalf("user admin other than the agent user: %d", c)
+	}
+}
+
+// TestLocalTargetsLeaveRootToken checks that local targets of the package's
+// old root token move to its PBS user, and that remote ones stay as they are.
+func TestLocalTargetsLeaveRootToken(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	local, localFP, _ := fakePBS(t)
+	localHost := local.Listener.Addr().String()
+	secretFile := filepath.Join(t.TempDir(), "pbs-password")
+	os.WriteFile(secretFile, []byte("local-password\n"), 0o600)
+	s.cfg.LocalPBS = &LocalPBS{APIAddr: localHost, PublicHost: localHost, AuthID: "proxbackup@pbs", SecretFile: secretFile}
+
+	// Saved by an older console: no local column yet.
+	if _, err := s.store.db.Exec(`ALTER TABLE targets DROP COLUMN local`); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range [][]string{
+		{"ds", legacyLocalAuthID, "proxbackup@pbs"},
+		{"other-user", legacyLocalAuthID, "pbtest@pbs"},
+		{"remote", "proxbackup@pbs", "proxbackup@pbs"},
+	} {
+		if _, err := s.store.db.Exec(`INSERT INTO targets(name, host, fingerprint, datastore, admin_auth_id, admin_secret_enc, pbs_user, created_at)
+			VALUES(?, 'remote.example:8007', 'aa', 'ds', ?, X'', ?, 1)`, row[0], row[1], row[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.store.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.syncLocalTargets(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ts, _ := s.store.Targets(ctx)
+	got := map[string]*Target{}
+	for _, tg := range ts {
+		got[tg.Name] = tg
+	}
+	if tg := got["ds"]; !tg.Local || tg.AdminAuthID != "proxbackup@pbs" || tg.Host != localHost || tg.Fingerprint != localFP {
+		t.Fatalf("migrated target %+v", tg)
+	} else if sec, _ := s.sealer.Open(tg.adminSecretEnc, colTargetSecret, tg.ID); sec != "local-password" {
+		t.Fatalf("migrated target secret %q", sec)
+	}
+	if tg := got["other-user"]; !tg.Local || tg.AdminAuthID != legacyLocalAuthID {
+		t.Fatalf("target of another agent user %+v", tg)
+	}
+	if tg := got["remote"]; tg.Local || tg.Host != "remote.example:8007" || len(tg.adminSecretEnc) != 0 {
+		t.Fatalf("remote target %+v", tg)
 	}
 }
 

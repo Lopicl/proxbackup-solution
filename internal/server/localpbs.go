@@ -19,22 +19,39 @@ import (
 
 // LocalPBS describes the Proxmox Backup Server this console runs on (the .deb
 // install). The console then needs no manual setup: it registers the PBS
-// datastores as targets with the admin token the package created and keeps
-// their certificate fingerprint current. Console users are its own (see
-// users.go), not PBS accounts.
+// datastores as targets with the PBS user the package created and keeps their
+// certificate fingerprint current. Console users are its own (see users.go),
+// not PBS accounts.
+//
+// That PBS user (proxbackup@pbs) has DatastoreAdmin on /datastore and nothing
+// else. It signs in with its password and owns the agents' tokens: PBS lets it
+// set ACLs only for those, and caps them at its own privileges.
 type LocalPBS struct {
 	APIAddr    string // this host's PBS API, normally "127.0.0.1:8007"
 	PublicHost string // PBS address agents connect to, e.g. "pbs.example.lan:8007"
-	AuthID     string // admin token created by the package, e.g. "root@pam!proxbackup-console"
-	SecretFile string // file holding the token secret
+	AuthID     string // PBS user created by the package, "proxbackup@pbs" (or a token id)
+	SecretFile string // file holding its password (or the token secret)
 }
 
+// legacyLocalAuthID is the root token packages up to 0.2.16 created, with
+// Admin on /. The package now deletes it, and its targets move to the PBS user.
+const legacyLocalAuthID = "root@pam!proxbackup-console"
+
 const localTargetsInitKey = "local_pbs_targets_initialized"
+
+// pbsUser is the agent user of local targets: the console's own PBS user,
+// which is the only one whose tokens it may grant ACLs to.
+func (l *LocalPBS) pbsUser() string {
+	if pbs.IsTokenID(l.AuthID) {
+		return "proxbackup@pbs"
+	}
+	return l.AuthID
+}
 
 func (l *LocalPBS) secret() (string, error) {
 	b, err := os.ReadFile(l.SecretFile)
 	if err != nil {
-		return "", fmt.Errorf("local PBS token: %w", err)
+		return "", fmt.Errorf("local PBS credentials: %w", err)
 	}
 	return strings.TrimSpace(string(b)), nil
 }
@@ -89,9 +106,8 @@ func (s *Server) localPBSLoop(ctx context.Context) {
 }
 
 // syncLocalTargets registers every datastore of the local PBS as a target the
-// first time it runs, and afterwards refreshes the fingerprint and token secret
-// of targets using the local admin token. Targets the admin deleted are not
-// recreated.
+// first time it runs, and afterwards refreshes the fingerprint and credentials
+// of the local targets. Targets the admin deleted are not recreated.
 func (s *Server) syncLocalTargets(ctx context.Context) error {
 	l := s.cfg.LocalPBS
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -105,11 +121,27 @@ func (s *Server) syncLocalTargets(ctx context.Context) error {
 		return err
 	}
 	for _, t := range ts {
+		if !t.Local {
+			continue
+		}
+		migrated := false
+		if t.AdminAuthID == legacyLocalAuthID && t.AdminAuthID != l.AuthID {
+			// The package replaced the root token with the PBS user, which can
+			// only manage its own tokens.
+			if t.PBSUser != l.pbsUser() {
+				s.log.Warn("local PBS target still uses the removed root token: its agent user isn't the console's PBS user, "+
+					"so the console can't manage its clients' tokens. Set its agent user to "+l.pbsUser()+" and enroll them again",
+					"target", t.Name, "agent_user", t.PBSUser)
+				continue
+			}
+			t.AdminAuthID, migrated = l.AuthID, true
+			s.log.Info("local PBS target moved off the root token", "target", t.Name, "auth_id", l.AuthID)
+		}
 		if t.AdminAuthID != l.AuthID {
 			continue
 		}
 		old, _ := s.sealer.Open(t.adminSecretEnc, colTargetSecret, t.ID)
-		if t.Fingerprint == fp && old == secret && t.Host == l.PublicHost {
+		if !migrated && t.Fingerprint == fp && old == secret && t.Host == l.PublicHost {
 			continue
 		}
 		t.Fingerprint, t.Host = fp, l.PublicHost
@@ -133,13 +165,13 @@ func (s *Server) syncLocalTargets(ctx context.Context) error {
 	for _, ds := range stores {
 		exists := false
 		for _, t := range ts {
-			exists = exists || t.Datastore == ds.Store && t.AdminAuthID == l.AuthID
+			exists = exists || t.Datastore == ds.Store && t.Local
 		}
 		if exists {
 			continue
 		}
 		t := &Target{Name: ds.Store, Host: l.PublicHost, Fingerprint: fp, Datastore: ds.Store, RootNS: "pcs",
-			AdminAuthID: l.AuthID, PBSUser: "proxbackup@pbs"}
+			AdminAuthID: l.AuthID, PBSUser: l.pbsUser(), Local: true}
 		if err := s.store.SaveTarget(ctx, t, s.sealer.sealFor(secret, colTargetSecret)); err != nil {
 			return err
 		}
@@ -159,22 +191,22 @@ func (s *Server) wakeTargetClients(ctx context.Context, targetID int64) {
 }
 
 // localFingerprintFor returns the local PBS fingerprint for targets using the
-// local admin token, so the target form can leave it empty.
-func (s *Server) localFingerprintFor(ctx context.Context, authID string) string {
-	if l := s.cfg.LocalPBS; l != nil && authID == l.AuthID {
+// local PBS user, so the target form can leave it empty.
+func (s *Server) localFingerprintFor(ctx context.Context, authID, host string) string {
+	if l := s.cfg.LocalPBS; l != nil && authID == l.AuthID && l.isLocalHost(host) {
 		fp, _ := l.fingerprint(ctx)
 		return fp
 	}
 	return ""
 }
 
-// localSecretFor fills in the local admin token secret when a target form uses
-// the local token id without a secret (the admin never sees that secret). It is
-// only handed out for this PBS's address and certificate fingerprint, so a form
-// cannot send the root token to another host.
+// localSecretFor fills in the local PBS user's password when a target form uses
+// that user without a secret (the admin never sees it). It is only handed out
+// for this PBS's address and certificate fingerprint, so a form cannot send it
+// to another host.
 func (s *Server) localSecretFor(ctx context.Context, authID, host, fp string) string {
 	l := s.cfg.LocalPBS
-	if l == nil || authID != l.AuthID || !sameHost(host, l.PublicHost) && !sameHost(host, l.APIAddr) {
+	if l == nil || authID != l.AuthID || !l.isLocalHost(host) {
 		return ""
 	}
 	local, err := l.fingerprint(ctx)
@@ -183,6 +215,10 @@ func (s *Server) localSecretFor(ctx context.Context, authID, host, fp string) st
 	}
 	secret, _ := l.secret()
 	return secret
+}
+
+func (l *LocalPBS) isLocalHost(host string) bool {
+	return sameHost(host, l.PublicHost) || sameHost(host, l.APIAddr)
 }
 
 // sameHost compares PBS addresses, with the PBS default port when none is given.

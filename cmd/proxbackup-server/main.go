@@ -52,8 +52,8 @@ func main() {
 	flag.StringVar(&hosts, "hostnames", os.Getenv("PROXBACKUP_HOSTNAMES"), "comma separated host names/IPs for the server certificate")
 	flag.BoolVar(&localPBS, "local-pbs", os.Getenv("PROXBACKUP_LOCAL_PBS") == "1", "running on the PBS host: register its datastores as targets")
 	flag.StringVar(&local.APIAddr, "local-pbs-api", envOr("PROXBACKUP_LOCAL_PBS_API", "127.0.0.1:8007"), "local PBS API address")
-	flag.StringVar(&local.AuthID, "local-pbs-auth-id", envOr("PROXBACKUP_LOCAL_PBS_AUTH_ID", "root@pam!proxbackup-console"), "local PBS admin token id")
-	flag.StringVar(&local.SecretFile, "local-pbs-secret-file", envOr("PROXBACKUP_LOCAL_PBS_SECRET_FILE", credentialPath("pbs-token")), "file with the local PBS admin token secret")
+	flag.StringVar(&local.AuthID, "local-pbs-auth-id", envOr("PROXBACKUP_LOCAL_PBS_AUTH_ID", "proxbackup@pbs"), "local PBS user the console signs in as (DatastoreAdmin on /datastore)")
+	flag.StringVar(&local.SecretFile, "local-pbs-secret-file", envOr("PROXBACKUP_LOCAL_PBS_SECRET_FILE", credentialPath("pbs-password")), "file with the local PBS user's password")
 	flag.StringVar(&local.PublicHost, "pbs-public-host", os.Getenv("PROXBACKUP_PBS_PUBLIC_HOST"), "PBS address agents use (default: host of -public-url, port 8007)")
 	flag.StringVar(&cfg.UpdateRepo, "update-repo", os.Getenv("PROXBACKUP_UPDATE_REPO"), "GitHub repository (owner/name) to take updates from (default "+update.DefaultRepo+")")
 	cfg.UpdateMode = os.Getenv("PROXBACKUP_UPDATE_MODE") // "deb", set by the package's unit file

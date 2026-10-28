@@ -90,6 +90,8 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 
 var nsRe = regexp.MustCompile(`^([A-Za-z0-9_][A-Za-z0-9._-]*)(/[A-Za-z0-9_][A-Za-z0-9._-]*){0,6}$`)
 
+var errMissingAdminSecret = errors.New("the PBS admin's password or token secret is required (enter it again when host, fingerprint or admin change)")
+
 func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	var req targetReq
 	if err := decodeJSON(r, &req); err != nil {
@@ -116,10 +118,14 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case req.Name == "" || req.Host == "" || req.Datastore == "" || req.AdminAuthID == "":
-		httpError(w, 400, errors.New("name, host, datastore and admin token id are required"))
+		httpError(w, 400, errors.New("name, host, datastore and PBS admin are required"))
 		return
-	case !strings.Contains(req.AdminAuthID, "!"):
-		httpError(w, 400, errors.New("admin token id must look like user@realm!token"))
+	case !strings.Contains(req.AdminAuthID, "@"):
+		httpError(w, 400, errors.New("PBS admin must be a user (user@realm) or an API token id (user@realm!token)"))
+		return
+	case !pbs.IsTokenID(req.AdminAuthID) && req.AdminAuthID != req.PBSUser:
+		// PBS lets a user without Permissions.Modify set ACLs only for its own tokens.
+		httpError(w, 400, fmt.Errorf("the PBS admin user must be the agent user (%s): it can only grant rights to its own tokens", req.PBSUser))
 		return
 	case req.RootNS != "" && !nsRe.MatchString(req.RootNS):
 		httpError(w, 400, errors.New("invalid namespace"))
@@ -127,7 +133,7 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	fp := strings.TrimSpace(req.Fingerprint)
 	if fp == "" {
-		fp = s.localFingerprintFor(ctx, req.AdminAuthID)
+		fp = s.localFingerprintFor(ctx, req.AdminAuthID, req.Host)
 	}
 	// Clients get the target's host and fingerprint together with their own PBS
 	// token secret, so repointing them could collect every client's token.
@@ -145,17 +151,19 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// The stored secret only stays with the PBS and token it was entered for.
+	// The stored secret only stays with the PBS and admin it was entered for.
+	local := t.Local && req.AdminSecret == ""
 	if req.AdminSecret == "" && (t.ID == 0 || !t.sameEndpoint(req.Host, fp, req.AdminAuthID)) {
 		if req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, fp); req.AdminSecret == "" {
-			httpError(w, 400, errors.New("admin token secret is required (enter it again when host, fingerprint or token id change)"))
+			httpError(w, 400, errMissingAdminSecret)
 			return
 		}
+		local = true
 	}
 	// A new root namespace must exist on PBS before agents are pointed at it.
 	nsChanged := t.ID != 0 && t.RootNS != req.RootNS
-	t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser =
-		req.Name, req.Host, fp, req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser
+	t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser, t.Local =
+		req.Name, req.Host, fp, req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser, local
 	var sealSecret func(id int64) []byte
 	if req.AdminSecret != "" {
 		sealSecret = s.sealer.sealFor(req.AdminSecret, colTargetSecret)
@@ -224,7 +232,7 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	if req.Fingerprint = strings.TrimSpace(req.Fingerprint); req.Fingerprint == "" {
-		req.Fingerprint = s.localFingerprintFor(ctx, req.AdminAuthID)
+		req.Fingerprint = s.localFingerprintFor(ctx, req.AdminAuthID, req.Host)
 	}
 	// Stored and local secrets are only sent to the PBS they belong to.
 	if req.AdminSecret == "" && req.ID > 0 {
@@ -236,7 +244,7 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 		req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, req.Fingerprint)
 	}
 	if req.AdminSecret == "" {
-		httpError(w, 400, errors.New("admin token secret is required (enter it again when host, fingerprint or token id change)"))
+		httpError(w, 400, errMissingAdminSecret)
 		return
 	}
 	pc, err := pbs.NewClient(pbs.Config{Host: req.Host, Fingerprint: req.Fingerprint, AuthID: req.AdminAuthID, Secret: req.AdminSecret})

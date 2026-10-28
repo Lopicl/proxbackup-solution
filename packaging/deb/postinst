@@ -1,17 +1,18 @@
 #!/bin/sh
 # Sets up ProxBackup Console on this Proxmox Backup Server:
 #   - a system user "proxbackup" the service runs as
-#   - an admin API token root@pam!proxbackup-console (secret in /etc/proxbackup/pbs-token)
+#   - a PBS user proxbackup@pbs with DatastoreAdmin on /datastore, which the
+#     console signs in as and which owns the agents' API tokens (password in
+#     /etc/proxbackup/pbs-password)
 #   - /etc/proxbackup/proxbackup.env with this host's names (kept on upgrades)
 #   - the proxbackup-server service on port 8077
 #   - proxbackup-server-update.path, which installs updates the console requests
 set -e
 
 CONF=/etc/proxbackup
-TOKEN_FILE=$CONF/pbs-token
+PW_FILE=$CONF/pbs-password
 ENV_FILE=$CONF/proxbackup.env
-TOKEN_USER=root@pam
-TOKEN_NAME=proxbackup-console
+PBS_USER=proxbackup@pbs
 PORT=8077
 
 [ "$1" = configure ] || exit 0
@@ -27,22 +28,35 @@ if ! getent passwd proxbackup >/dev/null; then
 fi
 install -d -m 0750 -o root -g proxbackup "$CONF"
 
-if [ ! -s "$TOKEN_FILE" ]; then
-	# A token secret is only shown once: recreate the token if we lost it.
-	proxmox-backup-manager user delete-token "$TOKEN_USER" "$TOKEN_NAME" >/dev/null 2>&1 || true
-	out=$(proxmox-backup-manager user generate-token "$TOKEN_USER" "$TOKEN_NAME" \
-		--comment "ProxBackup Console (proxbackup-server package)")
-	secret=$(printf '%s' "$out" | sed -n 's/.*"value"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-	if [ -z "$secret" ]; then
-		echo "proxbackup-server: could not create the PBS API token: $out" >&2
-		exit 1
-	fi
-	(umask 077 && printf '%s\n' "$secret" > "$TOKEN_FILE")
+# The console provisions namespaces, tokens and their ACLs for each PC as
+# $PBS_USER. Without Permissions.Modify it can set ACLs only for its own
+# tokens, and PBS caps those at the user's privileges.
+if ! proxmox-backup-manager user list --output-format json | grep -qF "\"userid\":\"$PBS_USER\""; then
+	proxmox-backup-manager user create "$PBS_USER" --comment "ProxBackup Console and its agents"
 fi
-chown root:proxbackup "$TOKEN_FILE"
-chmod 0640 "$TOKEN_FILE"
-# The console provisions users, tokens, ACLs and namespaces for each PC.
-proxmox-backup-manager acl update / Admin --auth-id "$TOKEN_USER!$TOKEN_NAME"
+if [ ! -s "$PW_FILE" ]; then
+	pw=$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')
+	(umask 077 && printf '%s\n' "$pw" > "$PW_FILE.new")
+	# PBS takes a password only as an argument (shown to local users by ps
+	# while this runs); API tokens can't set it.
+	proxmox-backup-debug api set /access/password --userid "$PBS_USER" --password "$pw" >/dev/null
+	mv "$PW_FILE.new" "$PW_FILE"
+fi
+chown root:proxbackup "$PW_FILE"
+chmod 0640 "$PW_FILE"
+proxmox-backup-manager acl update /datastore DatastoreAdmin --auth-id "$PBS_USER"
+# An ACL on a deeper path replaces the inherited role: drop the user's others
+# (consoles up to 0.2.16 gave it DatastoreBackup on <datastore>/<root namespace>).
+proxmox-backup-manager acl list --output-format json | tr '{' '\n' | grep -F "\"ugid\":\"$PBS_USER\"" |
+	while IFS= read -r acl; do
+		path=$(printf '%s' "$acl" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
+		role=$(printf '%s' "$acl" | sed -n 's/.*"roleid":"\([^"]*\)".*/\1/p')
+		[ "$path" = /datastore ] && [ "$role" = DatastoreAdmin ] && continue
+		proxmox-backup-manager acl update "$path" "$role" --auth-id "$PBS_USER" --delete true
+	done
+# Packages up to 0.2.16 used a root@pam token with Admin on / instead.
+proxmox-backup-manager user delete-token root@pam proxbackup-console >/dev/null 2>&1 || true
+rm -f "$CONF/pbs-token"
 
 if [ ! -f "$ENV_FILE" ]; then
 	fqdn=$(hostname -f 2>/dev/null || hostname)

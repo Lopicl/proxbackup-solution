@@ -37,17 +37,19 @@ type Config struct {
 	// Fingerprint is the SHA-256 fingerprint of the server certificate
 	// ("aa:bb:..." or plain hex). When empty the system roots are used.
 	Fingerprint string
-	// AuthID is the API token id, e.g. "backup@pbs!pc-01".
+	// AuthID is an API token id, e.g. "backup@pbs!pc-01", or a user id such
+	// as "proxbackup@pbs", which signs in for a ticket (see ticket.go).
 	AuthID string
-	// Secret is the API token secret (UUID).
+	// Secret is the API token secret (UUID), or the user's password.
 	Secret string
 }
 
 // Client talks to a single PBS server.
 type Client struct {
-	cfg  Config
-	addr string
-	http *http.Client
+	cfg    Config
+	addr   string
+	http   *http.Client
+	ticket *ticket // set for a user id
 }
 
 // NewClient validates cfg and returns a client.
@@ -55,14 +57,17 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.Host == "" || cfg.AuthID == "" || cfg.Secret == "" {
 		return nil, errors.New("pbs: host, auth id and secret are required")
 	}
-	if !strings.Contains(cfg.AuthID, "!") {
-		return nil, errors.New("pbs: auth id must be an API token id (user@realm!name)")
+	if !strings.Contains(cfg.AuthID, "@") {
+		return nil, errors.New("pbs: auth id must be a user (user@realm) or an API token id (user@realm!name)")
 	}
 	addr := cfg.Host
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		addr = net.JoinHostPort(addr, defaultPort)
 	}
 	c := &Client{cfg: cfg, addr: addr}
+	if !IsTokenID(cfg.AuthID) {
+		c.ticket = ticketFor(addr, cfg)
+	}
 	c.http = &http.Client{
 		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
@@ -113,10 +118,6 @@ func (c *Client) tlsConfig() *tls.Config {
 			return nil
 		},
 	}
-}
-
-func (c *Client) authHeader() string {
-	return "PBSAPIToken " + c.cfg.AuthID + ":" + url.PathEscape(c.cfg.Secret)
 }
 
 // APIError is returned for non-2xx responses.
@@ -173,45 +174,62 @@ func decodeAPIResponse(resp *http.Response, out any) error {
 // For GET and DELETE, params are encoded in the query string; otherwise as JSON body.
 func (c *Client) Call(ctx context.Context, method, path string, params map[string]any, out any) error {
 	u := "https://" + c.addr + "/api2/json/" + strings.TrimPrefix(path, "/")
-	var body io.Reader
+	var body []byte
 	if method == http.MethodGet || method == http.MethodDelete {
 		if q := encodeQuery(params); q != "" {
 			u += "?" + q
 		}
 	} else if params != nil {
-		b, err := json.Marshal(params)
-		if err != nil {
+		var err error
+		if body, err = json.Marshal(params); err != nil {
 			return err
 		}
-		body = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", c.authHeader())
-	req.Header.Set("User-Agent", userAgent)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.http.Do(req)
+	resp, err := c.do(ctx, method, u, body)
 	if err != nil {
 		return err
 	}
 	return decodeAPIResponse(resp, out)
 }
 
+// do sends a request with a JSON body (if any), signing in again once when
+// PBS refuses the ticket.
+func (c *Client) do(ctx context.Context, method, u string, body []byte) (*http.Response, error) {
+	for retried := false; ; retried = true {
+		var r io.Reader
+		if body != nil {
+			r = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u, r)
+		if err != nil {
+			return nil, err
+		}
+		used, err := c.authorize(ctx, req.Header, method)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", userAgent)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if !retried && used != "" && resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
+			c.ticket.expire(used)
+			continue
+		}
+		return resp, nil
+	}
+}
+
 // Download performs a GET of path (relative to /api2/json, may contain a query)
 // and streams the raw response body to w. Used for non-JSON endpoints such as
 // pxar-file-download.
 func (c *Client) Download(ctx context.Context, path string, w io.Writer) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+c.addr+"/api2/json/"+strings.TrimPrefix(path, "/"), nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", c.authHeader())
-	req.Header.Set("User-Agent", userAgent)
-	resp, err := c.http.Do(req)
+	resp, err := c.do(ctx, http.MethodGet, "https://"+c.addr+"/api2/json/"+strings.TrimPrefix(path, "/"), nil)
 	if err != nil {
 		return err
 	}
@@ -260,10 +278,27 @@ func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
 // upgrade performs the HTTP/1.1 -> PBS protocol upgrade and starts HTTP/2 on the
 // same TLS stream, as pbs-client's start_h2_connection does.
 func (c *Client) upgrade(ctx context.Context, path string, params map[string]any, protocol string) (*h2Session, error) {
+	s, used, err := c.upgradeOnce(ctx, path, params, protocol)
+	if c.retryAuth(err, used) {
+		s, _, err = c.upgradeOnce(ctx, path, params, protocol)
+	}
+	return s, err
+}
+
+func (c *Client) upgradeOnce(ctx context.Context, path string, params map[string]any, protocol string) (*h2Session, string, error) {
+	auth := http.Header{}
+	used, err := c.authorize(ctx, auth, http.MethodGet)
+	if err != nil {
+		return nil, "", err
+	}
+	var authLines strings.Builder
+	for k, v := range auth {
+		authLines.WriteString(k + ": " + v[0] + "\r\n")
+	}
 	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}, Config: c.tlsConfig()}
 	raw, err := d.DialContext(ctx, "tcp", c.addr)
 	if err != nil {
-		return nil, fmt.Errorf("pbs: connect %s: %w", c.addr, err)
+		return nil, used, fmt.Errorf("pbs: connect %s: %w", c.addr, err)
 	}
 	conn := raw.(*tls.Conn)
 	if dl, ok := ctx.Deadline(); ok {
@@ -276,17 +311,17 @@ func (c *Client) upgrade(ctx context.Context, path string, params map[string]any
 	if q := encodeQuery(params); q != "" {
 		target += "?" + q
 	}
-	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nAuthorization: %s\r\nConnection: upgrade\r\nUpgrade: %s\r\n\r\n",
-		target, c.addr, userAgent, c.authHeader(), protocol)
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n%sConnection: upgrade\r\nUpgrade: %s\r\n\r\n",
+		target, c.addr, userAgent, authLines.String(), protocol)
 	if _, err := io.WriteString(conn, req); err != nil {
 		conn.Close()
-		return nil, err
+		return nil, used, err
 	}
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, nil)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("pbs: upgrade response: %w", err)
+		return nil, used, fmt.Errorf("pbs: upgrade response: %w", err)
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		err := decodeAPIResponse(resp, nil)
@@ -294,7 +329,7 @@ func (c *Client) upgrade(ctx context.Context, path string, params map[string]any
 		if err == nil {
 			err = fmt.Errorf("pbs: upgrade failed: %s", resp.Status)
 		}
-		return nil, err
+		return nil, used, err
 	}
 	conn.SetDeadline(time.Time{})
 
@@ -306,9 +341,9 @@ func (c *Client) upgrade(ctx context.Context, path string, params map[string]any
 	cc, err := t.NewClientConn(&bufferedConn{Conn: conn, r: br})
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("pbs: http2 handshake: %w", err)
+		return nil, used, fmt.Errorf("pbs: http2 handshake: %w", err)
 	}
-	return &h2Session{conn: conn, cc: cc}, nil
+	return &h2Session{conn: conn, cc: cc}, used, nil
 }
 
 func (s *h2Session) newRequest(ctx context.Context, method, path string, params map[string]any, body []byte, contentType string) (*http.Request, error) {

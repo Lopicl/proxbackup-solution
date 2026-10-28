@@ -191,6 +191,8 @@ func (s *Store) migrate() error {
 		{"runs", "log_bytes", "INTEGER NOT NULL DEFAULT 0"},
 		// Re-enrollment of a revoked client: the PC that uses it takes it over.
 		{"enrollments", "reenroll_id", "INTEGER NOT NULL DEFAULT 0"},
+		// The target is this console's own PBS (see LocalPBS), kept in sync.
+		{"targets", "local", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -210,6 +212,12 @@ func (s *Store) migrate() error {
 				// Every Windows agent so far left its data directory readable by
 				// all local users. Their credentials rotate once the agent is updated.
 				if _, err := s.db.Exec(`UPDATE clients SET creds_exposed=1 WHERE os LIKE 'windows%'`); err != nil {
+					return err
+				}
+			}
+			if c.table == "targets" && c.name == "local" {
+				// Before, local targets were the ones using the package's root token.
+				if _, err := s.db.Exec(`UPDATE targets SET local=1 WHERE admin_auth_id=?`, legacyLocalAuthID); err != nil {
 					return err
 				}
 			}
@@ -287,7 +295,10 @@ type Target struct {
 	RootNS      string `json:"root_ns"`
 	AdminAuthID string `json:"admin_auth_id"`
 	PBSUser     string `json:"pbs_user"`
-	CreatedAt   int64  `json:"created_at"`
+	// Local is set for this console's own PBS: its fingerprint, host and
+	// credentials follow the local install (see syncLocalTargets).
+	Local     bool  `json:"local"`
+	CreatedAt int64 `json:"created_at"`
 
 	adminSecretEnc []byte
 }
@@ -450,11 +461,11 @@ type LogLine struct {
 
 // ---- targets ----
 
-const targetCols = `id, name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, created_at`
+const targetCols = `id, name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, local, created_at`
 
 func scanTarget(sc interface{ Scan(...any) error }) (*Target, error) {
 	t := &Target{}
-	err := sc.Scan(&t.ID, &t.Name, &t.Host, &t.Fingerprint, &t.Datastore, &t.RootNS, &t.AdminAuthID, &t.adminSecretEnc, &t.PBSUser, &t.CreatedAt)
+	err := sc.Scan(&t.ID, &t.Name, &t.Host, &t.Fingerprint, &t.Datastore, &t.RootNS, &t.AdminAuthID, &t.adminSecretEnc, &t.PBSUser, &t.Local, &t.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -487,8 +498,8 @@ func (s *Store) Target(ctx context.Context, id int64) (*Target, error) {
 func (s *Store) SaveTarget(ctx context.Context, t *Target, sealSecret func(id int64) []byte) error {
 	if t.ID == 0 {
 		t.CreatedAt = now()
-		id, err := s.insertSealed(ctx, colTargetSecret, sealSecret, &t.adminSecretEnc, `INSERT INTO targets(name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, created_at)
-			VALUES(?,?,?,?,?,?,COALESCE(?, X''),?,?)`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.CreatedAt)
+		id, err := s.insertSealed(ctx, colTargetSecret, sealSecret, &t.adminSecretEnc, `INSERT INTO targets(name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, local, created_at)
+			VALUES(?,?,?,?,?,?,COALESCE(?, X''),?,?,?)`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.Local, t.CreatedAt)
 		if err != nil {
 			return err
 		}
@@ -499,7 +510,7 @@ func (s *Store) SaveTarget(ctx context.Context, t *Target, sealSecret func(id in
 		t.adminSecretEnc = sealSecret(t.ID)
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE targets SET name=?, host=?, fingerprint=?, datastore=?, root_ns=?, admin_auth_id=?,
-		admin_secret_enc=?, pbs_user=? WHERE id=?`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.ID)
+		admin_secret_enc=?, pbs_user=?, local=? WHERE id=?`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.Local, t.ID)
 	return err
 }
 

@@ -43,18 +43,22 @@ make deb    # bin/proxbackup-server_<version>_{amd64,arm64}.deb
 apt install ./proxbackup-server_<version>_amd64.deb
 ```
 
-The package creates the API token `root@pam!proxbackup-console`, registers every local datastore
-as a target and starts the console on `https://<pbs-host>:8077`. Sign in as `admin` with the
+The package creates the PBS user `proxbackup@pbs` (DatastoreAdmin on `/datastore` only, password in
+`/etc/proxbackup/pbs-password`), which the console signs in as and which owns the PCs' tokens. It
+registers every local datastore as a target and starts the console on `https://<pbs-host>:8077`. Sign in as `admin` with the
 initial password from `journalctl -u proxbackup-server`; you must replace it at the first sign-in.
 
 - Settings (public URL, host names): `/etc/proxbackup/proxbackup.env`
-- `apt purge` removes the console and its token; backups stay in PBS.
+- Upgrading from 0.2.16 or older deletes the old `root@pam!proxbackup-console` token (Admin on `/`).
+- `apt purge` removes the console and the user's password; backups, the user and the PCs' tokens stay in PBS.
 - Ports, firewall rules, hiding the console and PBS web UIs from PCs (nginx example), and hosts
   with several interfaces: [docs/network.md](docs/network.md)
 
 **Standalone:**
 
-1. Create a PBS API token with the Admin role on `/`.
+1. Create a PBS user `proxbackup@pbs` with a password and the DatastoreAdmin role on `/datastore`
+   (nothing else). Use it as *PBS admin* and agent user of the datastore (step 4); it can only
+   grant rights to its own tokens. An API token with Admin on `/` also works.
 2. Run `proxbackup-server -public-url https://backup.example.lan:8077 -hostnames backup.example.lan`
    and open port 8077.
 3. Sign in as `admin` (initial password in the log, or set `PROXBACKUP_ADMIN_PASSWORD`). Lost it?
@@ -186,7 +190,8 @@ Phase 1 (MVP) is complete; phase 2 is in progress as **alpha 0.2**.
 - PBS's own pxar reader extracting our archives, including v2 split archives reusing the previous
   snapshot's chunks
 - server-side verify, prune and retention
-- enrollment, mTLS and least-privilege PBS provisioning
+- enrollment, mTLS and least-privilege PBS provisioning, as an unprivileged user signed in with a
+  ticket (PBS 4.2.8)
 - agent-side scheduling: on-time runs, catch-up, `missed` records, backups while the console was
   offline (reported afterwards)
 - run events, file and image restores (byte-identical)

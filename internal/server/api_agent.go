@@ -575,11 +575,15 @@ func clientNamespace(t *Target, name string) string {
 // prepareRootNamespace creates t's root namespace and lets the agents' PBS
 // user back up below it. Token privileges are intersected with the owning
 // user's, so the user needs DatastoreBackup on the root namespace and each
-// token on its own namespace.
+// token on its own namespace. When the console signs in as that user, it has
+// DatastoreAdmin already (and can't change its own ACLs).
 func prepareRootNamespace(ctx context.Context, pc *pbs.Client, t *Target) error {
 	root := strings.Trim(t.RootNS, "/")
 	if err := pc.EnsureNamespace(ctx, t.Datastore, root); err != nil {
 		return fmt.Errorf("namespace %s: %w", root, err)
+	}
+	if t.AdminAuthID == t.PBSUser {
+		return nil
 	}
 	if err := pc.EnsureUser(ctx, t.PBSUser, "proxbackup managed agents"); err != nil {
 		return fmt.Errorf("user %s: %w", t.PBSUser, err)

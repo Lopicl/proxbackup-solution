@@ -4,7 +4,10 @@ package pbs_test
 
 // End-to-end test against a real Proxmox Backup Server. Skipped unless
 // PROXBACKUP_E2E_HOST, PROXBACKUP_E2E_FINGERPRINT, PROXBACKUP_E2E_TOKEN_FILE and
-// PROXBACKUP_E2E_STORE are set (see scripts/e2e-pbs.sh).
+// PROXBACKUP_E2E_STORE are set (see scripts/e2e-pbs.sh). With
+// PROXBACKUP_E2E_USER and PROXBACKUP_E2E_PASSWORD_FILE instead of a token, the
+// tests sign in as that user, as the console does (give it DatastoreAdmin on
+// /datastore).
 
 import (
 	"bytes"
@@ -33,11 +36,15 @@ func e2eClient(t *testing.T) (*pbs.Client, string) {
 		TokenID string `json:"tokenid"`
 		Value   string `json:"value"`
 	}
-	b, err := os.ReadFile(os.Getenv("PROXBACKUP_E2E_TOKEN_FILE"))
-	if err != nil {
+	if tok.TokenID = os.Getenv("PROXBACKUP_E2E_USER"); tok.TokenID != "" {
+		b, err := os.ReadFile(os.Getenv("PROXBACKUP_E2E_PASSWORD_FILE"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok.Value = strings.TrimSpace(string(b))
+	} else if b, err := os.ReadFile(os.Getenv("PROXBACKUP_E2E_TOKEN_FILE")); err != nil {
 		t.Fatal(err)
-	}
-	if err := json.Unmarshal(b, &tok); err != nil {
+	} else if err := json.Unmarshal(b, &tok); err != nil {
 		t.Fatal(err)
 	}
 	c, err := pbs.NewClient(pbs.Config{Host: host, Fingerprint: os.Getenv("PROXBACKUP_E2E_FINGERPRINT"), AuthID: tok.TokenID, Secret: tok.Value})
@@ -674,4 +681,102 @@ func TestE2EProtected(t *testing.T) {
 		t.Fatalf("snapshots after forget: %+v, %v", snaps, err)
 	}
 	c.Call(ctx, http.MethodDelete, "admin/datastore/"+store+"/groups", map[string]any{"ns": ns, "backup-type": "host", "backup-id": id}, nil)
+}
+
+// TestE2EProvisionAsUser runs the console's provisioning as an unprivileged
+// user: it manages its own tokens and their ACLs, and the tokens never get
+// more than the user has.
+func TestE2EProvisionAsUser(t *testing.T) {
+	c, store := e2eClient(t)
+	user := os.Getenv("PROXBACKUP_E2E_USER")
+	if user == "" {
+		t.Skip("PROXBACKUP_E2E_USER not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	var stores []struct {
+		Store string `json:"store"`
+	}
+	if err := c.Call(ctx, http.MethodGet, "admin/datastore", nil, &stores); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, s := range stores {
+		found = found || s.Store == store
+	}
+	if !found {
+		t.Fatalf("datastore %s not listed: %+v", store, stores)
+	}
+	if st, err := c.DatastoreStatus(ctx, store); err != nil || st.Total == 0 {
+		t.Fatalf("status: %+v, %v", st, err)
+	}
+	if _, err := c.DatastoreRRD(ctx, store, "day"); err != nil {
+		t.Fatal(err)
+	}
+
+	ns := "proxbackup-e2e/prov"
+	if err := c.EnsureNamespace(ctx, store, ns); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("e2e-%d", time.Now().UnixNano()%1e6)
+	tokenID, secret, err := c.CreateToken(ctx, user, name, "proxbackup e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.DeleteToken(context.WithoutCancel(ctx), user, name)
+	if err := c.GrantACL(ctx, pbs.DatastoreACLPath(store, ns), "DatastoreBackup", tokenID); err != nil {
+		t.Fatalf("ACL for its own token: %v", err)
+	}
+	if err := c.GrantACL(ctx, pbs.DatastoreACLPath(store, ns), "DatastoreBackup", "root@pam"); err == nil {
+		t.Fatal("set an ACL for another auth id")
+	}
+
+	backup := func(secret, ns string) error {
+		tc, err := pbs.NewClient(pbs.Config{Host: os.Getenv("PROXBACKUP_E2E_HOST"), Fingerprint: os.Getenv("PROXBACKUP_E2E_FINGERPRINT"), AuthID: tokenID, Secret: secret})
+		if err != nil {
+			return err
+		}
+		b, err := tc.StartBackup(ctx, pbs.SnapshotRef{Store: store, NS: ns, Type: "host", ID: name, Time: time.Now().Unix()}, pbs.BackupOptions{})
+		if err != nil {
+			return err
+		}
+		defer b.Close()
+		if err := b.UploadBlob(ctx, "client.log.blob", []byte("provision test\n"), false); err != nil {
+			return err
+		}
+		return b.Finish(ctx)
+	}
+	if err := backup(secret, ns); err != nil {
+		t.Fatalf("token backup in its namespace: %v", err)
+	}
+	if err := backup(secret, "proxbackup-e2e"); err == nil {
+		t.Fatal("token backed up outside its namespace")
+	}
+	// A token is capped at its user's privileges, even with Admin on /.
+	if err := c.GrantACL(ctx, "/", "Admin", tokenID); err != nil {
+		t.Fatal(err)
+	}
+	tc, _ := pbs.NewClient(pbs.Config{Host: os.Getenv("PROXBACKUP_E2E_HOST"), Fingerprint: os.Getenv("PROXBACKUP_E2E_FINGERPRINT"), AuthID: tokenID, Secret: secret})
+	if err := tc.Call(ctx, http.MethodGet, "access/users", nil, nil); err == nil {
+		var users []map[string]any
+		tc.Call(ctx, http.MethodGet, "access/users", nil, &users)
+		if len(users) > 1 {
+			t.Fatalf("token with Admin on / lists other users: %v", users)
+		}
+	}
+	if err := tc.Call(ctx, http.MethodGet, "nodes/localhost/status", nil, nil); err == nil {
+		t.Fatal("token with Admin on / reads the node status")
+	}
+
+	newSecret, err := c.RegenerateToken(ctx, user, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backup(secret, ns); err == nil {
+		t.Fatal("old secret still works after regenerate")
+	}
+	if err := backup(newSecret, ns); err != nil {
+		t.Fatal(err)
+	}
+	c.Call(ctx, http.MethodDelete, "admin/datastore/"+store+"/namespace", map[string]any{"ns": ns, "delete-groups": true}, nil)
 }

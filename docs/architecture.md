@@ -258,7 +258,7 @@ read on every run.
 * **Restore browser** *(phase 2, implemented)*. The web UI browses a snapshot's
   `catalog.pcat1.didx` (for v2, a catalog the console builds from the `.mpxar.didx` archives) and restores the ticked files and folders, one restore run per archive.
   The console reads the catalog itself (`GET /api/clients/{id}/catalog`) with the target's
-  admin token and, for encrypted snapshots, the escrowed client key. It downloads the catalog
+  PBS admin and, for encrypted snapshots, the escrowed client key. It downloads the catalog
   once into a temp file and keeps it while it is browsed (10 minutes idle, at most 8 open).
   "Original location" maps each archive back to its source through the client's current
   jobs (same naming as the agent: `api.SourceArchives`, `api.VolumeArchive`), so an archive
@@ -307,9 +307,14 @@ read on every run.
   asks for a client certificate without requiring one, so browsers and enrollment (server auth
   only) work on the same port. `-agent-addr` can still split the agent API onto its own port
   (firewall setup: [network.md](network.md)).
-* **Installed on the PBS host** (`.deb`, `packaging/deb`). The package creates the admin token
-  `root@pam!proxbackup-console` with `proxmox-backup-manager`, and runs the console as the system
-  user `proxbackup`, which can read the token secret. With `-local-pbs` the console registers
+* **Installed on the PBS host** (`.deb`, `packaging/deb`). The package creates the PBS user
+  `proxbackup@pbs` with a random password (`/etc/proxbackup/pbs-password`) and DatastoreAdmin on
+  `/datastore`, and runs the console as the system user `proxbackup`, which can read the
+  password. Upgrades drop the user's other ACLs (a deeper one, like the DatastoreBackup on
+  `<store>/pcs` older consoles granted, would replace the inherited role) and delete the
+  `root@pam!proxbackup-console` token of 0.2.16 and older; the console moves its targets to the
+  user. PBS takes a password only as a command argument, so it is visible in `ps` to local users
+  while the package sets it. With `-local-pbs` the console registers
   every local datastore as a target on first start, re-reads the PBS certificate fingerprint over
   loopback hourly (so ACME renewals need no reconfiguration). PBS accounts can't sign in to the
   console: it has its own users (below) on every install.
@@ -376,7 +381,7 @@ read on every run.
   itself; see [Network share backups](#network-share-backups).
 * **Retention.** Once a day (housekeeping, right after expired locks are released) the server
   applies each job's keep-last/hourly/daily/weekly/monthly/yearly policy to every member's
-  backup group, using the admin token. It never prunes because a run was reported; see
+  backup group, as the target's PBS admin. It never prunes because a run was reported; see
   *Tamper-resistant retention* under [Security model](#security-model) for how it selects
   snapshots. Garbage collection is left to PBS's own schedule.
 * **Notifications.** SMTP and generic webhooks (JSON). Triggers: run failed or missed, run
@@ -579,7 +584,7 @@ sequenceDiagram
   A->>P: POST finish
   A->>V: Delete snapshot
   A->>S: POST runs/42/events (done, stats)
-  S->>P: POST admin/datastore/{store}/prune (admin token)
+  S->>P: POST admin/datastore/{store}/prune (PBS admin)
   S-->>S: notify on failure
 ```
 
@@ -731,12 +736,17 @@ sequenceDiagram
   (`scripts/release.sh --sign`), so the repository is then no longer part of the trust base.
   Until then it is. The release workflow pins its actions to commit SHAs and only its publish
   job, which runs no build tooling, has `contents: write`.
-* **PBS token scope:** the console's local token is `root@pam!proxbackup-console` with Admin
-  on `/`. Admin on `/access` instead isn't narrower: it includes `Permissions.Modify` on
-  `/access/acl`, so the token can grant itself Admin on `/` (checked on PBS 4.2). A real
-  reduction is a console user `proxbackup@pbs` with `DatastoreAdmin` on `/datastore`, signing
-  in with a ticket: PBS lets a user manage its own tokens and their ACLs, and caps their
-  privileges at the user's.
+* **PBS credentials:** the console provisions as the agents' PBS user itself (`proxbackup@pbs`,
+  `DatastoreAdmin` on `/datastore`), signing in with a ticket (`pkg/pbs/ticket.go`: cookie plus
+  `CSRFPreventionToken` on writes, a new sign-in after an hour or a 401). Without
+  `Permissions.Modify` PBS lets a user set ACLs only for its own tokens ("Unprivileged users can
+  only set ACL items for their own API tokens"), and a token never gets more than its user, even
+  with Admin on `/`. Tokens can't do this: an unprivileged token can't set ACLs at all, and Admin
+  on `/access` (needed for `/access/acl`) lets a token grant itself Admin on `/` (checked on PBS
+  4.2). So a target whose PBS admin is a user must use it as agent user too. Targets on another
+  PBS may still use an API token with Admin on `/`. Local targets are marked `local` and follow
+  the install's fingerprint and password; a remote target using a user of the same name never
+  gets either.
 
 ## Repository layout
 

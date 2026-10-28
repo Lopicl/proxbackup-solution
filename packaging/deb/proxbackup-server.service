@@ -11,7 +11,7 @@ Environment=PROXBACKUP_DATA_DIR=/var/lib/proxbackup
 Environment=PROXBACKUP_UPDATE_MODE=deb
 ExecStart=/usr/bin/proxbackup-server
 # Plain system user rather than DynamicUser/LoadCredential, which don't work in
-# every container (PBS often runs in an LXC). It can read /etc/proxbackup/pbs-token.
+# every container (PBS often runs in an LXC). It can read /etc/proxbackup/pbs-password.
 User=proxbackup
 Group=proxbackup
 StateDirectory=proxbackup
