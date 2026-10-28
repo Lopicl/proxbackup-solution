@@ -6,6 +6,7 @@ import { api, ApiError, setReachableHandler, setUnauthorizedHandler, UNREACHABLE
 import { ErrorBox, Field, Modal } from './ui'
 import { Dashboard } from './pages/Dashboard'
 import { Clients } from './pages/Clients'
+import { RevokedClients } from './pages/RevokedClients'
 import { ClientDetail } from './pages/ClientDetail'
 import { JobDetail, Jobs } from './pages/Jobs'
 import { RunDetail } from './pages/RunDetail'
@@ -258,7 +259,8 @@ function App() {
 
   const parts = route.split('/').filter(Boolean)
   let page
-  if (parts[0] === 'clients' && parts[1]) page = <ClientDetail id={Number(parts[1])} tab={parts[2] ?? 'jobs'} />
+  if (parts[0] === 'clients' && parts[1] === 'revoked') page = <RevokedClients />
+  else if (parts[0] === 'clients' && parts[1]) page = <ClientDetail id={Number(parts[1])} tab={parts[2] ?? 'jobs'} />
   else if (parts[0] === 'clients') page = <Clients />
   else if (parts[0] === 'jobs' && parts[1]) page = <JobDetail id={Number(parts[1])} />
   else if (parts[0] === 'jobs') page = <Jobs />

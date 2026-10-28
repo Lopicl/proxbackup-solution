@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState } from 'react'
-import { api, ApiError, clientName, type Enrollment, type SetupToken, type Target } from '../api'
+import { api, ApiError, type Enrollment, type SetupToken, type Target } from '../api'
 import { usePerms } from '../perms'
 import { ago, Card, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
 
@@ -9,10 +9,10 @@ export function Clients() {
   const perms = usePerms()
   // Enrollment creates clients outside any scope: it needs all clients.
   const canEnroll = perms.all('clients.manage')
+  const canRevoked = perms.all('clients.revoked')
   const { data, error, reload } = useLoad(api.clients, [], 10000)
   const enrollments = useLoad(() => (canEnroll ? api.enrollments() : Promise.resolve([])), [canEnroll], 10000)
   const setups = useLoad(() => (canEnroll ? api.setupTokens() : Promise.resolve([])), [canEnroll], 10000)
-  const revoked = useLoad(api.revokedClients, [], 10000)
   const targets = useLoad(api.targets, [])
   const [adding, setAdding] = useState(false)
   const [creatingSetup, setCreatingSetup] = useState(false)
@@ -24,45 +24,51 @@ export function Clients() {
     reload()
     enrollments.reload()
     setups.reload()
-    revoked.reload()
   }
   const exposed = (data ?? []).filter((c) => c.creds_exposed).length
   const activeSetups = (setups.data ?? []).filter((t) => t.expires > Date.now() / 1000)
   return (
     <>
       <h1>Clients</h1>
-      <ErrorBox error={error || enrollments.error || setups.error || revoked.error || actionError} />
+      <ErrorBox error={error || enrollments.error || setups.error || actionError} />
       <Card
         title={`${data?.length ?? 0} clients` + (pending.length ? `, ${pending.length} waiting to enroll` : '')}
         actions={
-          canEnroll && (
-            <>
-              {exposed > 0 && (
-                <button
-                  title="Agents that run the fixed version get new credentials anyway. This also rotates them for clients whose agent is still old: do it again after their update."
-                  onClick={async () => {
-                    if (!confirm(`Rotate the PBS token and certificate of the ${exposed} clients with exposed credentials? Each agent gets them the next time it connects.`))
-                      return
-                    try {
-                      setActionError('')
-                      await api.rotateCredentialsBulk({ exposed: true })
-                      reload()
-                    } catch (err) {
-                      setActionError((err as Error).message)
-                    }
-                  }}
-                >
-                  Rotate exposed credentials ({exposed})
+          <>
+            {canRevoked && (
+              <button onClick={() => (location.hash = '/clients/revoked')} title="Un-revoke revoked clients, or re-enroll one on a PC with its backups">
+                Revoked clients
+              </button>
+            )}
+            {canEnroll && (
+              <>
+                {exposed > 0 && (
+                  <button
+                    title="Agents that run the fixed version get new credentials anyway. This also rotates them for clients whose agent is still old: do it again after their update."
+                    onClick={async () => {
+                      if (!confirm(`Rotate the PBS token and certificate of the ${exposed} clients with exposed credentials? Each agent gets them the next time it connects.`))
+                        return
+                      try {
+                        setActionError('')
+                        await api.rotateCredentialsBulk({ exposed: true })
+                        reload()
+                      } catch (err) {
+                        setActionError((err as Error).message)
+                      }
+                    }}
+                  >
+                    Rotate exposed credentials ({exposed})
+                  </button>
+                )}
+                <button onClick={() => setCreatingSetup(true)} title="One setup for many PCs: each asks for its client name">
+                  Create agent setup
                 </button>
-              )}
-              <button onClick={() => setCreatingSetup(true)} title="One setup for many PCs: each asks for its client name">
-                Create agent setup
-              </button>
-              <button className="primary" onClick={() => setAdding(true)}>
-                Add client
-              </button>
-            </>
-          )
+                <button className="primary" onClick={() => setAdding(true)}>
+                  Add client
+                </button>
+              </>
+            )}
+          </>
         }
       >
         {data && data.length === 0 && pending.length === 0 ? (
@@ -91,14 +97,23 @@ export function Clients() {
                   </td>
                   <td colSpan={4}>
                     <span className="badge info">Waiting for agent</span>{' '}
+                    {e.reenroll_id > 0 && (
+                      <>
+                        <span className="badge warn" title="The PC that uses it takes over the revoked client, with its backups">
+                          re-enrollment
+                        </span>{' '}
+                      </>
+                    )}
                     <span className="muted-text">
                       token created {ago(e.created_at)}, expires {ago(e.expires)}
                     </span>
                   </td>
                   <td className="row-actions">
-                    <button className="small" onClick={() => setShowing(e)}>
-                      Show command
-                    </button>
+                    {(!e.reenroll_id || canRevoked) && (
+                      <button className="small" onClick={() => setShowing(e)}>
+                        Show command
+                      </button>
+                    )}
                     <button
                       className="small ghost"
                       onClick={async () => {
@@ -201,65 +216,6 @@ export function Clients() {
           </table>
         </Card>
       )}
-      {(revoked.data?.length ?? 0) > 0 && (
-        <Card title="Recently revoked">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Hostname</th>
-                <th>Revoked</th>
-                <th>Last seen</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {revoked.data!.map((c) => (
-                <tr key={c.id}>
-                  <td>
-                    <Link to={`/clients/${c.id}`}>{clientName(c)}</Link>
-                  </td>
-                  <td>{c.hostname}</td>
-                  <td>
-                    {ago(c.revoked_at)}
-                    {c.revoked_reason && (
-                      <>
-                        {' '}
-                        <span className="badge bad" title={c.revoked_reason}>
-                          possible credential theft
-                        </span>
-                      </>
-                    )}
-                  </td>
-                  <td>{ago(c.last_seen)}</td>
-                  <td className="row-actions">
-                    {!perms.can('clients.manage', c) ? null : c.restorable ? (
-                      <button
-                        className="small"
-                        title="Reactivate the client: its agent reconnects with a new PBS token and its jobs are re-enabled"
-                        onClick={async () => {
-                          if (!confirm(`Un-revoke ${clientName(c)}? Its agent reconnects and the jobs enabled before the revocation run again.`)) return
-                          try {
-                            setActionError('')
-                            await api.unrevokeClient(c.id)
-                            reloadAll()
-                          } catch (err) {
-                            setActionError((err as Error).message)
-                          }
-                        }}
-                      >
-                        Un-revoke
-                      </button>
-                    ) : (
-                      <span className="muted-text">enroll the PC again</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-      )}
       {creatingSetup && (
         <CreateSetup
           targets={targets.data}
@@ -298,7 +254,7 @@ function EnrollmentCommand({ e, onClose }: { e: Enrollment; onClose: () => void 
   )
 }
 
-function EnrollInstructions({ command, expires }: { command: string; expires: number }) {
+export function EnrollInstructions({ command, expires }: { command: string; expires: number }) {
   return (
     <>
       <p>
@@ -319,8 +275,21 @@ function AddClient({ onClose }: { onClose: () => void }) {
   const [targetId, setTargetId] = useState(0)
   const [ttl, setTtl] = useState(24)
   const [error, setError] = useState('')
+  // The console's warning that the name belonged to a revoked client.
+  const [revokedName, setRevokedName] = useState('')
   const [result, setResult] = useState<{ client_name: string; token: string; command: string } | null>(null)
   const tid = targetId || targets.data?.[0]?.id || 0
+  const canRevoked = usePerms().all('clients.revoked')
+  const create = async (newClient: boolean) => {
+    try {
+      setError('')
+      setResult(await api.createEnrollment(name, tid, ttl, newClient))
+    } catch (err) {
+      // 409: a revoked client had the name; re-enrolling it is done under Revoked clients.
+      if (err instanceof ApiError && err.status === 409) setRevokedName(err.message)
+      else setError((err as Error).message)
+    }
+  }
 
   if (targets.data && targets.data.length === 0)
     return (
@@ -335,27 +304,22 @@ function AddClient({ onClose }: { onClose: () => void }) {
     <Modal title="Add client" onClose={onClose} wide={!!result}>
       {!result ? (
         <form
-          onSubmit={async (e) => {
+          onSubmit={(e) => {
             e.preventDefault()
-            try {
-              setResult(await api.createEnrollment(name, tid, ttl))
-            } catch (err) {
-              // 409: the name belonged to a revoked client, whose backups the new PC would see.
-              if (err instanceof ApiError && err.status === 409) {
-                if (!confirm(`${err.message}.\n\nOnly reuse it if the new PC's users may see the old PC's files. Enroll under this name anyway?`)) return
-                try {
-                  setResult(await api.createEnrollment(name, tid, ttl, true))
-                } catch (err2) {
-                  setError((err2 as Error).message)
-                }
-                return
-              }
-              setError((err as Error).message)
-            }
+            create(false)
           }}
         >
           <Field label="Client name" hint="Used as PBS namespace, backup ID and token name. Lowercase letters, digits, - and _.">
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. office-pc-07" autoFocus required />
+            <input
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value)
+                setRevokedName('')
+              }}
+              placeholder="e.g. office-pc-07"
+              autoFocus
+              required
+            />
           </Field>
           <Field label="Datastore">
             <select value={tid} onChange={(e) => setTargetId(Number(e.target.value))}>
@@ -371,12 +335,37 @@ function AddClient({ onClose }: { onClose: () => void }) {
             <input type="number" min={1} max={720} value={ttl} onChange={(e) => setTtl(Number(e.target.value))} />
           </Field>
           <ErrorBox error={error} />
-          <div className="buttons">
-            <button type="button" onClick={onClose}>
-              Cancel
-            </button>
-            <button className="primary">Create enrollment token</button>
-          </div>
+          {revokedName ? (
+            <>
+              <div className="notice">
+                <p className="warn-text">{revokedName}.</p>
+                <p>
+                  Or create a new client under this name: it gets backups of its own and can&apos;t see the revoked client&apos;s.
+                  {!canRevoked && ' Re-enrolling needs the Manage revoked clients permission.'}
+                </p>
+              </div>
+              <div className="buttons">
+                <button type="button" onClick={onClose}>
+                  Cancel
+                </button>
+                {canRevoked && (
+                  <button type="button" onClick={() => (location.hash = '/clients/revoked')}>
+                    Open Revoked clients
+                  </button>
+                )}
+                <button type="button" className="primary" onClick={() => create(true)}>
+                  Create as a new client
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="buttons">
+              <button type="button" onClick={onClose}>
+                Cancel
+              </button>
+              <button className="primary">Create enrollment token</button>
+            </div>
+          )}
         </form>
       ) : (
         <div>

@@ -21,6 +21,7 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
   if (!data) return null
   const c = data.client
   const canManage = perms.can('clients.manage', c)
+  const canRevoked = perms.all('clients.revoked')
   const canRun = perms.can('backups.run', c)
   const canRestore = perms.can('restore', c)
   const canMember = perms.can('jobs.manage', c)
@@ -39,46 +40,55 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
         <h1>
           <OnlineDot online={c.online} /> {clientName(c)} {c.revoked && <span className="badge bad">revoked {ago(c.revoked_at)}</span>}
         </h1>
-        {!canManage ? null : c.revoked ? (
-          c.restorable && (
+        {c.revoked ? (
+          canRevoked && (
+            <div className="actions">
+              <button title="Give this client, with its backups, to a PC" onClick={() => (location.hash = '/clients/revoked')}>
+                Re-enroll…
+              </button>
+              {c.restorable && (
+                <button
+                  className="primary"
+                  title="Reactivate the client: its agent reconnects with a new PBS token and its jobs are re-enabled"
+                  onClick={async () => {
+                    if (!confirm(`Un-revoke ${clientName(c)}? Its agent reconnects and the jobs enabled before the revocation run again.`)) return
+                    try {
+                      setMsg('')
+                      await api.unrevokeClient(id)
+                      reloadAll()
+                    } catch (e) {
+                      setMsg((e as Error).message)
+                    }
+                  }}
+                >
+                  Un-revoke client
+                </button>
+              )}
+            </div>
+          )
+        ) : (
+          canManage && (
             <button
-              className="primary"
-              title="Reactivate the client: its agent reconnects with a new PBS token and its jobs are re-enabled"
+              className="danger"
               onClick={async () => {
-                if (!confirm(`Un-revoke ${clientName(c)}? Its agent reconnects and the jobs enabled before the revocation run again.`)) return
+                if (!confirm(`Revoke ${c.name}? The agent certificate and its PBS token are disabled. Existing snapshots are kept.`)) return
                 try {
-                  setMsg('')
-                  await api.unrevokeClient(id)
-                  reloadAll()
+                  await api.revokeClient(id)
+                  location.hash = '/clients'
                 } catch (e) {
                   setMsg((e as Error).message)
                 }
               }}
             >
-              Un-revoke client
+              Revoke client
             </button>
           )
-        ) : (
-          <button
-            className="danger"
-            onClick={async () => {
-              if (!confirm(`Revoke ${c.name}? The agent certificate and its PBS token are disabled. Existing snapshots are kept.`)) return
-              try {
-                await api.revokeClient(id)
-                location.hash = '/clients'
-              } catch (e) {
-                setMsg((e as Error).message)
-              }
-            }}
-          >
-            Revoke client
-          </button>
         )}
       </div>
       {c.revoked_reason && (
         <p className="warn-text">
           Revoked by the console — {c.revoked_reason}. Two parties used this PC&apos;s certificate during a credential rotation,
-          so neither certificate is accepted and the PBS token was deleted. Enroll the PC again.
+          so neither certificate is accepted and the PBS token was deleted. Re-enroll it under Revoked clients.
         </p>
       )}
       <div className="facts">

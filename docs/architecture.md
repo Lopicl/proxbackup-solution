@@ -324,14 +324,15 @@ read on every run.
   | Permission | Allows | Scopable |
   | --- | --- | --- |
   | `clients.view` | clients, jobs, runs, logs, dashboard | ✓ |
-  | `clients.manage` | revoke/un-revoke, push agent updates; enrollment and tags need all clients | ✓ |
+  | `clients.manage` | revoke, push agent updates; enrollment and tags need all clients | ✓ |
+  | `clients.revoked` | revoked clients: list, un-revoke, re-enroll (hands a PC the client's backups) | — |
   | `jobs.manage` | member job settings; group job definitions need all clients | ✓ |
   | `backups.run` | start and cancel backups | ✓ |
   | `restore` | snapshots, file browser, restores, client key download | ✓ |
   | `targets.manage`, `notifications.manage`, `updates.manage`, `encryption.manage`, `users.manage`, `audit.view` | console settings, users and roles, audit log | — |
 
   Built-in roles (kept in sync at startup, not editable): Administrator (all), Operator
-  (client permissions), Restore-only (view + restore), Read-only (view); custom roles pick any
+  (client permissions except `clients.revoked`), Restore-only (view + restore), Read-only (view); custom roles pick any
   set. A user gets one or more roles, each for **all clients** or for chosen clients and
   **tags** (clients tagged later are included). Console permissions only count from roles for
   all clients; any client permission implies seeing that client. Enrollment, client tags and
@@ -589,11 +590,21 @@ sequenceDiagram
   default, up to 30 days) and can be revoked under Clients; anyone holding one can enroll PCs
   until then. Revoking a client in the UI marks it revoked, so its
   certificate is no longer accepted, and deletes its PBS token. Existing snapshots stay.
-  Clients revoked in the last 30 days are listed under Clients and can be un-revoked: the
-  console remembers the certificate serial and which jobs were enabled, creates a new PBS
-  token, and the agent (which keeps polling with its certificate) reconnects with its
-  history, key and jobs. Clients revoked by older consoles (no serial kept) can't be restored
-  this way and must be enrolled again.
+  Bringing a revoked client back hands a PC its backups, so it needs `clients.revoked`
+  (*Clients → Revoked clients*, which lists all of them). **Un-revoke**: the console remembers
+  the certificate serial and which jobs were enabled, creates a new PBS token, and the agent
+  (which keeps polling with its certificate) reconnects with its history, key and jobs.
+  Clients revoked by older consoles (no serial kept) or for possible credential theft can't
+  be un-revoked. **Re-enroll** works for all of them: it creates a one-time enrollment code
+  tied to the client (`enrollments.reenroll_id`); the PC that uses it gets a new certificate
+  and a new PBS token under the client's old token name, with access to its namespaces, and
+  takes over the client row (name, history, tags, escrowed key, jobs enabled at revocation).
+  The pending code reserves the name, and only `clients.revoked` can show it again.
+  Every other enrollment gets PBS storage of its own: a name whose token name or namespace a
+  client (revoked ones included) used gets token and namespace `<name>.<n>` instead
+  (client names can't contain dots), so a new client can neither own nor be granted the old
+  snapshots. Admin enrollments under a revoked client's name are refused (409) until the
+  user confirms a new client; setup tokens refuse such names.
 * **Agent data directory:** `%ProgramData%\proxbackup` holds the client key, `jobs.json`
   (PBS token, encryption key) and the spool of run reports the agent delivers to the console.
   Go's mode bits do nothing on Windows, and ProgramData lets every user read its subfolders
@@ -626,7 +637,7 @@ sequenceDiagram
   gets a new certificate; one for a different key, or one made with the replaced certificate
   within an hour of the switch, means two parties hold the old certificate. The console then
   revokes the client as *possible credential theft*: its PBS token is deleted, neither serial is
-  accepted, and it can't be un-revoked, so the PC has to be enrolled again. Later uses of a
+  accepted, and it can't be un-revoked, so the PC has to be re-enrolled. Later uses of a
   replaced certificate are only logged.
 
   Admins can request the same rotation for any client (client page → *Credentials → Rotate*,

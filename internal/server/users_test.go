@@ -198,6 +198,9 @@ func TestUsersAndPermissions(t *testing.T) {
 		{"POST", "/api/clients/" + jsonNum(cs[1].ID) + "/restore", http.StatusForbidden},
 		{"PUT", "/api/clients/" + jsonNum(cs[2].ID) + "/tags", http.StatusForbidden},
 		{"GET", "/api/audit", http.StatusForbidden},
+		{"GET", "/api/clients/revoked", http.StatusForbidden},
+		{"POST", "/api/clients/" + jsonNum(cs[0].ID) + "/reenroll", http.StatusForbidden},
+		{"POST", "/api/clients/" + jsonNum(cs[0].ID) + "/unrevoke", http.StatusForbidden},
 	} {
 		var body any
 		if c.method != "GET" && c.method != "DELETE" {

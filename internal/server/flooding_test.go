@@ -216,30 +216,3 @@ func TestTrimClientLogs(t *testing.T) {
 		t.Fatalf("second trim cleared %d", n)
 	}
 }
-
-func TestEnrollmentReusingRevokedName(t *testing.T) {
-	s := newTestServer(t, "")
-	s.cfg.PublicURL = "https://console.example:8077"
-	ctx := context.Background()
-	c := floodTestClient(t, s, "pc-1")
-	if err := s.store.RevokeClient(ctx, c.ID); err != nil {
-		t.Fatal(err)
-	}
-	enroll := func(body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("POST", "/api/enrollments", strings.NewReader(body))
-		rec := httptest.NewRecorder()
-		s.handleCreateEnrollment(rec, req)
-		return rec
-	}
-	tid := c.TargetID
-	if rec := enroll(fmt.Sprintf(`{"client_name":"pc-1","target_id":%d}`, tid)); rec.Code != http.StatusConflict ||
-		!strings.Contains(rec.Body.String(), "revoked client") {
-		t.Fatalf("revoked name without confirmation: %d %s", rec.Code, rec.Body)
-	}
-	if rec := enroll(fmt.Sprintf(`{"client_name":"pc-1","target_id":%d,"reuse_revoked":true}`, tid)); rec.Code != http.StatusOK {
-		t.Fatalf("confirmed: %d %s", rec.Code, rec.Body)
-	}
-	if rec := enroll(fmt.Sprintf(`{"client_name":"pc-3","target_id":%d}`, tid)); rec.Code != http.StatusOK {
-		t.Fatalf("new name: %d %s", rec.Code, rec.Body)
-	}
-}

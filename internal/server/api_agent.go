@@ -164,10 +164,14 @@ func (s *Server) enrollWithSetupToken(w http.ResponseWriter, r *http.Request, st
 	writeJSON(w, api.EnrollResponse{ClientID: c.ID, ClientName: c.Name, CertPEM: string(certPEM), CAPEM: string(s.pki.CAPEM)})
 }
 
-// enrollClient creates the client. An admin-issued enrollment may reuse a
-// revoked client's name (and thereby its backups); with a setup token
+// enrollClient creates the client, or for a re-enrollment hands the PC the
+// revoked client (reenroll.go). An admin-issued enrollment may use a revoked
+// client's name, but gets PBS storage of its own; with a setup token
 // (setup=true) such names are refused.
 func (s *Server) enrollClient(ctx context.Context, e *Enrollment, req api.EnrollRequest, setup bool) (*Client, []byte, error) {
+	if e.ReenrollID > 0 {
+		return s.reenrollClient(ctx, e, req)
+	}
 	name := sanitizeClientName(e.ClientName)
 	if name == "" {
 		name = sanitizeClientName(req.Hostname)
@@ -193,7 +197,7 @@ func (s *Server) enrollClient(ctx context.Context, e *Enrollment, req api.Enroll
 	if err != nil {
 		return nil, nil, err
 	}
-	ns, tokenID, secret, err := s.provisionClient(ctx, t, name)
+	ns, tokenID, secret, err := s.provisionClient(ctx, t, s.freeStorageName(ctx, t, name))
 	if err != nil {
 		return nil, nil, fmt.Errorf("PBS provisioning: %w", err)
 	}
@@ -605,9 +609,10 @@ func prepareClientNamespace(ctx context.Context, pc *pbs.Client, t *Target, ns, 
 	return nil
 }
 
-// provisionClient creates the namespace, API token and ACL for a new client.
-// The token gets DatastoreBackup only: it can create snapshots in its own
-// namespace but cannot read other clients' data, delete or prune.
+// provisionClient creates the namespace, API token and ACL for a new client;
+// name is its storage name (see freeStorageName). The token gets
+// DatastoreBackup only: it can create snapshots in its own namespace but
+// cannot read other clients' data, delete or prune.
 func (s *Server) provisionClient(ctx context.Context, t *Target, name string) (ns, tokenID, secret string, err error) {
 	pc, err := s.adminClient(t)
 	if err != nil {
@@ -638,7 +643,7 @@ func (s *Server) moveTargetClients(ctx context.Context, pc *pbs.Client, t *Targe
 		return err
 	}
 	for _, c := range cs {
-		ns := clientNamespace(t, c.Name)
+		ns := clientNamespace(t, tokenName(c))
 		if c.TargetID != t.ID || c.Namespace == ns {
 			continue
 		}

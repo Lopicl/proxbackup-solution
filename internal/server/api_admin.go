@@ -347,18 +347,26 @@ func (s *Server) deleteClientToken(ctx context.Context, c *Client) {
 	}
 }
 
-// revokedListDays is how long revoked clients are listed (and can be
-// un-revoked from the list; their detail page keeps the button).
-const revokedListDays = 30
-
+// handleRevokedClients lists all revoked clients, newest first, with their
+// pending re-enrollments.
 func (s *Server) handleRevokedClients(w http.ResponseWriter, r *http.Request) {
-	cs, err := s.store.RevokedClients(r.Context(), now()-revokedListDays*86400)
+	ctx := r.Context()
+	cs, err := s.store.RevokedClients(ctx, 0)
 	if err != nil {
 		httpError(w, 500, err)
 		return
 	}
-	a := access(r)
-	cs = slices.DeleteFunc(cs, func(c *Client) bool { return !a.Client(PermViewClients, c) })
+	pending, err := s.store.PendingReenrollments(ctx)
+	if err != nil {
+		httpError(w, 500, err)
+		return
+	}
+	for _, c := range cs {
+		if e, ok := pending[c.ID]; ok {
+			c.Reenroll = &e
+		}
+		c.NameInUse = s.store.ClientNameTaken(ctx, c.baseName())
+	}
 	writeJSON(w, orEmpty(cs))
 }
 
@@ -366,7 +374,7 @@ func (s *Server) handleRevokedClients(w http.ResponseWriter, r *http.Request) {
 // PBS token is created and its agent, which still holds its certificate,
 // reconnects with its jobs and history.
 func (s *Server) handleUnrevokeClient(w http.ResponseWriter, r *http.Request) {
-	c, ok := s.pathClient(w, r, PermManageClients)
+	c, ok := s.pathClient(w, r, PermManageRevoked)
 	if !ok {
 		return
 	}
@@ -383,7 +391,7 @@ func (s *Server) handleUnrevokeClient(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, errors.New("this client was revoked by an older console version and cannot be restored; enroll the PC again"))
 		return
 	}
-	name := strings.TrimSuffix(c.Name, fmt.Sprintf("#revoked-%d", c.ID))
+	name := c.baseName()
 	// Hold the name like an enrollment does until the client row has it.
 	s.enrollMu.Lock()
 	defer s.enrollMu.Unlock()
@@ -396,26 +404,13 @@ func (s *Server) handleUnrevokeClient(w http.ResponseWriter, r *http.Request) {
 		httpError(w, statusFor(err), fmt.Errorf("target: %w", err))
 		return
 	}
-	pc, err := s.adminClient(t)
+	tokenID, secret, drop, err := s.reissueToken(ctx, t, c)
 	if err != nil {
 		httpError(w, http.StatusBadGateway, err)
 		return
 	}
-	pc.DeleteToken(ctx, t.PBSUser, name) // stale token of the same name
-	tokenID, secret, err := pc.CreateToken(ctx, t.PBSUser, name, "proxbackup agent "+name)
-	if err != nil {
-		httpError(w, http.StatusBadGateway, fmt.Errorf("PBS token: %w", err))
-		return
-	}
-	for _, ns := range append([]string{c.Namespace}, c.OldNamespaces...) {
-		if err := prepareClientNamespace(ctx, pc, t, ns, tokenID); err != nil {
-			pc.DeleteToken(ctx, t.PBSUser, name)
-			httpError(w, http.StatusBadGateway, err)
-			return
-		}
-	}
 	if err := s.store.UnrevokeClient(ctx, c, name, tokenID, s.sealer.Seal(secret, colClientToken, c.ID)); err != nil {
-		pc.DeleteToken(ctx, t.PBSUser, name)
+		drop()
 		httpError(w, statusFor(err), err)
 		return
 	}
@@ -524,8 +519,9 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		ClientName string `json:"client_name"`
 		TargetID   int64  `json:"target_id"`
 		TTLHours   int    `json:"ttl_hours"`
-		// The name belonged to a revoked client and the user confirmed reusing it.
-		ReuseRevoked bool `json:"reuse_revoked"`
+		// The name belonged to a revoked client, and the user confirmed
+		// creating a new client under it rather than re-enrolling that one.
+		NewClient bool `json:"new_client"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpError(w, 400, err)
@@ -542,15 +538,15 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 		httpError(w, 400, fmt.Errorf("client %q already exists or is waiting to enroll", name))
 		return
 	}
-	// The new client gets the revoked one's PBS token name and namespace, and
-	// with them read access to its backups: make the user confirm that (409).
+	// The user may mean the revoked client: that is a re-enrollment (see
+	// reenroll.go). A new client gets PBS storage of its own (enrollClient),
+	// so it never sees the revoked client's backups.
 	if s.store.RevokedClientNamed(ctx, name) {
-		if !req.ReuseRevoked {
-			httpError(w, http.StatusConflict, fmt.Errorf("%q belonged to a revoked client: the PC enrolled under this name will see and can restore that client's backups", name))
+		if !req.NewClient {
+			httpError(w, http.StatusConflict, fmt.Errorf("%q belonged to a revoked client. To give a PC that client's backups and history, re-enroll it under Revoked clients", name))
 			return
 		}
-		auditDetail(r, "reuses the name of a revoked client, with access to its backups")
-		s.log.Warn("enrollment reuses a revoked client's name", "client", name)
+		auditDetail(r, "new client under a revoked client's name, with backups of its own")
 	}
 	if _, err := s.store.Target(ctx, req.TargetID); err != nil {
 		httpError(w, 400, errors.New("unknown target"))
@@ -567,7 +563,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint()})
 	enc := base64.RawURLEncoding.EncodeToString(tok)
 	command := `proxbackup-agent.exe enroll ` + enc
-	if err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, time.Duration(req.TTLHours)*time.Hour, s.sealer.sealFor(command, colEnrollCmd)); err != nil {
+	if _, err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, 0, time.Duration(req.TTLHours)*time.Hour, s.sealer.sealFor(command, colEnrollCmd)); err != nil {
 		httpError(w, 500, err)
 		return
 	}
@@ -581,9 +577,14 @@ func (s *Server) handleEnrollmentCommand(w http.ResponseWriter, r *http.Request)
 		httpError(w, 400, err)
 		return
 	}
-	enc, err := s.store.PendingEnrollmentCommand(r.Context(), id)
+	enc, reenroll, err := s.store.PendingEnrollmentCommand(r.Context(), id)
 	if err != nil {
 		httpError(w, statusFor(err), errors.New("enrollment not pending (used, expired or created before this was stored)"))
+		return
+	}
+	// Whoever runs this command gets a revoked client's backups.
+	if reenroll > 0 && !access(r).Global(PermManageRevoked) {
+		httpError(w, http.StatusForbidden, errors.New("you don't have the permission: Manage revoked clients"))
 		return
 	}
 	command, err := s.sealer.Open(enc, colEnrollCmd, id)

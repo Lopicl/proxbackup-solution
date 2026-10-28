@@ -86,15 +86,21 @@ only**. Running the command again re-enrolls the PC.
 `.exe`. On each PC, double-click it, confirm the client name and console address, and it enrolls
 the PC, installs the agent to `C:\Program Files\ProxBackup` and starts the service
 (equivalent: `proxbackup-agent.exe setup <token>`). Revoke the setup when done. A setup can't use
-the name of a revoked client, since that client's backups would come with it; a single-PC
-enrollment created in the console can.
+the name of a revoked client.
+
+**Revoked clients:** *Clients → Revoked clients* (needs the *Manage revoked clients* permission,
+Administrators only by default) lists every revoked client. Revoked clients keep their backups.
+*Un-revoke* reconnects the same PC. *Re-enroll* creates an enrollment command, and the PC that runs
+it takes over the client: its name, backups, history, encryption key and jobs. *Add client* under a
+revoked client's name points there; otherwise the new client gets backups of its own and can't
+see the old ones.
 
 **Credentials:** agents up to 0.2.14 left `%ProgramData%\proxbackup` (PBS token, certificate key,
 encryption key) readable by every user of the PC. The console flags those clients as
 *credentials exposed* and gives each a new client certificate, then a new PBS token secret, the
 first time its updated agent connects. *Rotate* on the client page does the same for any client.
 If a copy of the old certificate also asks for a new one, the console revokes the client as
-*possible credential theft*; enroll the PC again. The encryption key stays: earlier backups need it.
+*possible credential theft*; re-enroll it under *Revoked clients*. The encryption key stays: earlier backups need it.
 
 ### 5. Create jobs
 
@@ -136,8 +142,7 @@ Read-only or custom ones, each for all clients or only chosen clients and tags. 
 sign-ins and every change. Users change their own password under the profile menu. Repeated failed
 sign-ins from one address or for one username are slowed down (HTTP 429 with the time to wait).
 Users who signed in from an address before aren't slowed down by others' failures there (shared
-NAT); only their own failed attempts count. Adding a client under the name of a revoked one asks
-for confirmation, because the new PC gets access to the revoked client's backups. Changing the host or
+NAT); only their own failed attempts count. Changing the host or
 fingerprint of a datastore that clients use needs *Restore* for all clients too, because clients send their
 PBS tokens to that host.
 

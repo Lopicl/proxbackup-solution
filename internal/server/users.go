@@ -24,12 +24,13 @@ import (
 type Perm string
 
 const (
-	PermViewClients   Perm = "clients.view"   // clients, their jobs and runs, the dashboard
-	PermManageClients Perm = "clients.manage" // enrollment, revoke, tags, agent updates
-	PermManageJobs    Perm = "jobs.manage"    // group jobs and member settings
-	PermRunBackups    Perm = "backups.run"    // start and cancel backups
-	PermRestore       Perm = "restore"        // browse snapshots, restore, download client keys
-	PermTargets       Perm = "targets.manage" // datastores
+	PermViewClients   Perm = "clients.view"    // clients, their jobs and runs, the dashboard
+	PermManageClients Perm = "clients.manage"  // enrollment, revoke, tags, agent updates
+	PermManageRevoked Perm = "clients.revoked" // revoked clients: un-revoke, re-enroll with their backups
+	PermManageJobs    Perm = "jobs.manage"     // group jobs and member settings
+	PermRunBackups    Perm = "backups.run"     // start and cancel backups
+	PermRestore       Perm = "restore"         // browse snapshots, restore, download client keys
+	PermTargets       Perm = "targets.manage"  // datastores
 	PermNotifications Perm = "notifications.manage"
 	PermUpdates       Perm = "updates.manage" // console update settings and installs
 	PermEncryption    Perm = "encryption.manage"
@@ -49,7 +50,8 @@ type PermInfo struct {
 
 var permissions = []PermInfo{
 	{PermViewClients, "View clients", "Clients, their jobs, runs and logs, and the dashboard.", true},
-	{PermManageClients, "Manage clients", "Enroll PCs, revoke and restore clients, push agent updates. Enrollment and tags need all clients.", true},
+	{PermManageClients, "Manage clients", "Enroll PCs, revoke clients, push agent updates. Enrollment and tags need all clients.", true},
+	{PermManageRevoked, "Manage revoked clients", "List revoked clients, un-revoke them, and re-enroll one on a PC that then gets its backups.", false},
 	{PermManageJobs, "Manage jobs", "Change member job settings. Creating and editing group jobs needs all clients.", true},
 	{PermRunBackups, "Run backups", "Start and cancel backups.", true},
 	{PermRestore, "Restore", "Browse snapshots, restore files and download client encryption keys.", true},
@@ -77,7 +79,7 @@ var builtinRoles = []struct {
 	perms           []Perm
 }{
 	{"admin", "Administrator", "Everything, including users and console settings.", []Perm{PermViewClients, PermManageClients,
-		PermManageJobs, PermRunBackups, PermRestore, PermTargets, PermNotifications, PermUpdates, PermEncryption, PermUsers, PermAudit}},
+		PermManageRevoked, PermManageJobs, PermRunBackups, PermRestore, PermTargets, PermNotifications, PermUpdates, PermEncryption, PermUsers, PermAudit}},
 	{"operator", "Operator", "Day-to-day work: clients, jobs, backups and restores.", []Perm{PermViewClients, PermManageClients,
 		PermManageJobs, PermRunBackups, PermRestore}},
 	{"restore", "Restore-only", "Sees clients and restores their files.", []Perm{PermViewClients, PermRestore}},

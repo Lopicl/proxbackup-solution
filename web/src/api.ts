@@ -101,6 +101,9 @@ export interface Client {
   revoked_at: number
   restorable: boolean // revoked and can be un-revoked (its agent reconnects)
   revoked_reason: string // why the console revoked it itself, e.g. possible credential theft ('' = an admin did)
+  // Revoked clients list only: its pending re-enrollment, and whether another client or enrollment has its name.
+  reenroll?: Enrollment
+  name_in_use?: boolean
   // The agent ran with a data directory every local user could read (Windows agents
   // up to 0.2.14): its PBS token and certificate are rotated once it is updated.
   creds_exposed: boolean
@@ -336,6 +339,7 @@ export class ApiError extends Error {
 export type Perm =
   | 'clients.view'
   | 'clients.manage'
+  | 'clients.revoked'
   | 'jobs.manage'
   | 'backups.run'
   | 'restore'
@@ -418,6 +422,7 @@ export interface Enrollment {
   used_at: number
   client_id: number
   created_at: number
+  reenroll_id: number // the revoked client this re-enrolls (0 = a new client)
 }
 
 export interface SetupToken {
@@ -531,9 +536,14 @@ export const api = {
   enrollments: () => request<Enrollment[]>('GET', '/enrollments'),
   enrollmentCommand: (id: number) => request<{ command: string }>('GET', `/enrollments/${id}/command`),
   deleteEnrollment: (id: number) => request('DELETE', `/enrollments/${id}`),
-  // reuse_revoked confirms reusing a revoked client's name (refused with 409 otherwise).
-  createEnrollment: (client_name: string, target_id: number, ttl_hours: number, reuse_revoked = false) =>
-    request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours, reuse_revoked }),
+  // new_client confirms a new client under a revoked client's name, with backups of its own (refused with 409 otherwise).
+  createEnrollment: (client_name: string, target_id: number, ttl_hours: number, new_client = false) =>
+    request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours, new_client }),
+  // Re-enrollment: the PC that runs the command takes over a revoked client, with its backups.
+  createReenrollment: (id: number, ttl_hours: number) =>
+    request<{ client_name: string; command: string; expires: number }>('POST', `/clients/${id}/reenroll`, { ttl_hours }),
+  reenrollmentCommand: (id: number) => request<{ command: string; expires: number }>('GET', `/clients/${id}/reenroll`),
+  deleteReenrollment: (id: number) => request('DELETE', `/clients/${id}/reenroll`),
 
   setupTokens: () => request<SetupToken[]>('GET', '/setup-tokens'),
   setupToken: (id: number) => request<{ token: string; command: string }>('GET', `/setup-tokens/${id}`),
