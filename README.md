@@ -121,6 +121,7 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 | Bandwidth | Off by default. An upload limit (Mbit/s) per job and/or per client (client page); the lower one wins. Each can have a time window in PC local time with its own limit, e.g. tighter during office hours; it switches mid-run. |
 | Battery / metered network | Per job, for scheduled runs: run as usual, wait until the PC is plugged in / off the metered network, or also stop a running backup (repeated later). New jobs wait on metered networks. A run that waits starts on time within its window, later as a catch-up, or is recorded as *missed* without catch-up. The tray and console show why it waits. |
 | Immutable backups | On by default. Snapshots are protected against prune and deletion for a minimum period (default 14 days), then for as long as retention keeps them. |
+| Cloud storage folders | OneDrive, Dropbox, iCloud, Box and other *files on demand* folders are backed up and browsable, with the files downloaded to the PC; online-only files are left out (logged as skipped, nothing is downloaded). Folders a sync app only lists on demand can't be read from a VSS snapshot by *Files* jobs (Windows refuses); *Volume image* jobs list and restore them. Google Drive's streamed `G:` drive is a virtual drive: use its *Mirror files* mode. |
 | Retention | Runs on the console once a day. Only a capped number of backups per job and day count, so a compromised PC can't flood its group to push good snapshots out. |
 
 ### 6. Restore

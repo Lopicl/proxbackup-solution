@@ -66,3 +66,21 @@ func TestNTExtrasRoundTrip(t *testing.T) {
 		t.Fatal("over-long stream name accepted")
 	}
 }
+
+func TestCloudTag(t *testing.T) {
+	for tag, want := range map[uint32]bool{
+		0x9000001A: true,  // IO_REPARSE_TAG_CLOUD
+		0x9000101A: true,  // _1
+		0x9000601A: true,  // _6, OneDrive
+		0x9000F01A: true,  // _F
+		0xA0000003: false, // mount point (junction)
+		0xA000000C: false, // symbolic link
+		0x80000017: false, // WOF
+		0x80000013: false, // dedup
+		0x9000001B: false,
+	} {
+		if got := cloudTag(tag); got != want {
+			t.Errorf("cloudTag(%#x) = %v, want %v", tag, got, want)
+		}
+	}
+}

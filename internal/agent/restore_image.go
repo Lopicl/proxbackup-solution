@@ -194,7 +194,7 @@ func joinRel(dir, name string) string {
 func imageSkipReason(f *ntfs.File) string {
 	switch tag := f.ReparseTag; {
 	case tag == 0:
-	case tag&0xFFFF0FFF == 0x9000001A: // cloud files (OneDrive)
+	case cloudTag(tag): // cloud storage
 		if !f.IsDir && f.Attrs&(attrOffline|attrRecallOnOpen|attrRecallOnDataAccess) != 0 {
 			return "cloud placeholder, content not on this PC"
 		}

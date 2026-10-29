@@ -8,8 +8,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"proxbackup/internal/api"
+	"proxbackup/pkg/ntfs"
 	"proxbackup/pkg/pbs"
 )
 
@@ -113,6 +116,51 @@ func (c *catalog) addTree(ctx context.Context, dir string) error {
 			c.EndDirectory()
 		case mode.IsRegular():
 			c.AddFile(fi.Name(), uint64(fi.Size()), fi.ModTime().Unix())
+		}
+	}
+	return nil
+}
+
+// addNTFSTree lists the directory dir of an NTFS volume read straight from a
+// snapshot into the current catalog directory, the way a file restore from
+// the image reads it. Unlike addTree it isn't stopped by the cloud files
+// filter: cloud storage folders (OneDrive, Dropbox, ...) that their provider
+// fills in on demand can't be opened in a snapshot, and would be listed empty.
+// Their online-only files aren't in the image and are left out. Reparse
+// points that restoreImage doesn't follow are listed as symlinks; NTFS
+// metadata files and System Volume Information are left out; unreadable
+// directories are listed empty.
+func (c *catalog) addNTFSTree(ctx context.Context, vol *ntfs.Volume, dir *ntfs.File, top bool) error {
+	ents, err := dir.ReadDir()
+	if err != nil {
+		return nil
+	}
+	// The catalog wants bytewise order, not NTFS collation.
+	slices.SortFunc(ents, func(a, b ntfs.DirEntry) int { return strings.Compare(a.Name, b.Name) })
+	for _, e := range ents {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if e.Ref < ntfs.FirstUserRef || (top && strings.EqualFold(e.Name, "System Volume Information")) {
+			continue
+		}
+		f, err := vol.Get(e.Ref)
+		if err != nil {
+			continue
+		}
+		switch skip := imageSkipReason(f); {
+		case f.ReparseTag == ntfs.ReparseTagMountPoint || f.ReparseTag == ntfs.ReparseTagSymlink, f.IsDir && skip != "":
+			c.AddSymlink(e.Name)
+		case f.IsDir:
+			c.StartDirectory(e.Name)
+			if err := c.addNTFSTree(ctx, vol, f, false); err != nil {
+				return err
+			}
+			c.EndDirectory()
+		case cloudTag(f.ReparseTag) && skip != "":
+			// Online-only: the content is not on this PC.
+		default:
+			c.AddFile(e.Name, uint64(f.Size()), f.Mtime.Unix())
 		}
 	}
 	return nil

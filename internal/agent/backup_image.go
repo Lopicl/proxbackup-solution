@@ -91,11 +91,28 @@ func (j *job) runImage(ctx context.Context) (api.Result, error) {
 	}
 
 	// List each volume's files from the same snapshot, so the image can be
-	// browsed like a file backup.
+	// browsed like a file backup. NTFS is read from the snapshot itself, like
+	// a file restore from the image does, so the list matches what it can
+	// restore; other file systems are listed through Windows.
 	j.setPhase("catalog")
 	cat := j.newCatalog()
 	defer cat.Close()
 	for _, v := range vols {
+		if v.alloc != nil {
+			fsys, err := ntfs.Open(newBlockCache(v.r, int64(v.size), 64))
+			if err == nil {
+				var root *ntfs.File
+				if root, err = fsys.Root(); err == nil {
+					cat.StartDirectory(v.archive)
+					if err := cat.addNTFSTree(ctx, fsys, root, true); err != nil {
+						return res, err
+					}
+					cat.EndDirectory()
+					continue
+				}
+			}
+			j.logf("info", "%s: listing files through Windows: %v", v.archive, err)
+		}
 		root, ok := snaps.imageFSRoot(v.name)
 		if !ok {
 			continue
@@ -207,6 +224,59 @@ func (s sectorReader) ReadAt(p []byte, off int64) (int, error) {
 		err = nil
 	}
 	return n, err
+}
+
+// blockCache serves reads from a raw volume through a few cached, aligned
+// blocks. Walking NTFS reads each MFT record and directory index separately;
+// neighbouring records share a block, so most reads don't reach the disk.
+type blockCache struct {
+	r      io.ReaderAt
+	size   int64
+	blocks map[int64][]byte
+	order  []int64 // oldest first
+	max    int
+}
+
+const cacheBlockSize = 256 << 10 // a multiple of sectorAlign
+
+// newBlockCache caches up to n blocks of the size bytes of r.
+func newBlockCache(r io.ReaderAt, size int64, n int) *blockCache {
+	return &blockCache{r: sectorReader{r}, size: size, blocks: map[int64][]byte{}, max: n}
+}
+
+func (c *blockCache) ReadAt(p []byte, off int64) (int, error) {
+	n := 0
+	for n < len(p) {
+		start := (off + int64(n)) &^ (cacheBlockSize - 1)
+		b, err := c.block(start)
+		i := int(off + int64(n) - start)
+		if i >= len(b) {
+			if err == nil {
+				err = io.EOF
+			}
+			return n, err
+		}
+		n += copy(p[n:], b[i:])
+	}
+	return n, nil
+}
+
+// block returns the block at start, short at the end of the volume.
+func (c *blockCache) block(start int64) ([]byte, error) {
+	if b, ok := c.blocks[start]; ok {
+		return b, nil
+	}
+	b := make([]byte, max(min(cacheBlockSize, c.size-start), 0))
+	if m, err := c.r.ReadAt(b, start); m < len(b) {
+		return b[:m], err
+	}
+	if len(c.order) >= c.max {
+		delete(c.blocks, c.order[0])
+		c.order = c.order[1:]
+	}
+	c.blocks[start] = b
+	c.order = append(c.order, start)
+	return b, nil
 }
 
 // gib formats a byte count for the job log.

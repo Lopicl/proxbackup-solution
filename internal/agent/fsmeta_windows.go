@@ -35,6 +35,31 @@ func statMeta(fi fs.FileInfo) winMeta {
 	}
 }
 
+// cloudReparse reports whether p, a reparse point to Go (fs.ModeIrregular),
+// is a cloud storage folder or file (see cloudTag), such as the OneDrive
+// folder itself. What of it is on this PC is ordinary data, unlike a
+// junction's target. The cloud files filter hides the reparse point on
+// everything inside a sync root, and on the sync root itself when it is
+// opened; only its parent's listing shows the tag, so that is read.
+func cloudReparse(p string, fi fs.FileInfo) bool {
+	if d, ok := fi.Sys().(*syscall.Win32FileAttributeData); !ok || d.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return false
+	}
+	var fd windows.Win32finddata
+	h, err := windows.FindFirstFile(windows.StringToUTF16Ptr(longPath(p)), &fd)
+	if err != nil {
+		return false
+	}
+	windows.FindClose(h)
+	// The name could also match another file's 8.3 alias.
+	return strings.EqualFold(windows.UTF16ToString(fd.FileName[:]), fi.Name()) &&
+		fd.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 && cloudTag(fd.Reserved0)
+}
+
+// errCloudReadOnlyVolume is what opening a cloud storage folder fails with
+// in a VSS snapshot when its sync app fills it in on demand and hasn't yet.
+const errCloudReadOnlyVolume = windows.ERROR_CLOUD_FILE_READ_ONLY_VOLUME
+
 // fileBasicInfo is FILE_BASIC_INFO; times are FILETIMEs.
 type fileBasicInfo struct {
 	CreationTime, LastAccessTime, LastWriteTime, ChangeTime int64

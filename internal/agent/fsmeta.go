@@ -38,6 +38,12 @@ const maxADSSize = 64 << 10
 // maxXattrName is the longest xattr name Linux accepts.
 const maxXattrName = 255
 
+// cloudTag reports whether a reparse tag is IO_REPARSE_TAG_CLOUD or one of
+// its variants (_1 to _F): the Windows Cloud Files API that OneDrive,
+// Dropbox, iCloud, Box and other "files on demand" clients use for every
+// file and folder they sync.
+func cloudTag(tag uint32) bool { return tag&0xFFFF0FFF == 0x9000001A }
+
 // Windows file attribute bits we care about.
 const (
 	attrReadonly           = 0x1
@@ -56,7 +62,7 @@ type winMeta struct {
 	mtime time.Time
 	// chtime is the change time, set by the walker for change detection only.
 	chtime time.Time
-	// cloudPlaceholder is set for OneDrive/Files-On-Demand style placeholders
+	// cloudPlaceholder is set for cloud storage (files on demand) placeholders
 	// whose content would be downloaded (or fail) on read.
 	cloudPlaceholder bool
 	nt               ntExtras

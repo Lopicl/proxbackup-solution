@@ -211,6 +211,9 @@ func (w *walker) readExtras(full, rel string, m *winMeta) {
 	}
 }
 
+// cloudSnapshotSkip explains errCloudReadOnlyVolume.
+const cloudSnapshotSkip = "in a cloud storage folder that its sync app lists on demand: Windows can't read it from a VSS snapshot (a volume image job can)"
+
 func (w *walker) skip(rel string, format string, args ...any) {
 	w.j.skipped.Add(1)
 	w.j.logf("warn", "skipped %s: %s", rel, fmt.Sprintf(format, args...))
@@ -247,6 +250,11 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 	full := filepath.Join(dir, name)
 	meta := statMeta(fi)
 	mode := fi.Mode()
+	if mode&fs.ModeIrregular != 0 && cloudReparse(full, fi) {
+		// Cloud storage (OneDrive, Dropbox, ...): back up what is on this PC
+		// like any other folder or file. Online-only files are left out below.
+		mode &^= fs.ModeIrregular
+	}
 	switch {
 	case mode&fs.ModeIrregular != 0:
 		// Must come before IsDir: on Windows, junctions and other non-symlink reparse
@@ -258,6 +266,10 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 		// Read the listing before emitting the directory so unreadable
 		// directories are skipped as a whole.
 		entries, err := os.ReadDir(full)
+		if errors.Is(err, errCloudReadOnlyVolume) {
+			w.skip(crel, "%s", cloudSnapshotSkip)
+			return nil
+		}
 		if err != nil {
 			w.skip(crel, "%v", err)
 			return nil
@@ -326,6 +338,10 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 func (w *walker) addFile(full, crel string, fi fs.FileInfo, pm pxar.Metadata) error {
 	name := fi.Name()
 	f, err := os.Open(full)
+	if errors.Is(err, errCloudReadOnlyVolume) {
+		w.skip(crel, "%s", cloudSnapshotSkip)
+		return nil
+	}
 	if err != nil {
 		w.skip(crel, "%v", err)
 		return nil

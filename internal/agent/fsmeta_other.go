@@ -5,6 +5,7 @@
 package agent
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"strings"
@@ -24,6 +25,12 @@ func statMeta(fi fs.FileInfo) winMeta {
 	}
 	return m
 }
+
+// cloudReparse and errCloudReadOnlyVolume are Windows only: there are no
+// cloud files reparse points here.
+func cloudReparse(string, fs.FileInfo) bool { return false }
+
+var errCloudReadOnlyVolume = errors.New("cloud operation not supported on a read-only volume")
 
 // readExtras sets the inode change time of p with withChtime. There are no
 // NTFS security descriptors or alternate data streams to read.
