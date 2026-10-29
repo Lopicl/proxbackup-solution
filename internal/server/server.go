@@ -56,6 +56,9 @@ type Server struct {
 	rotateMu     sync.Mutex // serializes PBS token rotations (rotate.go)
 	rotateFailed map[int64]time.Time
 
+	alertMu         sync.Mutex
+	replacedAlerted map[int64]time.Time // replaced certificate alerts sent, per client (rotate.go)
+
 	wakeMu sync.Mutex
 	wake   map[int64]chan struct{} // per-client long-poll wakeups
 
@@ -89,7 +92,7 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 		log.Info("re-sealed stored secrets, bound to their rows", "count", n)
 	}
 	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{},
-		rotateFailed: map[int64]time.Time{}}
+		rotateFailed: map[int64]time.Time{}, replacedAlerted: map[int64]time.Time{}}
 	s.notify = &Notifier{s: s}
 	s.updater = newUpdater(s)
 	return s, nil

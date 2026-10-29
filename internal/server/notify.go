@@ -51,7 +51,7 @@ func (n *Notifier) settings(ctx context.Context) NotifySettings {
 
 // Message is the payload sent to webhooks.
 type Message struct {
-	Event    string `json:"event"` // "run.finished" | "client.stale" | "job.daily_cap" | "test"
+	Event    string `json:"event"` // "run.finished" | "client.stale" | "job.daily_cap" | "client.credential_theft" | "client.replaced_cert" | "update.installed" | "update.failed" | "test"
 	Severity string `json:"severity"`
 	Subject  string `json:"subject"`
 	Text     string `json:"text"`
@@ -136,6 +136,27 @@ func (n *Notifier) DailyCap(ctx context.Context, c *Client, j *Job, day string, 
 			"Backups past the daily cap are not locked and don't count for retention. A PC uploading many backups "+
 			"can be a sign of ransomware or a compromised agent trying to push good snapshots out; check the PC "+
 			"and its run history.\n", c.Name, j.Name, limit, day, what)})
+}
+
+// CredentialTheft reports that two parties used a client's certificate:
+// revoked, the console revoked the client for it; otherwise a certificate
+// replaced long ago was used. Sent regardless of the failure/success switches.
+func (n *Notifier) CredentialTheft(ctx context.Context, c *Client, reason string, revoked bool) {
+	ns := n.settings(ctx)
+	m := Message{Event: "client.replaced_cert", Severity: "warning", Client: c.Name,
+		Subject: fmt.Sprintf("[ProxBackup] possible credential theft on %s", c.Name),
+		Text: fmt.Sprintf("Client %s: %s. The agent no longer uses a certificate once it has replaced it, so someone else "+
+			"may hold a copy of its credentials. If the PC no longer connects, or its last backups look wrong, revoke the "+
+			"client and enroll the PC again.\n", c.Name, reason)}
+	if revoked {
+		m.Event, m.Severity = "client.credential_theft", "error"
+		m.Subject = fmt.Sprintf("[ProxBackup] %s revoked: possible credential theft", c.Name)
+		m.Text = fmt.Sprintf("Client %s was revoked: %s. Two parties hold its client certificate, so its PBS token and "+
+			"encryption key may have been copied too. Its PBS token was deleted and the PC stopped backing up. Check the PC, "+
+			"then re-enroll it under Clients -> Revoked clients. Backups made before are readable by whoever holds the "+
+			"encryption key.\n", c.Name, reason)
+	}
+	n.send(ctx, ns, m)
 }
 
 // Update reports an installed (or failed) console update.

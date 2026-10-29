@@ -355,7 +355,7 @@ type Client struct {
 	EncryptionCreated     int64  `json:"encryption_created"`
 	// CredsExposed: the agent ran with a data directory readable by every local
 	// user (Windows agents up to 0.2.14), so its PBS token and certificate key
-	// may have been copied. They are rotated when the agent reports the fix.
+	// may have been copied. Cleared when an admin has them rotated.
 	CredsExposed bool `json:"creds_exposed"`
 	// RotateToken: a new PBS token secret is issued at the agent's next poll.
 	RotateToken    bool  `json:"rotate_token"`
@@ -699,11 +699,11 @@ func (s *Store) RequestRotation(ctx context.Context, id int64) error {
 	return nil
 }
 
-// SetRotatedToken stores a new PBS token for the client. secure: the agent
-// keeps its credentials from local users, so they no longer count as exposed.
-func (s *Store) SetRotatedToken(ctx context.Context, id int64, tokenID string, tokenSecretEnc []byte, secure bool) error {
+// SetRotatedToken stores a new PBS token for the client, which no longer
+// counts as exposed (an agent that still exposes it marks it again).
+func (s *Store) SetRotatedToken(ctx context.Context, id int64, tokenID string, tokenSecretEnc []byte) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE clients SET token_id=?, token_secret_enc=?, rotate_token=0, token_rotated_at=?,
-		creds_exposed=CASE WHEN ? THEN 0 ELSE creds_exposed END WHERE id=? AND revoked=0`, tokenID, tokenSecretEnc, now(), secure, id)
+		creds_exposed=0 WHERE id=? AND revoked=0`, tokenID, tokenSecretEnc, now(), id)
 	return err
 }
 

@@ -44,7 +44,7 @@ export function Clients() {
               <>
                 {exposed > 0 && (
                   <button
-                    title="Agents that run the fixed version get new credentials anyway. This also rotates them for clients whose agent is still old: do it again after their update."
+                    title="Gives each a new PBS token and client certificate the next time its agent connects. Do it once the agents run the fixed version, while the PCs are on. Clients whose agent is still old are flagged again: rotate them after their update."
                     onClick={async () => {
                       if (!confirm(`Rotate the PBS token and certificate of the ${exposed} clients with exposed credentials? Each agent gets them the next time it connects.`))
                         return
@@ -151,7 +151,7 @@ export function Clients() {
                       {c.creds_exposed && (
                         <span
                           className="badge warn"
-                          title="The agent left its PBS token and certificate key readable by every user of the PC (agents up to 0.2.14). They are replaced once the agent is updated."
+                          title="The agent left its PBS token and certificate key readable by every user of the PC (agents up to 0.2.14). Update the agent, then rotate its credentials."
                         >
                           credentials exposed
                         </span>

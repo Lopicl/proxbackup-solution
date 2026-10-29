@@ -63,6 +63,7 @@ func (s *Server) requireAgent(h agentHandler) http.Handler {
 				return
 			}
 			s.log.Info("client certificate renewed; the old one is no longer accepted", "client", c.Name, "id", c.ID, "old_serial", c.CertSerial)
+			s.wakeClient(c.ID) // a poll waiting with the old certificate ends at once
 			c.CertSerial, c.pendingSerial, c.CertRenew = serial, "", false
 		}
 		h(w, r, c)
@@ -72,23 +73,6 @@ func (s *Server) requireAgent(h agentHandler) http.Handler {
 // connSerial is the serial of the client certificate r came with.
 func connSerial(r *http.Request) string {
 	return r.TLS.VerifiedChains[0][0].SerialNumber.Text(16)
-}
-
-// replacedCertUsed handles a request with a certificate that a renewal
-// replaced. The agent stops using it once it has the new one, so its holder
-// is someone else. Asking for a certificate with it shortly after the renewal
-// means that someone else completed the renewal first: the client is revoked.
-func (s *Server) replacedCertUsed(r *http.Request, serial string) {
-	c, err := s.store.ClientByPrevSerial(r.Context(), serial)
-	if err != nil {
-		return
-	}
-	if r.URL.Path == "/agent/v1/cert" && time.Since(time.Unix(c.CertRenewedAt, 0)) < renewalRaceWindow {
-		s.revokeCompromised(r.Context(), c, "two parties renewed the client certificate", "remote", r.RemoteAddr)
-		return
-	}
-	s.log.Warn("a replaced client certificate was used: possible credential theft", "client", c.Name, "id", c.ID,
-		"serial", serial, "remote", r.RemoteAddr)
 }
 
 var clientNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
@@ -243,9 +227,6 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		if c.Revoked || c.CertSerial != serial {
 			httpError(w, http.StatusForbidden, errors.New("client certificate replaced or revoked"))
 			return
-		}
-		if err := s.startExposedRotation(ctx, c); err != nil {
-			s.log.Warn("could not request credential rotation", "client", c.Name, "err", err)
 		}
 		if s.tokenRotationDue(c) {
 			if err := s.rotateClientToken(ctx, c); err != nil {

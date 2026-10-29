@@ -622,14 +622,18 @@ sequenceDiagram
   directory propagates inheritance through links. On Linux the directory is 0700.
 * **Credential rotation.** Agents up to 0.2.14 left the data directory readable by all users,
   so the console marks every Windows client whose agent polls without the `data-dir-acl`
-  feature (and, on upgrade, every existing Windows client) as *credentials exposed*. The first
-  poll of an agent that reports the feature starts a rotation of both credentials, certificate
-  first, so that the new token can't reach whoever else holds a copy of the old certificate:
+  feature (and, on upgrade, every existing Windows client) as *credentials exposed*. An admin
+  rotates them (*Rotate exposed credentials* under Clients); what an agent reports neither starts
+  a rotation nor clears the flag, because a copy of the certificate reports the same and could
+  choose a moment when the PC is off. A completed rotation clears the flag, and an agent that
+  still exposes its credentials sets it again at its next poll. Both credentials are rotated,
+  certificate first, so that the new token can't reach whoever else holds a copy of the old
+  certificate:
   1. *Client certificate:* the poll reply sets `renew_cert`. The agent creates a new key, keeps it
      in `client.renew.key`, posts a CSR to `POST /agent/v1/cert` and swaps `client.key`/`client.pem`
      (via `client.renew.*`; an interrupted swap is completed at the next start). The console
      accepts the old and the new serial until the agent connects with the new certificate, then
-     drops the old serial; a poll still waiting with it ends with 403. While the certificate is
+     drops the old serial; a poll still waiting with it is woken and ends with 403. While the certificate is
      due for renewal, what its polls report (features) isn't stored. A CSR for the current key is
      refused.
   2. *PBS token:* the first poll with the new certificate gets a new token secret: the console
@@ -639,14 +643,21 @@ sequenceDiagram
      stops working at once.
 
   A renewal signs one key. A CSR for the same key again (the agent retrying after a lost reply)
-  gets a new certificate; one for a different key, or one made with the replaced certificate
-  within an hour of the switch, means two parties hold the old certificate. The console then
-  revokes the client as *possible credential theft*: its PBS token is deleted, neither serial is
-  accepted, and it can't be un-revoked, so the PC has to be re-enrolled. Later uses of a
-  replaced certificate are only logged.
+  gets a new certificate; one for a different key means two parties hold the old certificate.
+  So does any request with the replaced certificate within an hour of the switch: the agent
+  never uses it again, so it comes from whichever party lost the race. If a copy renewed first,
+  that is the locked-out agent's next poll. Only requests the agent may have sent just before it
+  switched are spared: for 2 minutes after the switch (its HTTP timeout is 90 s) a replaced
+  certificate is refused but revokes only with a CSR. Since the agent retries a refused poll
+  at least every 30 s, a locked-out agent is still caught. The console then revokes the client
+  as *possible credential theft*: its PBS token is deleted, neither serial is accepted, it can't
+  be un-revoked, so the PC has to be re-enrolled, and a `client.credential_theft` notification
+  goes out (webhook and email, whatever the success/failure switches). Later uses of a replaced
+  certificate don't revoke, so a stolen certificate can't knock a client out long after the
+  rotation; they send a `client.replaced_cert` notification, at most one per client per hour.
 
-  Admins can request the same rotation for any client (client page → *Credentials → Rotate*,
-  or *Rotate exposed credentials* under Clients for all flagged ones); it is applied at the
+  Admins can request the same rotation for any client (client page → *Credentials → Rotate*);
+  it wakes the client's waiting poll, so an online agent renews at once. It is applied at the
   agent's next poll, so an offline PC keeps working with its old credentials until it connects. A
   failed PBS call is retried after 10 minutes. An agent that can't renew its certificate (older
   than `cert-renewal`) keeps both its certificate and its token until it is updated. **The client encryption key is not rotated:** existing

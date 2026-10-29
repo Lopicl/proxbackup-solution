@@ -101,10 +101,12 @@ see the old ones.
 
 **Credentials:** agents up to 0.2.14 left `%ProgramData%\proxbackup` (PBS token, certificate key,
 encryption key) readable by every user of the PC. The console flags those clients as
-*credentials exposed* and gives each a new client certificate, then a new PBS token secret, the
-first time its updated agent connects. *Rotate* on the client page does the same for any client.
-If a copy of the old certificate also asks for a new one, the console revokes the client as
-*possible credential theft*; re-enroll it under *Revoked clients*. The encryption key stays: earlier backups need it.
+*credentials exposed*. Once their agents are updated, *Rotate exposed credentials* under Clients
+gives each a new client certificate, then a new PBS token secret, the next time it connects (do
+it while the PCs are on). *Rotate* on the client page does the same for any client. If a copy of
+the old certificate also asks for a new one, or either party uses the old certificate after the
+switch, the console revokes the client as *possible credential theft* and sends a notification;
+re-enroll it under *Revoked clients*. The encryption key stays: earlier backups need it.
 
 ### 5. Create jobs
 

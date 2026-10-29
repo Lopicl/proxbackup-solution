@@ -661,9 +661,9 @@ export function CredentialState({ c }: { c: Client }) {
     return (
       <b
         className="warn-text"
-        title="Agents up to 0.2.14 left their data directory readable by every user of the PC, so the PBS token and client certificate key may have been copied. Both are replaced automatically once the agent runs a fixed version. The encryption key can't be replaced: existing backups need it."
+        title="Agents up to 0.2.14 left their data directory readable by every user of the PC, so the PBS token and client certificate key may have been copied. Rotate them once the agent runs a fixed version, while the PC is on: a copy of the certificate that renews first is caught when the agent connects again. The encryption key can't be replaced: existing backups need it."
       >
-        possibly exposed — {fixed ? 'rotating' : 'update the agent to rotate them'}
+        possibly exposed — {c.cert_renew || c.rotate_token ? 'rotating' : fixed ? 'rotate them' : 'update the agent, then rotate them'}
       </b>
     )
   if (c.cert_renew)

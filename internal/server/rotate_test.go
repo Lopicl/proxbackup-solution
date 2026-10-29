@@ -142,32 +142,38 @@ var (
 		Features: []string{api.FeatureDataDirACL, api.FeatureCertRenewal}}
 )
 
-func TestExposedCredentialsRotateOnUpdatedAgent(t *testing.T) {
+// Exposed credentials are rotated only when an admin asks: what a poll
+// reports is the same for a copy of the certificate.
+func TestExposedCredentialsWaitForAdmin(t *testing.T) {
 	s := newTestServer(t, "")
 	ctx := context.Background()
 	f := &fakeTokenPBS{}
 	c := rotationTestClient(t, s, f)
 	cert := agentCert(t, s, c)
 
-	// An old Windows agent marks its credentials exposed but can't fix them.
+	// An old Windows agent marks its credentials exposed.
 	resp := testPoll(t, s, cert, oldAgent)
 	c, _ = s.store.Client(ctx, c.ID)
 	if !c.CredsExposed || c.TokenRotatedAt != 0 || resp.RenewCert || len(f.calls) != 0 {
 		t.Fatalf("after old agent: exposed=%v rotated=%d renew=%v calls=%v", c.CredsExposed, c.TokenRotatedAt, resp.RenewCert, f.calls)
 	}
-
-	// The updated agent is asked for a new certificate first; its token stays
-	// until it uses it, so whoever else holds the old certificate can't get the new one.
-	resp = testPoll(t, s, cert, newAgent)
+	// A poll reporting the fix neither starts a rotation nor clears the flag.
+	for range 2 {
+		resp = testPoll(t, s, cert, newAgent)
+	}
 	c, _ = s.store.Client(ctx, c.ID)
-	if !c.CredsExposed || !c.RotateToken || !c.CertRenew || !resp.RenewCert || len(f.calls) != 0 {
+	if !c.CredsExposed || c.RotateToken || c.CertRenew || resp.RenewCert || len(f.calls) != 0 {
 		t.Fatalf("after new agent: %+v, renew=%v, calls=%v", c, resp.RenewCert, f.calls)
+	}
+
+	// The admin rotates: certificate first, and the first poll with the new
+	// certificate gets the new token secret.
+	if err := s.store.RequestRotation(ctx, c.ID); err != nil {
+		t.Fatal(err)
 	}
 	if resp = testPoll(t, s, cert, newAgent); len(f.calls) != 0 || !resp.RenewCert {
 		t.Fatalf("token rotated before the certificate: %v", f.calls)
 	}
-
-	// The first poll with the new certificate gets the new token secret.
 	newCert := renewedCert(t, s, cert)
 	resp = testPoll(t, s, newCert, newAgent)
 	c, _ = s.store.Client(ctx, c.ID)
@@ -182,17 +188,31 @@ func TestExposedCredentialsRotateOnUpdatedAgent(t *testing.T) {
 		t.Fatalf("old certificate after the renewal: %d", rec.Code)
 	}
 
-	// Later polls don't rotate again.
+	// Later polls don't rotate again; an agent that still exposes its
+	// credentials marks them again.
 	n := len(f.calls)
 	testPoll(t, s, newCert, newAgent)
 	if len(f.calls) != n {
 		t.Fatalf("rotated again: %v", f.calls[n:])
 	}
+	if testPoll(t, s, newCert, oldAgent); !mustClient(t, s, c.ID).CredsExposed {
+		t.Fatal("old agent not marked exposed after the rotation")
+	}
 	// A Linux agent never counts as exposed.
+	s.store.db.Exec(`UPDATE clients SET creds_exposed=0 WHERE id=?`, c.ID)
 	s.store.TouchClient(ctx, c.ID, api.PollRequest{OS: "linux/amd64"}, true)
 	if c, _ = s.store.Client(ctx, c.ID); c.CredsExposed {
 		t.Fatal("linux agent marked exposed")
 	}
+}
+
+func mustClient(t *testing.T, s *Server, id int64) *Client {
+	t.Helper()
+	c, err := s.store.Client(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }
 
 func TestManualRotationWaitsForCertificate(t *testing.T) {
@@ -407,8 +427,8 @@ func TestWaitingPollEndsWhenCertificateRenewed(t *testing.T) {
 	done := make(chan *httptest.ResponseRecorder)
 	go func() { done <- agentCall(s, cert, s.handlePoll, "/agent/v1/poll?wait=30", string(body)) }()
 	time.Sleep(200 * time.Millisecond)
+	// The switch to the new certificate wakes it.
 	testPoll(t, s, renewedCert(t, s, cert), newAgent)
-	s.wakeClient(c.ID)
 	select {
 	case rec := <-done:
 		if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), "regenerated") {
@@ -416,6 +436,130 @@ func TestWaitingPollEndsWhenCertificateRenewed(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("waiting poll didn't end")
+	}
+}
+
+// After the switch, any request with the replaced certificate means two
+// parties hold it: whichever lost the race. Only requests the agent may have
+// sent just before it switched, and uses long after, don't revoke.
+func TestReplacedCertificateUseRevokes(t *testing.T) {
+	for _, tc := range []struct {
+		name, path  string
+		ago         time.Duration
+		wantRevoked bool
+	}{
+		{"poll in flight", "/agent/v1/poll", 0, false},
+		{"poll after the grace", "/agent/v1/poll", renewalGrace + time.Second, true},
+		{"run events", "/agent/v1/runs/1/events", renewalGrace + time.Second, true},
+		{"csr at once", "/agent/v1/cert", 0, true},
+		{"poll long after", "/agent/v1/poll", renewalRaceWindow + time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, "")
+			ctx := context.Background()
+			f := &fakeTokenPBS{}
+			c := rotationTestClient(t, s, f)
+			hook := webhookSink(t, s)
+			cert := agentCert(t, s, c)
+			s.store.RequestRotation(ctx, c.ID)
+			newCert := renewedCert(t, s, cert)
+			testPoll(t, s, newCert, newAgent)
+			s.store.db.Exec(`UPDATE clients SET cert_renewed_at=? WHERE id=?`, time.Now().Add(-tc.ago).Unix(), c.ID)
+
+			rec := agentCall(s, cert, func(w http.ResponseWriter, r *http.Request, c *Client) { w.WriteHeader(204) }, tc.path, "{}")
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("replaced certificate: %d", rec.Code)
+			}
+			c = mustClient(t, s, c.ID)
+			if c.Revoked != tc.wantRevoked {
+				t.Fatalf("revoked=%v, want %v (%s)", c.Revoked, tc.wantRevoked, c.RevokedReason)
+			}
+			switch {
+			case tc.wantRevoked:
+				if !strings.Contains(strings.Join(f.calls, " "), "DELETE access/users/proxbackup@pbs/token/pc-1") {
+					t.Fatalf("PBS token not deleted: %v", f.calls)
+				}
+				if m := hook.next(t); m.Event != "client.credential_theft" || m.Client != "pc-1" {
+					t.Fatalf("notification = %+v", m)
+				}
+			case tc.ago > renewalRaceWindow:
+				if m := hook.next(t); m.Event != "client.replaced_cert" {
+					t.Fatalf("notification = %+v", m)
+				}
+				// One alert per hour, however often the certificate is used.
+				agentCall(s, cert, s.handlePoll, tc.path, "{}")
+				hook.none(t)
+			default:
+				hook.none(t)
+			}
+		})
+	}
+}
+
+// The race from the 2026-10-29 audit: a copy of the certificate renews first
+// and uses its new certificate, locking the agent out. The agent's next poll
+// with the replaced certificate revokes the client, and the token the copy
+// got is deleted with it.
+func TestCopyThatRenewsFirstIsCaught(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	f := &fakeTokenPBS{}
+	c := rotationTestClient(t, s, f)
+	cert := agentCert(t, s, c)
+	testPoll(t, s, cert, oldAgent)
+	s.store.RequestRotation(ctx, c.ID)
+
+	thief := renewedCert(t, s, cert)
+	if resp := testPoll(t, s, thief, newAgent); resp.Config == nil || resp.Config.Target.Secret != f.secret {
+		t.Fatalf("thief's poll: %+v", resp.Config)
+	}
+	s.store.db.Exec(`UPDATE clients SET cert_renewed_at=? WHERE id=?`, time.Now().Add(-renewalGrace-time.Second).Unix(), c.ID)
+	if rec := agentCall(s, cert, s.handlePoll, "/agent/v1/poll?wait=0", "{}"); rec.Code != http.StatusForbidden {
+		t.Fatalf("agent's poll: %d", rec.Code)
+	}
+	if c = mustClient(t, s, c.ID); !c.Revoked || c.Restorable {
+		t.Fatalf("client = %+v", c)
+	}
+	if rec := agentCall(s, thief, s.handlePoll, "/agent/v1/poll?wait=0", "{}"); rec.Code != http.StatusForbidden {
+		t.Fatalf("thief's certificate after the revocation: %d", rec.Code)
+	}
+}
+
+// hookSink receives the console's webhook notifications.
+type hookSink chan Message
+
+func webhookSink(t *testing.T, s *Server) hookSink {
+	t.Helper()
+	ch := make(hookSink, 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m Message
+		json.NewDecoder(r.Body).Decode(&m)
+		ch <- m
+	}))
+	t.Cleanup(srv.Close)
+	if err := s.store.SetSetting(context.Background(), "notifications", NotifySettings{WebhookURL: srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	return ch
+}
+
+func (h hookSink) next(t *testing.T) Message {
+	t.Helper()
+	select {
+	case m := <-h:
+		return m
+	case <-time.After(5 * time.Second):
+		t.Fatal("no notification")
+		return Message{}
+	}
+}
+
+func (h hookSink) none(t *testing.T) {
+	t.Helper()
+	select {
+	case m := <-h:
+		t.Fatalf("unexpected notification %+v", m)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
 
