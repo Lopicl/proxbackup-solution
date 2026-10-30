@@ -231,26 +231,36 @@ func (s *Server) downloadCatalog(ctx context.Context, t *Target, c *Client, ref 
 	if err != nil {
 		return nil, err
 	}
-	var crypt *pbs.CryptConfig
-	if k, err := s.clientKey(ctx, c); err != nil {
-		return nil, err
-	} else if k != nil {
-		raw, err := base64.StdEncoding.DecodeString(k.Key)
-		if err != nil || len(raw) != 32 {
-			return nil, errors.New("invalid client encryption key")
-		}
-		if crypt, err = pbs.NewCryptConfig([32]byte(raw)); err != nil {
-			return nil, err
-		}
-	}
-	rs, err := pc.StartReader(ctx, ref, crypt)
+	rs, err := pc.StartReader(ctx, ref, nil)
 	if err != nil {
 		return nil, fmt.Errorf("open snapshot %s: %w", ref, err)
 	}
 	defer rs.Close()
+	// The manifest of an encrypted snapshot names its key, current or old;
+	// read again with that key, it is verified.
 	m, err := rs.Manifest(ctx)
 	if err != nil {
 		return nil, err
+	}
+	var crypt *pbs.CryptConfig
+	if m.Encrypted() && (len(c.cryptKeyEnc) > 0 || m.KeyFingerprint() != "") {
+		k, err := s.keyFor(ctx, c, m.KeyFingerprint())
+		if err != nil {
+			return nil, err
+		}
+		if k != nil {
+			raw, err := base64.StdEncoding.DecodeString(k.Key)
+			if err != nil || len(raw) != 32 {
+				return nil, errors.New("invalid client encryption key")
+			}
+			if crypt, err = pbs.NewCryptConfig([32]byte(raw)); err != nil {
+				return nil, err
+			}
+			rs.SetCrypt(crypt)
+			if m, err = rs.Manifest(ctx); err != nil {
+				return nil, err
+			}
+		}
 	}
 	i := slices.IndexFunc(m.Files, func(f pbs.FileInfo) bool { return f.Filename == pbs.CatalogArchiveName })
 	var meta []*pbs.FileInfo

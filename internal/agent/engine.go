@@ -134,9 +134,24 @@ func checkLocalSpec(spec api.JobSpec) error {
 	return nil
 }
 
-func (j *job) pbsClient() (*pbs.Client, error) {
+// accessWait is how long a job waits for PBS to apply its token's rights:
+// new tokens and their ACLs (enrollment, un-revoke, re-enrollment, token
+// rotation) take a few seconds to work.
+var accessWait = 30 * time.Second
+
+// pbsClient connects to the job's PBS, once it grants the token access to
+// the job's namespace or accessWait has passed.
+func (j *job) pbsClient(ctx context.Context) (*pbs.Client, error) {
 	t := j.spec.Target
-	return pbs.NewClient(pbs.Config{Host: t.Host, Fingerprint: t.Fingerprint, AuthID: t.AuthID, Secret: t.Secret})
+	c, err := pbs.NewClient(pbs.Config{Host: t.Host, Fingerprint: t.Fingerprint, AuthID: t.AuthID, Secret: t.Secret})
+	if err != nil {
+		return nil, err
+	}
+	// Any error left is reported by the job's own requests.
+	c.AwaitAccess(ctx, t.Datastore, t.Namespace, accessWait, func() {
+		j.logf("info", "PBS refuses access to namespace %q for now (new token rights take a few seconds to apply); waiting", t.Namespace)
+	})
+	return c, nil
 }
 
 func (j *job) snapshotRef(t int64) pbs.SnapshotRef {

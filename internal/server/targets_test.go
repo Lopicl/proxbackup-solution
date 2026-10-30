@@ -276,14 +276,17 @@ func TestTargetRepointNeedsRestore(t *testing.T) {
 	targetsOnly := []RoleAssignment{{RoleID: 1, AllClients: true}}
 	someRestore := append(targetsOnly, RoleAssignment{RoleID: 2, Clients: []int64{c.ID}})
 	allRestore := append(targetsOnly, RoleAssignment{RoleID: 2, AllClients: true})
-	save := func(tg *Target, ras []RoleAssignment, host, fp string) int {
+	saveAs := func(tg *Target, ras []RoleAssignment, host, fp, pbsUser string) int {
 		b, _ := json.Marshal(map[string]any{"name": tg.Name, "host": host, "fingerprint": fp, "datastore": "ds",
-			"admin_auth_id": "admin@pbs!t", "admin_secret": "made-up"})
+			"admin_auth_id": "admin@pbs!t", "admin_secret": "made-up", "pbs_user": pbsUser})
 		r := as(httptest.NewRequest("PUT", "/api/targets/x", strings.NewReader(string(b))), ras)
 		r.SetPathValue("id", strconv.FormatInt(tg.ID, 10))
 		rec := httptest.NewRecorder()
 		s.handleSaveTarget(rec, r)
 		return rec.Code
+	}
+	save := func(tg *Target, ras []RoleAssignment, host, fp string) int {
+		return saveAs(tg, ras, host, fp, "proxbackup@pbs")
 	}
 
 	if c := save(used, targetsOnly, "evil:8007", "aa"); c != 403 {
@@ -295,7 +298,11 @@ func TestTargetRepointNeedsRestore(t *testing.T) {
 	if c := save(used, someRestore, "evil:8007", "aa"); c != 403 {
 		t.Fatalf("new host with restore for some clients: %d", c)
 	}
-	if got, _ := s.store.Target(ctx, used.ID); got.Host != "pbs:8007" || got.Fingerprint != "aa" {
+	// The agent user owns the tokens of clients enrolled from now on.
+	if c := saveAs(used, targetsOnly, "pbs:8007", "aa", "evil@pbs"); c != 403 {
+		t.Fatalf("new agent user without restore: %d", c)
+	}
+	if got, _ := s.store.Target(ctx, used.ID); got.Host != "pbs:8007" || got.Fingerprint != "aa" || got.PBSUser != "proxbackup@pbs" {
 		t.Fatalf("target changed: %+v", got)
 	}
 	if c := save(used, targetsOnly, "PBS", "AA"); c != 200 {
@@ -303,6 +310,12 @@ func TestTargetRepointNeedsRestore(t *testing.T) {
 	}
 	if c := save(empty, targetsOnly, "other:8007", "bb"); c != 200 {
 		t.Fatalf("target without clients: %d", c)
+	}
+	if c := saveAs(empty, targetsOnly, "other:8007", "bb", "other@pbs"); c != 200 {
+		t.Fatalf("new agent user of a target without clients: %d", c)
+	}
+	if c := saveAs(used, allRestore, "pbs:8007", "aa", "other@pbs"); c != 200 {
+		t.Fatalf("new agent user with restore for all clients: %d", c)
 	}
 	if c := save(used, allRestore, "other:8007", "bb"); c != 200 {
 		t.Fatalf("new host with restore for all clients: %d", c)

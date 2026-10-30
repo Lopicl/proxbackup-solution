@@ -131,6 +131,7 @@ export function RevokedClients() {
 
 function Reenroll({ c, onClose }: { c: Client; onClose: () => void }) {
   const [ttl, setTtl] = useState(24)
+  const [newKey, setNewKey] = useState(true)
   const [error, setError] = useState('')
   const [result, setResult] = useState<{
     command: string
@@ -144,7 +145,7 @@ function Reenroll({ c, onClose }: { c: Client; onClose: () => void }) {
           onSubmit={async (e) => {
             e.preventDefault()
             try {
-              setResult(await api.createReenrollment(c.id, ttl))
+              setResult(await api.createReenrollment(c.id, ttl, newKey))
             } catch (err) {
               setError((err as Error).message)
             }
@@ -152,8 +153,20 @@ function Reenroll({ c, onClose }: { c: Client; onClose: () => void }) {
         >
           <p>
             The PC that runs the enrollment command becomes <b>{name}</b>: it gets this client&apos;s backups (and can restore them), its run history, its
-            encryption key and its jobs, re-enabled as they were before the revocation. Its previous certificate and PBS token stay invalid.
+            encryption keys and its jobs, re-enabled as they were before the revocation. Its previous certificate and PBS token stay invalid.
           </p>
+          {c.encryption_fingerprint && (
+            <div className="checks">
+              <label>
+                <input type="checkbox" checked={newKey} onChange={(e) => setNewKey(e.target.checked)} /> New encryption key for future backups
+                <span className="muted-text">
+                  {' '}
+                  — the old PC&apos;s configuration holds the current key. It stays escrowed here for the existing snapshots. Keep it only when the old PC is
+                  safe, e.g. the same PC after a reinstall.
+                </span>
+              </label>
+            </div>
+          )}
           {c.revoked_reason && <p className="warn-text">The console revoked this client itself ({c.revoked_reason}). Only re-enroll it on a PC you trust.</p>}
           <Field label="Token valid for (hours)">
             <input type="number" min={1} max={720} value={ttl} onChange={(e) => setTtl(Number(e.target.value))} />

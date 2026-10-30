@@ -1,8 +1,40 @@
 #!/bin/sh
 # purge removes the console's settings and database, and with them the only
-# copy of the proxbackup@pbs password. Backups, namespaces, that user and the
-# per-PC tokens it owns are left untouched, so agents keep backing up.
+# copy of the proxbackup@pbs password. Backups and namespaces are left
+# untouched. While proxbackup@pbs still owns per-PC tokens, it keeps them and
+# its rights, so those agents keep backing up; otherwise its ACLs and the user
+# are removed.
 set -e
+PBS_USER=proxbackup@pbs
+
+# drop_pbs_user removes $PBS_USER and every ACL entry of it and its tokens
+# (ACLs outlive the user on PBS), unless it still has tokens.
+drop_pbs_user() {
+	proxmox-backup-manager user list --output-format json | grep -qF "\"userid\":\"$PBS_USER\"" || return 0
+	tokens=$(proxmox-backup-manager user list-tokens "$PBS_USER" --output-format json) || return 1
+	if printf '%s' "$tokens" | grep -qF '"tokenid"'; then
+		cat >&2 <<EOF
+proxbackup-server: $PBS_USER still owns agent tokens, so it keeps its PBS
+rights and those agents keep backing up. To remove it, delete its tokens
+(proxmox-backup-manager user list-tokens $PBS_USER) and run:
+  proxmox-backup-debug api delete /access/users/$PBS_USER
+and remove its ACLs (proxmox-backup-manager acl list).
+EOF
+		return 0
+	fi
+	proxmox-backup-manager acl list --output-format json | sed 's/},{/}\n{/g' | while read -r e; do
+		ugid=$(printf '%s' "$e" | sed -n 's/.*"ugid":"\([^"]*\)".*/\1/p')
+		case "$ugid" in
+		"$PBS_USER" | "$PBS_USER!"*) ;;
+		*) continue ;;
+		esac
+		path=$(printf '%s' "$e" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
+		role=$(printf '%s' "$e" | sed -n 's/.*"roleid":"\([^"]*\)".*/\1/p')
+		proxmox-backup-manager acl update "$path" "$role" --auth-id "$ugid" --delete >/dev/null
+	done
+	proxmox-backup-debug api delete "/access/users/$PBS_USER" >/dev/null
+}
+
 case "$1" in
 remove)
 	[ -d /run/systemd/system ] && systemctl daemon-reload || true
@@ -11,6 +43,7 @@ purge)
 	if command -v proxmox-backup-manager >/dev/null 2>&1; then
 		# The root token of packages up to 0.2.16, if one is left.
 		proxmox-backup-manager user delete-token root@pam proxbackup-console >/dev/null 2>&1 || true
+		drop_pbs_user || echo "proxbackup-server: couldn't remove $PBS_USER and its ACLs from PBS" >&2
 	fi
 	rm -rf /etc/proxbackup /var/lib/proxbackup
 	if getent passwd proxbackup >/dev/null; then

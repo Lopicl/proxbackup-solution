@@ -70,6 +70,10 @@ CREATE TABLE IF NOT EXISTS run_logs (
   id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, ts INTEGER NOT NULL, level TEXT NOT NULL, msg TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS run_logs_run ON run_logs(run_id, id);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Encryption keys a client no longer backs up with, escrowed for the
+-- snapshots made with them (key_enc sealed like clients.crypt_key_enc).
+CREATE TABLE IF NOT EXISTS client_keys (id INTEGER PRIMARY KEY, client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  key_enc BLOB NOT NULL, fingerprint TEXT NOT NULL, created INTEGER NOT NULL, retired_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS snapshot_locks (
   id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL, target_id INTEGER NOT NULL, namespace TEXT NOT NULL,
   backup_type TEXT NOT NULL, backup_id TEXT NOT NULL, backup_time INTEGER NOT NULL, lock_days INTEGER NOT NULL,
@@ -193,6 +197,10 @@ func (s *Store) migrate() error {
 		{"enrollments", "reenroll_id", "INTEGER NOT NULL DEFAULT 0"},
 		// The target is this console's own PBS (see LocalPBS), kept in sync.
 		{"targets", "local", "INTEGER NOT NULL DEFAULT 0"},
+		// A re-enrollment gives the client a new encryption key for future backups.
+		{"enrollments", "new_crypt_key", "INTEGER NOT NULL DEFAULT 0"},
+		// The OS a group job is for (see GroupJob.Platform).
+		{"group_jobs", "platform", "TEXT NOT NULL DEFAULT 'windows'"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -861,14 +869,19 @@ func (s *Store) UnrevokeClient(ctx context.Context, c *Client, name, tokenID str
 
 // ReenrollClient gives a revoked client to the PC that used a re-enrollment:
 // its new certificate serial and PBS token replace the old ones, and the
-// client keeps its id, namespaces, history, tags and encryption key. Jobs
-// enabled when it was revoked run again.
-func (s *Store) ReenrollClient(ctx context.Context, c *Client, name, hostname, os, serial, tokenID string, tokenSecretEnc []byte) error {
+// client keeps its id, namespaces, history, tags and, unless rot replaces
+// it, its encryption key. Jobs enabled when it was revoked run again.
+func (s *Store) ReenrollClient(ctx context.Context, c *Client, name, hostname, os, serial, tokenID string, tokenSecretEnc []byte, rot *keyRotation) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if rot != nil {
+		if err := rotateClientKey(ctx, tx, c, rot); err != nil {
+			return err
+		}
+	}
 	res, err := tx.ExecContext(ctx, `UPDATE clients SET revoked=0, revoked_at=0, revoked_reason='', revoked_serial='', revoked_jobs='[]',
 		name=?, hostname=?, os=?, cert_serial=?, token_id=?, token_secret_enc=?, last_seen=?, agent_version='', agent_features='[]',
 		config_rev='', schedule_state='[]', tray_error='', paused_until=0, paused_by='', creds_exposed=0, rotate_token=0,
@@ -886,6 +899,67 @@ func (s *Store) ReenrollClient(ctx context.Context, c *Client, name, hostname, o
 		}
 	}
 	return tx.Commit()
+}
+
+// keyRotation replaces a client's encryption key: the current one moves to
+// client_keys, sealed by sealOld for its row there.
+type keyRotation struct {
+	sealOld     func(id int64) []byte
+	newKeyEnc   []byte // sealed for clients.crypt_key_enc
+	fingerprint string
+	created     int64
+}
+
+func rotateClientKey(ctx context.Context, tx *sql.Tx, c *Client, rot *keyRotation) error {
+	res, err := tx.ExecContext(ctx, `INSERT INTO client_keys(client_id, key_enc, fingerprint, created, retired_at) VALUES(?, X'', ?, ?, ?)`,
+		c.ID, c.EncryptionFingerprint, c.EncryptionCreated, now())
+	if err != nil {
+		return err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE client_keys SET key_enc=? WHERE id=?`, rot.sealOld(id), id); err != nil {
+		return err
+	}
+	// Only the key the old one was read from is replaced.
+	res, err = tx.ExecContext(ctx, `UPDATE clients SET crypt_key_enc=?, crypt_fingerprint=?, crypt_created=? WHERE id=? AND crypt_fingerprint=?`,
+		rot.newKeyEnc, rot.fingerprint, rot.created, c.ID, c.EncryptionFingerprint)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("the client's encryption key changed meanwhile")
+	}
+	return nil
+}
+
+// OldKey is an encryption key a client used before, for its snapshots from then.
+type OldKey struct {
+	ID          int64  `json:"id"`
+	Fingerprint string `json:"fingerprint"`
+	Created     int64  `json:"created"`
+	RetiredAt   int64  `json:"retired_at"`
+	keyEnc      []byte
+}
+
+// OldClientKeys lists a client's earlier encryption keys, newest first.
+func (s *Store) OldClientKeys(ctx context.Context, clientID int64) ([]*OldKey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, fingerprint, created, retired_at, key_enc FROM client_keys WHERE client_id=? ORDER BY id DESC`, clientID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*OldKey
+	for rows.Next() {
+		k := &OldKey{}
+		if err := rows.Scan(&k.ID, &k.Fingerprint, &k.Created, &k.RetiredAt, &k.keyEnc); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
 }
 
 // StorageUsed reports whether a client, revoked ones included, has the PBS
@@ -912,14 +986,19 @@ type Enrollment struct {
 	// ReenrollID is the revoked client the enrolling PC takes over, with its
 	// name, namespace, backups and history (0 = a new client).
 	ReenrollID int64 `json:"reenroll_id"`
+	// NewCryptKey: the re-enrolled client backs up with a new encryption key
+	// from now on (its old one stays escrowed for its snapshots).
+	NewCryptKey bool `json:"new_crypt_key"`
 }
 
 // CreateEnrollment stores a new code; reenrollID is the revoked client it
-// re-enrolls (0 = none). sealCommand seals the enrollment command, kept so
-// it can be shown again until the PC enrolls.
-func (s *Store) CreateEnrollment(ctx context.Context, codeHash, name string, targetID, reenrollID int64, ttl time.Duration, sealCommand func(id int64) []byte) (int64, error) {
-	return s.insertSealed(ctx, colEnrollCmd, sealCommand, nil, `INSERT INTO enrollments(code_hash, client_name, target_id, reenroll_id, expires, created_at) VALUES(?,?,?,?,?,?)`,
-		codeHash, name, targetID, reenrollID, time.Now().Add(ttl).Unix(), now())
+// re-enrolls (0 = none), newKey whether that client gets a new encryption
+// key. sealCommand seals the enrollment command, kept so it can be shown
+// again until the PC enrolls.
+func (s *Store) CreateEnrollment(ctx context.Context, codeHash, name string, targetID, reenrollID int64, newKey bool, ttl time.Duration,
+	sealCommand func(id int64) []byte) (int64, error) {
+	return s.insertSealed(ctx, colEnrollCmd, sealCommand, nil, `INSERT INTO enrollments(code_hash, client_name, target_id, reenroll_id, new_crypt_key,
+		expires, created_at) VALUES(?,?,?,?,?,?,?)`, codeHash, name, targetID, reenrollID, newKey, time.Now().Add(ttl).Unix(), now())
 }
 
 // PendingEnrollmentCommand returns the sealed command of an enrollment that
@@ -936,7 +1015,7 @@ func (s *Store) PendingEnrollmentCommand(ctx context.Context, id int64) ([]byte,
 
 // PendingReenrollments maps revoked clients to their pending re-enrollment.
 func (s *Store) PendingReenrollments(ctx context.Context) (map[int64]Enrollment, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, client_name, target_id, expires, reenroll_id, created_at FROM enrollments
+	rows, err := s.db.QueryContext(ctx, `SELECT id, client_name, target_id, expires, reenroll_id, new_crypt_key, created_at FROM enrollments
 		WHERE reenroll_id>0 AND used_at=0 AND expires>?`, now())
 	if err != nil {
 		return nil, err
@@ -945,7 +1024,7 @@ func (s *Store) PendingReenrollments(ctx context.Context) (map[int64]Enrollment,
 	out := map[int64]Enrollment{}
 	for rows.Next() {
 		var e Enrollment
-		if err := rows.Scan(&e.ID, &e.ClientName, &e.TargetID, &e.Expires, &e.ReenrollID, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.ClientName, &e.TargetID, &e.Expires, &e.ReenrollID, &e.NewCryptKey, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out[e.ReenrollID] = e
@@ -987,7 +1066,8 @@ func (s *Store) Enrollments(ctx context.Context) ([]Enrollment, error) {
 func (s *Store) ClaimEnrollment(ctx context.Context, codeHash string) (*Enrollment, error) {
 	e := &Enrollment{}
 	err := s.db.QueryRowContext(ctx, `UPDATE enrollments SET used_at=? WHERE code_hash=? AND used_at=0 AND expires>?
-		RETURNING id, client_name, target_id, expires, reenroll_id`, now(), codeHash, now()).Scan(&e.ID, &e.ClientName, &e.TargetID, &e.Expires, &e.ReenrollID)
+		RETURNING id, client_name, target_id, expires, reenroll_id, new_crypt_key`, now(), codeHash, now()).Scan(&e.ID, &e.ClientName, &e.TargetID, &e.Expires,
+		&e.ReenrollID, &e.NewCryptKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("enrollment code invalid, expired or already used")
 	}

@@ -137,16 +137,20 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	// Clients get the target's host and fingerprint together with their own PBS
 	// token secret, so repointing them could collect every client's token.
-	// Only someone who may already read all their backups may do that.
+	// Only someone who may already read all their backups may do that. The
+	// agent user owns the tokens clients get from now on (enrolled,
+	// un-revoked, re-enrolled, rotated), which can read their groups: a PBS
+	// account of the editor's choice must not get them either.
 	if t.ID != 0 && (!sameHost(t.Host, req.Host) ||
-		pbs.NormalizeFingerprint(t.Fingerprint) != pbs.NormalizeFingerprint(fp)) && !access(r).Global(PermRestore) {
+		pbs.NormalizeFingerprint(t.Fingerprint) != pbs.NormalizeFingerprint(fp) ||
+		t.PBSUser != req.PBSUser) && !access(r).Global(PermRestore) {
 		n, err := s.store.TargetClientCount(ctx, t.ID)
 		if err != nil {
 			httpError(w, 500, err)
 			return
 		}
 		if n > 0 {
-			httpError(w, http.StatusForbidden, fmt.Errorf("%d clients use this PBS server: changing its host or fingerprint "+
+			httpError(w, http.StatusForbidden, fmt.Errorf("%d clients use this PBS server: changing its host, fingerprint or agent user "+
 				"also needs the permission Restore (for all clients)", n))
 			return
 		}
@@ -338,7 +342,8 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 	}
 	c.AgentUpdate, c.AgentUpdatePushed = s.updater.agentUpdate(c)
 	runs, _ := s.store.Runs(ctx, RunFilter{ClientID: c.ID, Limit: 50})
-	writeJSON(w, map[string]any{"client": c, "jobs": orEmpty(jobs), "runs": orEmpty(runs)})
+	oldKeys, _ := s.store.OldClientKeys(ctx, c.ID)
+	writeJSON(w, map[string]any{"client": c, "jobs": orEmpty(jobs), "runs": orEmpty(runs), "old_keys": orEmpty(oldKeys)})
 }
 
 func (s *Server) handleRevokeClient(w http.ResponseWriter, r *http.Request) {
@@ -598,7 +603,7 @@ func (s *Server) handleCreateEnrollment(w http.ResponseWriter, r *http.Request) 
 	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint()})
 	enc := base64.RawURLEncoding.EncodeToString(tok)
 	command := `proxbackup-agent.exe enroll ` + enc
-	if _, err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, 0, time.Duration(req.TTLHours)*time.Hour, s.sealer.sealFor(command, colEnrollCmd)); err != nil {
+	if _, err := s.store.CreateEnrollment(ctx, hashToken(code), name, req.TargetID, 0, false, time.Duration(req.TTLHours)*time.Hour, s.sealer.sealFor(command, colEnrollCmd)); err != nil {
 		httpError(w, 500, err)
 		return
 	}

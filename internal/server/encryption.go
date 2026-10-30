@@ -60,6 +60,75 @@ func (s *Server) clientKey(ctx context.Context, c *Client) (*api.CryptKey, error
 	return &api.CryptKey{Key: key, Fingerprint: c.EncryptionFingerprint, Created: c.EncryptionCreated, MasterPubKey: es.MasterPubKey}, nil
 }
 
+// keyFor returns the client's key with fingerprint fp: its current key, or
+// one it used before (see rotateClientKey). fp "" means the current key.
+func (s *Server) keyFor(ctx context.Context, c *Client, fp string) (*api.CryptKey, error) {
+	if fp == "" || pbs.NormalizeFingerprint(fp) == pbs.NormalizeFingerprint(c.EncryptionFingerprint) {
+		return s.clientKey(ctx, c)
+	}
+	olds, err := s.store.OldClientKeys(ctx, c.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range olds {
+		if pbs.NormalizeFingerprint(k.Fingerprint) != pbs.NormalizeFingerprint(fp) {
+			continue
+		}
+		key, err := s.sealer.Open(k.keyEnc, colOldClientKey, k.ID)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt old client encryption key: %w", err)
+		}
+		return &api.CryptKey{Key: key, Fingerprint: k.Fingerprint, Created: k.Created}, nil
+	}
+	return nil, fmt.Errorf("client %s has no encryption key %s", c.Name, fp)
+}
+
+// snapshotKey returns the key ref was encrypted with, read from its
+// manifest. Clients that never changed their key skip the lookup.
+func (s *Server) snapshotKey(ctx context.Context, pc *pbs.Client, c *Client, ref pbs.SnapshotRef) (*api.CryptKey, error) {
+	if olds, err := s.store.OldClientKeys(ctx, c.ID); err != nil {
+		return nil, err
+	} else if len(olds) == 0 {
+		return s.clientKey(ctx, c)
+	}
+	rs, err := pc.StartReader(ctx, ref, nil)
+	if err != nil {
+		return nil, fmt.Errorf("open snapshot %s: %w", ref, err)
+	}
+	defer rs.Close()
+	m, err := rs.Manifest(ctx) // not verified: only says which key to verify it with
+	if err != nil {
+		return nil, err
+	}
+	if !m.Encrypted() {
+		return s.clientKey(ctx, c)
+	}
+	return s.keyFor(ctx, c, m.KeyFingerprint())
+}
+
+// newKeyRotation creates a new key for c, which has one: the current key
+// is kept for the snapshots made with it.
+func (s *Server) newKeyRotation(c *Client) (*keyRotation, error) {
+	old, err := s.sealer.Open(c.cryptKeyEnc, colClientKey, c.ID)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt client encryption key: %w", err)
+	}
+	key, err := pbs.GenerateKey()
+	if err != nil {
+		return nil, err
+	}
+	cc, err := pbs.NewCryptConfig(key)
+	if err != nil {
+		return nil, err
+	}
+	return &keyRotation{
+		sealOld:     s.sealer.sealFor(old, colOldClientKey),
+		newKeyEnc:   s.sealer.Seal(base64.StdEncoding.EncodeToString(key[:]), colClientKey, c.ID),
+		fingerprint: cc.Fingerprint(),
+		created:     now(),
+	}, nil
+}
+
 // ensureClientKey generates the client's key if it has none yet.
 func (s *Server) ensureClientKey(ctx context.Context, c *Client) error {
 	if len(c.cryptKeyEnc) > 0 {
@@ -85,16 +154,21 @@ func (s *Server) ensureClientKey(ctx context.Context, c *Client) error {
 }
 
 // handleClientKey downloads the client's key as a PBS key file, for restores
-// with proxmox-backup-client --keyfile or the agent's -keyfile.
+// with proxmox-backup-client --keyfile or the agent's -keyfile. The query
+// parameter fingerprint picks one of its old keys.
 func (s *Server) handleClientKey(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.pathClient(w, r, PermRestore)
 	if !ok {
 		return
 	}
 	ctx := r.Context()
-	k, err := s.clientKey(ctx, c)
+	if len(c.cryptKeyEnc) == 0 && r.URL.Query().Get("fingerprint") == "" {
+		httpError(w, 404, fmt.Errorf("client %s has no encryption key", c.Name))
+		return
+	}
+	k, err := s.keyFor(ctx, c, r.URL.Query().Get("fingerprint"))
 	if err != nil {
-		httpError(w, 500, err)
+		httpError(w, 404, err)
 		return
 	}
 	if k == nil {
@@ -115,6 +189,9 @@ func (s *Server) handleClientKey(w http.ResponseWriter, r *http.Request) {
 	s.log.Warn("client encryption key downloaded", "client", c.Name, "fingerprint", k.Fingerprint, "by", u.Name)
 	name, _, _ := strings.Cut(c.Name, "#") // revoked clients are renamed "<name>#revoked-<id>"
 	w.Header().Set("Content-Type", "application/json")
+	if k.Fingerprint != c.EncryptionFingerprint {
+		name += "-" + time.Unix(k.Created, 0).UTC().Format("20060102")
+	}
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-encryption-key.json"`, name))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write(kf)

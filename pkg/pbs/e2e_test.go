@@ -363,6 +363,23 @@ func TestE2EEncrypted(t *testing.T) {
 	if _, err := r2.Manifest(ctx); err == nil || !strings.Contains(err.Error(), "wrong key") {
 		t.Fatalf("wrong key accepted: %v", err)
 	}
+	// Without a key the manifest names the key to read it with (the console
+	// picks a client's current or old key this way), then verifies.
+	r3, err := c.StartReader(ctx, ref, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Close()
+	if m, err := r3.Manifest(ctx); err != nil || m.KeyFingerprint() != crypt.Fingerprint() {
+		t.Fatalf("manifest without key: %v, %v", m, err)
+	}
+	r3.SetCrypt(crypt)
+	if _, err := r3.Manifest(ctx); err != nil {
+		t.Fatalf("manifest verified after SetCrypt: %v", err)
+	}
+	if log, err := r3.Blob(ctx, "client.log.blob"); err != nil || string(log) != "secret log\n" {
+		t.Fatalf("log blob after SetCrypt: %q %v", log, err)
+	}
 
 	var upid string
 	if err := c.Call(ctx, http.MethodPost, "admin/datastore/"+store+"/verify",
@@ -731,11 +748,20 @@ func TestE2EProvisionAsUser(t *testing.T) {
 		t.Fatal("set an ACL for another auth id")
 	}
 
-	backup := func(secret, ns string) error {
+	tokenClient := func(secret string) *pbs.Client {
 		tc, err := pbs.NewClient(pbs.Config{Host: os.Getenv("PROXBACKUP_E2E_HOST"), Fingerprint: os.Getenv("PROXBACKUP_E2E_FINGERPRINT"), AuthID: tokenID, Secret: secret})
 		if err != nil {
-			return err
+			t.Fatal(err)
 		}
+		return tc
+	}
+	// PBS applies new ACLs only after a few seconds, like agents see after
+	// their enrollment.
+	if err := tokenClient(secret).AwaitAccess(ctx, store, ns, 30*time.Second, nil); err != nil {
+		t.Fatalf("token access to its namespace: %v", err)
+	}
+	backup := func(secret, ns string) error {
+		tc := tokenClient(secret)
 		b, err := tc.StartBackup(ctx, pbs.SnapshotRef{Store: store, NS: ns, Type: "host", ID: name, Time: time.Now().Unix()}, pbs.BackupOptions{})
 		if err != nil {
 			return err
@@ -756,7 +782,11 @@ func TestE2EProvisionAsUser(t *testing.T) {
 	if err := c.GrantACL(ctx, "/", "Admin", tokenID); err != nil {
 		t.Fatal(err)
 	}
-	tc, _ := pbs.NewClient(pbs.Config{Host: os.Getenv("PROXBACKUP_E2E_HOST"), Fingerprint: os.Getenv("PROXBACKUP_E2E_FINGERPRINT"), AuthID: tokenID, Secret: secret})
+	tc := tokenClient(secret)
+	// Wait for the new ACL, so the checks below don't pass only because PBS
+	// hasn't applied it yet. Best effort: the token only gets the parent
+	// namespace if its user has rights there.
+	tc.AwaitAccess(ctx, store, "proxbackup-e2e", 15*time.Second, nil)
 	if err := tc.Call(ctx, http.MethodGet, "access/users", nil, nil); err == nil {
 		var users []map[string]any
 		tc.Call(ctx, http.MethodGet, "access/users", nil, &users)

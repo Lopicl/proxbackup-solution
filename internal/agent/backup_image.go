@@ -20,7 +20,7 @@ func (j *job) runImage(ctx context.Context) (api.Result, error) {
 	if len(j.spec.Volumes) == 0 {
 		return res, errors.New("no volumes configured")
 	}
-	c, err := j.pbsClient()
+	c, err := j.pbsClient(ctx)
 	if err != nil {
 		return res, err
 	}

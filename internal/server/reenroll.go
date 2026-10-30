@@ -19,7 +19,9 @@ import (
 // re-enrollment, which needs PermManageRevoked, hands them to a PC again: the
 // PC that uses it takes over the revoked client (name, namespaces, backups,
 // run history, tags, escrowed encryption key) with a new certificate and PBS
-// token. Every other enrollment gets PBS storage of its own (see
+// token. The old PC still has the encryption key in its configuration, so by
+// default the client backs up with a new key from then on; the old key stays
+// escrowed for the snapshots made with it. Every other enrollment gets PBS storage of its own (see
 // freeStorageName), even under a revoked client's name.
 
 // baseName is the client's name, without the "#revoked-<id>" a revoked
@@ -102,13 +104,23 @@ func (s *Server) reenrollClient(ctx context.Context, e *Enrollment, req api.Enro
 	if err != nil {
 		return nil, nil, err
 	}
+	var rot *keyRotation
+	if e.NewCryptKey && len(c.cryptKeyEnc) > 0 {
+		if rot, err = s.newKeyRotation(c); err != nil {
+			return nil, nil, err
+		}
+	}
 	tokenID, secret, drop, err := s.reissueToken(ctx, t, c)
 	if err != nil {
 		return nil, nil, fmt.Errorf("PBS provisioning: %w", err)
 	}
-	if err := s.store.ReenrollClient(ctx, c, name, req.Hostname, req.OS, serial, tokenID, s.sealer.Seal(secret, colClientToken, c.ID)); err != nil {
+	if err := s.store.ReenrollClient(ctx, c, name, req.Hostname, req.OS, serial, tokenID, s.sealer.Seal(secret, colClientToken, c.ID), rot); err != nil {
 		drop()
 		return nil, nil, err
+	}
+	if rot != nil {
+		s.log.Warn("re-enrolled client backs up with a new encryption key; the old one stays escrowed for its snapshots",
+			"client", name, "old_fingerprint", c.EncryptionFingerprint, "fingerprint", rot.fingerprint)
 	}
 	if affected, err := s.store.SyncAllGroups(ctx); err != nil {
 		s.log.Error("attach group jobs", "client", name, "err", err)
@@ -142,6 +154,9 @@ func (s *Server) revokedPathClient(w http.ResponseWriter, r *http.Request) (*Cli
 func (s *Server) handleCreateReenrollment(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TTLHours int `json:"ttl_hours"`
+		// NewKey (default true): back up with a new encryption key, as the
+		// old PC has the current one.
+		NewKey *bool `json:"new_key"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpError(w, 400, err)
@@ -173,11 +188,19 @@ func (s *Server) handleCreateReenrollment(w http.ResponseWriter, r *http.Request
 	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint()})
 	command := `proxbackup-agent.exe enroll ` + base64.RawURLEncoding.EncodeToString(tok)
 	ttl := time.Duration(req.TTLHours) * time.Hour
-	if _, err := s.store.CreateEnrollment(ctx, hashToken(code), name, c.TargetID, c.ID, ttl, s.sealer.sealFor(command, colEnrollCmd)); err != nil {
+	newKey := req.NewKey == nil || *req.NewKey
+	if _, err := s.store.CreateEnrollment(ctx, hashToken(code), name, c.TargetID, c.ID, newKey, ttl, s.sealer.sealFor(command, colEnrollCmd)); err != nil {
 		httpError(w, 500, err)
 		return
 	}
-	auditDetail(r, "re-enrollment created: the PC that uses it gets the client's backups")
+	switch {
+	case len(c.cryptKeyEnc) == 0:
+		auditDetail(r, "re-enrollment created: the PC that uses it gets the client's backups")
+	case newKey:
+		auditDetail(r, "re-enrollment created: the PC that uses it gets the client's backups and a new encryption key")
+	default:
+		auditDetail(r, "re-enrollment created: the PC that uses it gets the client's backups and keeps its encryption key")
+	}
 	s.log.Warn("re-enrollment of a revoked client created", "client", name, "id", c.ID)
 	writeJSON(w, map[string]any{"client_name": name, "command": command, "expires": time.Now().Add(ttl).Unix()})
 }

@@ -11,6 +11,7 @@ import (
 	"hash/fnv"
 	"regexp"
 	"slices"
+	"strings"
 
 	"proxbackup/internal/api"
 	"proxbackup/pkg/pbs"
@@ -31,10 +32,28 @@ const maxSpreadMinutes = 24 * 60
 
 var tagRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,31}$`)
 
+// A group job is for the clients of one platform: its sources are paths in
+// that OS's syntax. Image jobs are Windows only.
+const (
+	PlatformWindows = "windows"
+	PlatformUnix    = "unix" // macOS and Linux
+)
+
+// clientPlatform is the platform of a client that reported os ("windows/amd64",
+// "darwin/arm64"…). Clients that reported none are Windows PCs: other agents
+// came later.
+func clientPlatform(os string) string {
+	if os == "" || strings.HasPrefix(os, "windows/") || os == "windows" {
+		return PlatformWindows
+	}
+	return PlatformUnix
+}
+
 type GroupJob struct {
 	ID              int64           `json:"id"`
 	Name            string          `json:"name"`
 	Kind            string          `json:"kind"`
+	Platform        string          `json:"platform"`  // PlatformWindows or PlatformUnix: only its clients are members
 	BackupID        string          `json:"backup_id"` // "" = per client: <client> or <client>-image
 	Sources         []string        `json:"sources"`
 	Excludes        []string        `json:"excludes"`
@@ -61,6 +80,14 @@ type GroupJob struct {
 	CreatedAt int64    `json:"created_at"`
 }
 
+// platform is g.Platform, PlatformWindows if unset.
+func (g *GroupJob) platform() string {
+	if g.Platform == "" {
+		return PlatformWindows
+	}
+	return g.Platform
+}
+
 // memberBackupID is the PBS backup-id a member of g on client name uses.
 func memberBackupID(g *GroupJob, name string) string {
 	switch {
@@ -84,14 +111,14 @@ func startDelay(groupID, clientID int64, spreadMinutes int) int {
 
 const groupCols = `id, name, kind, backup_id, sources, excludes, volumes, use_vss, schedule, window_minutes, catch_up, retention,
 	enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at, daily_cap, prevent_sleep, wake_to_run, bandwidth,
-	on_battery, on_metered`
+	on_battery, on_metered, platform`
 
 func scanGroupJob(sc interface{ Scan(...any) error }) (*GroupJob, error) {
 	g := &GroupJob{}
 	var src, exc, vol, ret, tags, bw string
 	err := sc.Scan(&g.ID, &g.Name, &g.Kind, &g.BackupID, &src, &exc, &vol, &g.UseVSS, &g.Schedule, &g.WindowMinutes, &g.CatchUp, &ret,
 		&g.Enabled, &g.ChangeDetection, &g.Encrypt, &g.LockDays, &g.SpreadMinutes, &tags, &g.CreatedAt, &g.DailyCap, &g.PreventSleep, &g.WakeToRun, &bw,
-		&g.OnBattery, &g.OnMetered)
+		&g.OnBattery, &g.OnMetered, &g.Platform)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -181,10 +208,10 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 		}
 		res, err := db.ExecContext(ctx, `INSERT INTO group_jobs(name, kind, backup_id, sources, excludes, volumes, use_vss, schedule,
 			window_minutes, catch_up, retention, enabled, change_detection, encrypt, lock_days, spread_minutes, member_tags, created_at,
-			daily_cap, prevent_sleep, wake_to_run, bandwidth, on_battery, on_metered) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			daily_cap, prevent_sleep, wake_to_run, bandwidth, on_battery, on_metered, platform) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
 			g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.CreatedAt, g.DailyCap, g.PreventSleep, g.WakeToRun, bw,
-			g.OnBattery, g.OnMetered)
+			g.OnBattery, g.OnMetered, g.platform())
 		if err != nil {
 			return err
 		}
@@ -193,10 +220,10 @@ func saveGroupRow(ctx context.Context, db execer, g *GroupJob) error {
 	}
 	_, err := db.ExecContext(ctx, `UPDATE group_jobs SET name=?, kind=?, backup_id=?, sources=?, excludes=?, volumes=?, use_vss=?,
 		schedule=?, window_minutes=?, catch_up=?, retention=?, enabled=?, change_detection=?, encrypt=?, lock_days=?, spread_minutes=?,
-		member_tags=?, daily_cap=?, prevent_sleep=?, wake_to_run=?, bandwidth=?, on_battery=?, on_metered=? WHERE id=?`,
+		member_tags=?, daily_cap=?, prevent_sleep=?, wake_to_run=?, bandwidth=?, on_battery=?, on_metered=?, platform=? WHERE id=?`,
 		g.Name, g.Kind, g.BackupID, src, exc, vol, g.UseVSS, g.Schedule, g.WindowMinutes, g.CatchUp, ret, g.Enabled,
 		g.ChangeDetection, g.Encrypt, g.LockDays, g.SpreadMinutes, tags, g.DailyCap, g.PreventSleep, g.WakeToRun, bw,
-		g.OnBattery, g.OnMetered, g.ID)
+		g.OnBattery, g.OnMetered, g.platform(), g.ID)
 	return err
 }
 
@@ -339,7 +366,7 @@ func syncAllGroups(ctx context.Context, tx *sql.Tx) ([]int64, error) {
 }
 
 // syncGroup makes the member jobs of a group match its members: explicit
-// clients plus clients with a member tag. Members of revoked clients are left
+// clients plus clients with a member tag, of the group's platform. Members of revoked clients are left
 // alone (they are disabled and keep naming their run history). It returns the
 // clients whose configuration may have changed.
 func syncGroup(ctx context.Context, tx *sql.Tx, groupID int64) ([]int64, error) {
@@ -352,28 +379,31 @@ func syncGroup(ctx context.Context, tx *sql.Tx, groupID int64) ([]int64, error) 
 		return nil, err
 	}
 	type cl struct {
-		name string
-		tags []string
+		name, os string
+		tags     []string
 	}
 	clients := map[int64]cl{}
-	rows, err := tx.QueryContext(ctx, `SELECT id, name, tags FROM clients WHERE revoked=0`)
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, os, tags FROM clients WHERE revoked=0`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var id int64
-		var name, tags string
-		if err := rows.Scan(&id, &name, &tags); err != nil {
+		var name, os, tags string
+		if err := rows.Scan(&id, &name, &os, &tags); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		c := cl{name: name}
+		c := cl{name: name, os: os}
 		json.Unmarshal([]byte(tags), &c.tags)
 		clients[id] = c
 	}
 	rows.Close()
 	want := map[int64]bool{}
 	for id, c := range clients {
+		if clientPlatform(c.os) != g.platform() {
+			continue // its paths would mean nothing there
+		}
 		if slices.Contains(explicit, id) || slices.Contains(g.Tags, AllClientsTag) ||
 			slices.ContainsFunc(c.tags, func(t string) bool { return slices.Contains(g.Tags, t) }) {
 			want[id] = true

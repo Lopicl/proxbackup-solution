@@ -37,6 +37,17 @@ func CheckLocalPaths(what string, paths ...string) error {
 	return nil
 }
 
+// CheckUnixPaths returns an error for the first of paths that isn't an
+// absolute macOS or Linux path.
+func CheckUnixPaths(what string, paths ...string) error {
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "/") || strings.ContainsRune(p, 0) {
+			return fmt.Errorf(`%s %s must be a full path, like /Users/alice`, what, QuotePath(p))
+		}
+	}
+	return nil
+}
+
 // CheckLocalVolumes returns an error for the first of vols that isn't a
 // LocalVolume.
 func CheckLocalVolumes(vols ...string) error {

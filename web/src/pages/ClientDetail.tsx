@@ -220,6 +220,31 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
             <b>off</b>
           )}
         </span>
+        {data.old_keys.length > 0 && (
+          <span title="Keys this client backed up with before it was re-enrolled with a new key. Snapshots from then need them; restores pick the right one.">
+            Older keys{' '}
+            {data.old_keys.map((k) => (
+              <span key={k.id}>
+                <code title={`Key fingerprint ${k.fingerprint}, used ${dateTime(k.created)} – ${dateTime(k.retired_at)}`}>{k.fingerprint.slice(0, 11)}…</code>{' '}
+                {canRestore && (
+                  <button
+                    className="small ghost"
+                    onClick={async () => {
+                      if (!confirm(`Download the encryption key ${k.fingerprint} of ${c.name}? It decrypts its backups until ${dateTime(k.retired_at)}.`)) return
+                      try {
+                        await api.downloadClientKey(c, k)
+                      } catch (e) {
+                        setMsg((e as Error).message)
+                      }
+                    }}
+                  >
+                    Download
+                  </button>
+                )}{' '}
+              </span>
+            ))}
+          </span>
+        )}
         {c.paused_until > Date.now() / 1000 && (
           <span title="Paused from the ProxBackup tray icon on the PC. Scheduled runs with catch-up start when the pause ends; others are recorded as missed.">
             Backups{' '}

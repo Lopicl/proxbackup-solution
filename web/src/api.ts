@@ -127,9 +127,19 @@ export interface Keep {
 }
 
 // The definition shared by the members of a group job.
+export type Platform = 'windows' | 'unix'
+
+/** The platform of a client that reported os ("windows/amd64", "darwin/arm64"…); none = an older Windows agent. */
+export function clientPlatform(os: string): Platform {
+  return !os || os === 'windows' || os.startsWith('windows/') ? 'windows' : 'unix'
+}
+
+export const platformName = (p: Platform | undefined) => (p === 'unix' ? 'macOS and Linux' : 'Windows')
+
 export interface JobDefinition {
   name: string
   kind: 'files' | 'image'
+  platform: Platform // only clients of this OS are members (image jobs: Windows only)
   backup_id: string // group job: '' = per client (<client> or <client>-image)
   sources: string[]
   excludes: string[]
@@ -165,6 +175,14 @@ export interface Job extends JobDefinition {
   next_run?: number
   catch_up_pending?: boolean
   waiting?: string // a due run waits for the PC to leave battery power or a metered network ("on battery power")
+}
+
+/** An encryption key a client backed up with before (it got a new one on re-enrollment), escrowed for those snapshots. */
+export interface OldKey {
+  id: number
+  fingerprint: string
+  created: number
+  retired_at: number
 }
 
 export const ALL_CLIENTS = '*'
@@ -515,14 +533,13 @@ export const api = {
     request<{ version: string; release: string; datastores: string[]; datastore_found: boolean }>('POST', '/targets/test', t),
 
   clients: () => request<Client[]>('GET', '/clients'),
-  client: (id: number) => request<{ client: Client; jobs: Job[]; runs: Run[] }>('GET', `/clients/${id}`),
+  client: (id: number) => request<{ client: Client; jobs: Job[]; runs: Run[]; old_keys: OldKey[] }>('GET', `/clients/${id}`),
   revokeClient: (id: number) => request('DELETE', `/clients/${id}`),
   revokedClients: () => request<Client[]>('GET', '/clients/revoked'),
   unrevokeClient: (id: number) => request('POST', `/clients/${id}/unrevoke`),
   rotateCredentials: (id: number) => request('POST', `/clients/${id}/rotate-credentials`),
   // Every client with exposed credentials (exposed: true) or the listed ones.
-  rotateCredentialsBulk: (sel: { exposed?: boolean; client_ids?: number[] }) =>
-    request<{ requested: number }>('POST', '/clients/rotate-credentials', sel),
+  rotateCredentialsBulk: (sel: { exposed?: boolean; client_ids?: number[] }) => request<{ requested: number }>('POST', '/clients/rotate-credentials', sel),
   pushAgentUpdate: (id: number) => request<{ version: string }>('POST', `/clients/${id}/agent-update`),
   snapshots: (id: number) => request<Snapshot[]>('GET', `/clients/${id}/snapshots`),
   // Lists a directory of a snapshot's catalog: "/" lists the archives, "/<archive>/<dir>" their contents.
@@ -533,7 +550,14 @@ export const api = {
     ),
   restore: (id: number, spec: RestoreSpec) => request<{ run_id: number }>('POST', `/clients/${id}/restore`, spec),
   // The client's encryption key as a PBS key file (proxmox-backup-client --keyfile).
-  downloadClientKey: (c: Client) => download(`/clients/${c.id}/encryption-key`, `${c.name}-encryption-key.json`),
+  // fingerprint picks one of the client's old keys.
+  downloadClientKey: (c: Client, old?: OldKey) =>
+    old
+      ? download(
+          `/clients/${c.id}/encryption-key?fingerprint=${encodeURIComponent(old.fingerprint)}`,
+          `${c.name}-encryption-key-${new Date(old.created * 1000).toISOString().slice(0, 10).replaceAll('-', '')}.json`,
+        )
+      : download(`/clients/${c.id}/encryption-key`, `${c.name}-encryption-key.json`),
 
   enrollments: () => request<Enrollment[]>('GET', '/enrollments'),
   enrollmentCommand: (id: number) => request<{ command: string }>('GET', `/enrollments/${id}/command`),
@@ -542,8 +566,9 @@ export const api = {
   createEnrollment: (client_name: string, target_id: number, ttl_hours: number, new_client = false) =>
     request<{ client_name: string; token: string; command: string }>('POST', '/enrollments', { client_name, target_id, ttl_hours, new_client }),
   // Re-enrollment: the PC that runs the command takes over a revoked client, with its backups.
-  createReenrollment: (id: number, ttl_hours: number) =>
-    request<{ client_name: string; command: string; expires: number }>('POST', `/clients/${id}/reenroll`, { ttl_hours }),
+  // new_key: the client backs up with a new encryption key from then on (the old PC has the current one).
+  createReenrollment: (id: number, ttl_hours: number, new_key: boolean) =>
+    request<{ client_name: string; command: string; expires: number }>('POST', `/clients/${id}/reenroll`, { ttl_hours, new_key }),
   reenrollmentCommand: (id: number) => request<{ command: string; expires: number }>('GET', `/clients/${id}/reenroll`),
   deleteReenrollment: (id: number) => request('DELETE', `/clients/${id}/reenroll`),
 

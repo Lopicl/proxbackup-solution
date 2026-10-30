@@ -59,7 +59,9 @@ for PCs (step 3).
 - Upgrading replaces the user's DatastoreAdmin on `/datastore` with the rights above, and drops
   the datastores no PC uses from the console. From 0.2.16 or older it also deletes the old
   `root@pam!proxbackup-console` token (Admin on `/`).
-- `apt purge` removes the console and the user's password; backups, the user and the PCs' tokens stay in PBS.
+- `apt purge` removes the console and the user's password. Backups stay in PBS. While the user
+  still owns PC tokens, it keeps them and its rights, so those PCs keep backing up (purge prints how
+  to remove it). Without tokens, purge removes its ACLs and the user.
 - Ports, firewall rules, hiding the console and PBS web UIs from PCs (nginx example), and hosts
   with several interfaces: [docs/network.md](docs/network.md)
 
@@ -106,7 +108,10 @@ the name of a revoked client.
 **Revoked clients:** *Clients → Revoked clients* (needs the *Manage revoked clients* permission,
 Administrators only by default) lists every revoked client. Revoked clients keep their backups.
 *Un-revoke* reconnects the same PC. *Re-enroll* creates an enrollment command, and the PC that runs
-it takes over the client: its name, backups, history, encryption key and jobs. *Add client* under a
+it takes over the client: its name, backups, history, encryption keys and jobs. The old PC's
+configuration holds the encryption key, so by default the client gets a new key for future backups;
+the old key stays escrowed for the existing snapshots (restores pick the right key, and the client
+page lists older keys for download). *Add client* under a
 revoked client's name points there; otherwise the new client gets backups of its own and can't
 see the old ones.
 
@@ -127,7 +132,7 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 | Option | Behaviour |
 | --- | --- |
 | Schedule | Pushed to the PC and started by the agent on its own clock. Missed windows (PC off, asleep, busy) catch up ASAP by default, or are recorded as *missed*. With catch-up on, a run cut off by the agent going offline (PC shut down, network lost) is repeated once the agent has been back online for 30 minutes. *Run now* starts it from the console. |
-| Group jobs | Each PC keeps its own backup group and history, can be disabled or get extra excludes. An optional start spread staggers start times. |
+| Group jobs | Each PC keeps its own backup group and history, can be disabled or get extra excludes. An optional start spread staggers start times. A job is for Windows PCs (`C:\...` folders) or macOS and Linux (`/...`): only clients of that OS are members. Volume images are Windows only. |
 | Encryption | Client-side; the console escrows the key. Needs an RSA master key first (Console Settings can generate one), so backups stay recoverable without the console. |
 | Keep awake | On by default. The PC doesn't go to sleep on idle while a backup or restore runs (sleep the user asks for still happens). |
 | Wake for backups | On by default. A sleeping or hibernated PC wakes up for its scheduled backup, then sleeps again. Needs *Allow wake timers* in the power plan; a PC that is shut down stays off. |
@@ -149,7 +154,7 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 - Restores never write through a junction or symbolic link in the target folder (that entry is
   skipped with a warning), and refuse a target whose path contains one. A folder the agent creates
   directly on a drive (like `C:\Restore`) is open only to SYSTEM and administrators.
-- Backup sources, volumes and restore targets must be on a local drive (`C:\...`). Network paths
+- On Windows, backup sources, volumes and restore targets must be on a local drive (`C:\...`). Network paths
   (`\\server\share`) are refused by the console and the agent, so the agent never signs in to
   another machine with the PC's account.
 

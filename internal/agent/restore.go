@@ -22,7 +22,7 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 	if spec == nil || spec.TargetDir == "" || spec.Archive == "" {
 		return res, errors.New("restore spec incomplete")
 	}
-	c, err := j.pbsClient()
+	c, err := j.pbsClient(ctx)
 	if err != nil {
 		return res, err
 	}

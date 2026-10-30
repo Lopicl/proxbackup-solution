@@ -223,7 +223,10 @@ read on every run.
   Each member is its own row in `jobs`, with its own id (the agent schedules by it), PBS backup
   group (`<client>`, `<client>-image` or a fixed backup id, always in the client's own
   namespace), run history, retention and locks. Members can be disabled and can add exclude
-  patterns. Saving a group job or a client's tags attaches/detaches members and wakes the
+  patterns. A group job has a platform (`windows`, the default, or `unix` for macOS and Linux):
+  only clients whose reported OS matches become members (clients without one count as
+  Windows), and sources are checked in that OS's syntax (`C:\...` or `/...`). Image jobs are
+  Windows only. Saving a group job or a client's tags attaches/detaches members and wakes the
   affected agents; offline PCs get the change on their next poll. An optional start spread gives
   each member a stable offset (hash of group and client) within N minutes, sent as the job's
   `start_delay`, so many PCs don't hit PBS in the same minute. "Run now" works for the whole
@@ -311,8 +314,11 @@ read on every run.
   `proxbackup@pbs` with a random password (`/etc/proxbackup/pbs-password`) and runs the console
   as the system user `proxbackup`, which can read the password. Upgrades delete the
   `root@pam!proxbackup-console` token of 0.2.16 and older; the console moves its targets to the
-  user. PBS takes a password only as a command argument, so it is visible in `ps` to local users
-  while the package sets it. With `-local-pbs` the admin adds local datastores without
+  user. The PBS CLI takes a password only as a command argument, which local users can read in
+  `ps`, so the package sets a throwaway password that way, then signs in as the user over the
+  loopback API (pinned to the PBS certificate's key, every secret read from 0600 files) and
+  changes it to the real one. Without curl or the API, the throwaway password is kept. Purge
+  removes the user and its ACLs (and its tokens' ACLs) only once it owns no tokens. With `-local-pbs` the admin adds local datastores without
   credentials, and the console re-reads the PBS certificate fingerprint over loopback hourly (so
   ACME renewals need no reconfiguration). PBS accounts can't sign in to the console: it has its
   own users (below) on every install.
@@ -385,7 +391,15 @@ read on every run.
   3. creates API token `proxbackup@pbs!<client-name>`,
   4. grants `DatastoreBackup` on `/datastore/<store>/<ns>` to that token.
 
-  The agent only ever receives the scoped token.
+  The agent only ever receives the scoped token. PBS applies a new ACL only after a few
+  seconds, so every job first lists its namespace's groups and retries a 403 for up to 30 s
+  (`pbs.Client.AwaitAccess`). This covers runs right after enrollment, un-revoke,
+  re-enrollment or a token rotation.
+
+  Clients get the target's host and fingerprint with their token secret, and the agent user
+  owns the tokens issued from then on, which can read the clients' groups. So changing a
+  target's host, fingerprint or agent user while clients use it also needs `restore` for all
+  clients.
 
   **Changing the root namespace** of a target first creates the new namespace on PBS and
   grants the agent user `DatastoreBackup` on it; if PBS refuses, the error is shown and the
@@ -546,16 +560,18 @@ erDiagram
   RUN ||--o{ RUN_LOG : has
   CLIENT ||--o{ RUN : executes
   ENROLLMENT |o--o| CLIENT : "used by"
+  CLIENT ||--o{ CLIENT_KEY : "used before"
   ADMIN ||--o{ SESSION : has
 
   TARGET { int id string name string host string fingerprint string datastore string root_ns string admin_auth_id blob admin_secret_enc string pbs_user }
   CLIENT { int id string name string hostname string os string agent_version string cert_serial int target_id string namespace string token_id blob token_secret_enc datetime last_seen bool revoked string config_rev string schedule_state string time_zone blob crypt_key_enc string crypt_fingerprint datetime crypt_created string tags bool creds_exposed bool rotate_token bool cert_renew string pending_serial string agent_features string pending_key string prev_serial string revoked_reason }
-  GROUP_JOB { int id string name string kind string backup_id string sources string excludes string volumes bool use_vss string schedule int window_minutes bool catch_up string retention bool enabled string change_detection bool encrypt int lock_days int spread_minutes string member_tags int daily_cap }
+  GROUP_JOB { int id string name string kind string backup_id string sources string excludes string volumes bool use_vss string schedule int window_minutes bool catch_up string retention bool enabled string change_detection bool encrypt int lock_days int spread_minutes string member_tags int daily_cap string platform }
   GROUP_JOB_CLIENT { int group_id int client_id }
   JOB { int id int client_id int group_id string backup_id bool enabled string extra_excludes }
   RUN { int id string uuid int job_id int client_id string kind string state string trigger string restore_spec datetime scheduled_for datetime queued_at datetime started_at datetime finished_at string progress string result string error string snapshot bool cancel_requested }
   RUN_LOG { int id int run_id datetime ts string level string msg }
-  ENROLLMENT { int id string code_hash string client_name int target_id datetime expires datetime used_at int client_id blob command_enc }
+  ENROLLMENT { int id string code_hash string client_name int target_id datetime expires datetime used_at int client_id blob command_enc int reenroll_id bool new_crypt_key }
+  CLIENT_KEY { int id int client_id blob key_enc string fingerprint datetime created datetime retired_at }
   ADMIN { int id string username string pw_hash bool must_change_pw }
   SESSION { string token_hash int admin_id datetime expires }
 ```
@@ -567,7 +583,7 @@ jobs existed). `kind` is `files`/`image` for jobs and also `restore` for runs. J
 notification and update settings. Run history older than 180 days is pruned daily.
 
 Secrets (`admin_secret_enc`, `token_secret_enc`, `command_enc`, setup `token_enc`, the SMTP
-password and client encryption keys, `crypt_key_enc`) are encrypted at rest (AES-256-GCM) with a
+password and client encryption keys, `crypt_key_enc` and the old ones in `client_keys`) are encrypted at rest (AES-256-GCM) with a
 server master key: `PROXBACKUP_MASTER_KEY` (32 bytes, base64), or `master.key` in the data
 directory, generated with 0600 permissions on first start. Each value is bound to its table, column
 and row id (the GCM associated data), so a value copied into another row or column doesn't decrypt.
@@ -623,6 +639,13 @@ sequenceDiagram
   tied to the client (`enrollments.reenroll_id`); the PC that uses it gets a new certificate
   and a new PBS token under the client's old token name, with access to its namespaces, and
   takes over the client row (name, history, tags, escrowed key, jobs enabled at revocation).
+  The old PC's `jobs.json` holds the encryption key, so by default
+  (`enrollments.new_crypt_key`) the re-enrolled client gets a new one. The old key moves to
+  `client_keys` (sealed per row), and new backups use the new key. Restores and the
+  console's catalog read a snapshot's manifest first. Its unprotected `key-fingerprint`
+  picks the current or an old key, then the manifest is read again and verified with that
+  key. The console chooses the key, so agents need no change. Clients without old keys skip
+  the lookup.
   The pending code reserves the name, and only `clients.revoked` can show it again.
   Every other enrollment gets PBS storage of its own: a name whose token name or namespace a
   client (revoked ones included) used gets token and namespace `<name>.<n>` instead
@@ -693,8 +716,9 @@ sequenceDiagram
   backups run offline. Chunks, indexes' chunks, the catalog and `client.log.blob` are
   encrypted; the manifest is signed. Snapshots are standard PBS encrypted snapshots:
   `proxmox-backup-client --keyfile` restores them and PBS verifies them without the key.
-  Escrow/recovery: restores from the console always get the client key; admins can download
-  it as a PBS key file on the client page (logged); and with an RSA master public key in
+  Escrow/recovery: restores from the console always get the client key (the one the
+  snapshot was made with, see re-enrollment); admins can download it, and older keys, as a
+  PBS key file on the client page (logged); and with an RSA master public key in
   Console Settings, every encrypted snapshot also carries `rsa-encrypted.key.blob`, recoverable with
   `proxmox-backup-client key import-with-master-key` even without the console. *Generate
   key pair* in Console Settings creates that RSA-4096 pair in the browser (Web Crypto,

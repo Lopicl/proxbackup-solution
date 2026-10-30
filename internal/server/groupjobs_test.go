@@ -253,6 +253,11 @@ func TestValidateGroupJob(t *testing.T) {
 		"unc volume": func(g *GroupJob) { g.Kind, g.Volumes = api.KindImage, []string{`\\?\UNC\attacker\share`} },
 		"dir volume": func(g *GroupJob) { g.Kind, g.Volumes = api.KindImage, []string{`C:\Users`} },
 		"crlf name":  func(g *GroupJob) { g.Name = "x\r\nBcc: a@example.com" },
+		"platform":   func(g *GroupJob) { g.Platform = "beos" },
+		"unix C:":    func(g *GroupJob) { g.Platform = PlatformUnix },
+		"unix rel":   func(g *GroupJob) { g.Platform, g.Sources = PlatformUnix, []string{"Users"} },
+		"unix image": func(g *GroupJob) { g.Platform, g.Kind, g.Volumes = PlatformUnix, api.KindImage, []string{"C:"} },
+		"win /":      func(g *GroupJob) { g.Sources = []string{"/Users"} },
 	} {
 		g := ok
 		mod(&g)
@@ -263,8 +268,53 @@ func TestValidateGroupJob(t *testing.T) {
 	g := ok
 	g.Tags = []string{" office ", "office", ""}
 	if err := validateGroupJob(&g); err != nil || !slices.Equal(g.Tags, []string{"office"}) || g.WindowMinutes != 60 ||
-		!strings.EqualFold(g.ChangeDetection, "metadata") {
+		!strings.EqualFold(g.ChangeDetection, "metadata") || g.Platform != PlatformWindows {
 		t.Fatalf("normalized %+v, %v", g, err)
+	}
+	g = ok
+	g.Platform, g.Sources = PlatformUnix, []string{"/Users", "/home/alice"}
+	if err := validateGroupJob(&g); err != nil {
+		t.Fatalf("unix job: %v", err)
+	}
+}
+
+// A group job only reaches the clients of its platform, whatever selects them.
+func TestGroupJobPlatform(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	cs := groupTestClients(t, s, "win-1", "mac-1", "old-1")
+	for c, os := range map[*Client]string{cs[0]: "windows/amd64", cs[1]: "darwin/arm64"} { // old-1 reported none
+		if _, err := s.store.db.Exec(`UPDATE clients SET os=? WHERE id=?`, os, c.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	win := &GroupJob{Name: "Win", Kind: api.KindFiles, Sources: []string{`C:\Users`}, Enabled: true, Tags: []string{AllClientsTag}}
+	unix := &GroupJob{Name: "Unix", Kind: api.KindFiles, Platform: PlatformUnix, Sources: []string{"/Users"}, Enabled: true,
+		Clients: []int64{cs[0].ID, cs[1].ID}}
+	for _, g := range []*GroupJob{win, unix} {
+		if err := validateGroupJob(g); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.store.SaveGroupJob(ctx, g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := memberClients(t, s, win.ID); !slices.Equal(got, []int64{cs[0].ID, cs[2].ID}) {
+		t.Fatalf("windows members = %v", got)
+	}
+	if got := memberClients(t, s, unix.ID); !slices.Equal(got, []int64{cs[1].ID}) {
+		t.Fatalf("unix members = %v", got)
+	}
+	if g, _ := s.store.GroupJob(ctx, unix.ID); g.Platform != PlatformUnix {
+		t.Fatalf("stored platform %q", g.Platform)
+	}
+	// Switching the platform moves the job to the other clients.
+	unix.Platform, unix.Sources = PlatformWindows, []string{`C:\Data`}
+	if _, err := s.store.SaveGroupJob(ctx, unix); err != nil {
+		t.Fatal(err)
+	}
+	if got := memberClients(t, s, unix.ID); !slices.Equal(got, []int64{cs[0].ID}) {
+		t.Fatalf("members after switch = %v", got)
 	}
 }
 

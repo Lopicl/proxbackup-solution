@@ -38,6 +38,10 @@ func (c *Client) StartReader(ctx context.Context, ref SnapshotRef, crypt *CryptC
 	return &ReaderSession{sess: s, ref: ref, crypt: crypt}, nil
 }
 
+// SetCrypt changes the key the session decrypts and verifies with, e.g. once
+// the manifest named it.
+func (r *ReaderSession) SetCrypt(c *CryptConfig) { r.crypt = c }
+
 // Close ends the session.
 func (r *ReaderSession) Close() error { return r.sess.Close() }
 

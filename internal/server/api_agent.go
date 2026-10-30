@@ -377,6 +377,22 @@ func (s *Server) handleRegisterRun(w http.ResponseWriter, r *http.Request, c *Cl
 	writeJSON(w, api.RunRegisterResponse{RunID: id})
 }
 
+// restoreKey returns the key of the snapshot a restore spec reads. If PBS
+// can't say which one that is, the current key is sent: the agent then
+// reports a snapshot encrypted with another key.
+func (s *Server) restoreKey(ctx context.Context, t *Target, c *Client, spec *api.JobSpec) (*api.CryptKey, error) {
+	pc, err := s.adminClient(t)
+	if err == nil {
+		ref := pbs.SnapshotRef{Store: t.Datastore, NS: spec.Target.Namespace, Type: "host", ID: spec.Restore.BackupID, Time: spec.Restore.BackupTime}
+		var k *api.CryptKey
+		if k, err = s.snapshotKey(ctx, pc, c, ref); err == nil {
+			return k, nil
+		}
+	}
+	s.log.Warn("restore: can't tell which encryption key the snapshot needs, sending the current one", "client", c.Name, "err", err)
+	return s.clientKey(ctx, c)
+}
+
 // buildSpec turns a run into the self-contained job description sent to the agent.
 func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSpec, error) {
 	t, err := s.store.Target(ctx, c.TargetID)
@@ -397,8 +413,14 @@ func (s *Server) buildSpec(ctx context.Context, c *Client, run *Run) (*api.JobSp
 	if run.Restore != nil && run.Restore.Namespace != "" {
 		spec.Target.Namespace = run.Restore.Namespace // snapshot from before a namespace move
 	}
-	// Restores need the key too, for snapshots encrypted earlier.
-	if spec.Crypt, err = s.clientKey(ctx, c); err != nil {
+	// Restores need the key too, for snapshots encrypted earlier: the one of
+	// the snapshot, which may be an old key of the client.
+	if run.Restore != nil {
+		spec.Crypt, err = s.restoreKey(ctx, t, c, spec)
+	} else {
+		spec.Crypt, err = s.clientKey(ctx, c)
+	}
+	if err != nil {
 		return nil, err
 	}
 	if run.JobID > 0 {

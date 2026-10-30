@@ -32,7 +32,7 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 	if len(j.spec.Sources) == 0 {
 		return res, errors.New("no sources configured")
 	}
-	c, err := j.pbsClient()
+	c, err := j.pbsClient(ctx)
 	if err != nil {
 		return res, err
 	}

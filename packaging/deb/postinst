@@ -19,6 +19,46 @@ PORT=8077
 
 [ "$1" = configure ] || exit 0
 
+# new_password gives $PBS_USER a random password and writes it to $PW_FILE.
+# The PBS CLI takes a password only as an argument, which local users can
+# read with ps while it runs, and API tokens can't set one. So the CLI sets
+# a throwaway password, and the user then changes it to the real one over
+# the local API, with every secret read from 0600 files (printf is a shell
+# builtin). If the API can't be reached, the throwaway password is kept.
+new_password() {
+	tmp=$(mktemp -d)
+	pw1=$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')
+	pw=$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')
+	proxmox-backup-debug api set /access/password --userid "$PBS_USER" --password "$pw1" >/dev/null
+	if ! change_password "$tmp" "$pw1" "$pw"; then
+		echo "proxbackup-server: couldn't change the password of $PBS_USER over the PBS API; keeping the one set with proxmox-backup-debug." >&2
+		pw=$pw1
+	fi
+	rm -rf "$tmp"
+	(umask 077 && printf '%s\n' "$pw" > "$PW_FILE.new")
+	mv "$PW_FILE.new" "$PW_FILE"
+}
+
+# change_password DIR OLD NEW signs in as $PBS_USER on this PBS and changes
+# its password from OLD to NEW. The connection is pinned to the key of the
+# PBS certificate. Both passwords are alphanumeric, so need no URL encoding.
+change_password() {
+	command -v curl >/dev/null 2>&1 && command -v openssl >/dev/null 2>&1 || return 1
+	(umask 077
+	openssl x509 -in /etc/proxmox-backup/proxy.pem -pubkey -noout > "$1/pin.pem" &&
+	printf 'username=%s&password=%s' "$PBS_USER" "$2" > "$1/login" &&
+	curl -sSf -k --pinnedpubkey "$1/pin.pem" --max-time 30 -d @"$1/login" \
+		https://127.0.0.1:8007/api2/json/access/ticket > "$1/ticket") || return 1
+	ticket=$(sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p' "$1/ticket" | sed 's/:/%3A/g')
+	csrf=$(sed -n 's/.*"CSRFPreventionToken":"\([^"]*\)".*/\1/p' "$1/ticket")
+	[ -n "$ticket" ] && [ -n "$csrf" ] || return 1
+	(umask 077
+	printf 'Cookie: PBSAuthCookie=%s\nCSRFPreventionToken: %s\n' "$ticket" "$csrf" > "$1/headers" &&
+	printf 'userid=%s&password=%s&confirmation-password=%s' "$PBS_USER" "$3" "$2" > "$1/change" &&
+	curl -sSf -k --pinnedpubkey "$1/pin.pem" --max-time 30 -X PUT -H @"$1/headers" -d @"$1/change" \
+		https://127.0.0.1:8007/api2/json/access/password >/dev/null)
+}
+
 if ! command -v proxmox-backup-manager >/dev/null 2>&1; then
 	echo "proxbackup-server: proxmox-backup-manager not found; install this package on a Proxmox Backup Server." >&2
 	exit 1
@@ -40,12 +80,7 @@ if ! proxmox-backup-manager user list --output-format json | grep -qF "\"userid\
 	proxmox-backup-manager user create "$PBS_USER" --comment "ProxBackup Console and its agents"
 fi
 if [ ! -s "$PW_FILE" ]; then
-	pw=$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')
-	(umask 077 && printf '%s\n' "$pw" > "$PW_FILE.new")
-	# PBS takes a password only as an argument (shown to local users by ps
-	# while this runs); API tokens can't set it.
-	proxmox-backup-debug api set /access/password --userid "$PBS_USER" --password "$pw" >/dev/null
-	mv "$PW_FILE.new" "$PW_FILE"
+	new_password
 fi
 chown root:proxbackup "$PW_FILE"
 chmod 0640 "$PW_FILE"

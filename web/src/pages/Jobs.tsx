@@ -1,7 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useState, type ReactNode } from 'react'
-import { ALL_CLIENTS, api, type Bandwidth, type Policy, type GroupJob, type GroupJobView, type GroupMember, type Job, type Keep } from '../api'
+import {
+  ALL_CLIENTS,
+  api,
+  clientPlatform,
+  platformName,
+  type Bandwidth,
+  type Policy,
+  type GroupJob,
+  type GroupJobView,
+  type GroupMember,
+  type Job,
+  type Keep,
+} from '../api'
 import { RunsTable } from './RunsTable'
 import { usePerms } from '../perms'
 import { ago, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
@@ -147,6 +159,9 @@ export function JobDetail({ id }: { id: number }) {
       <div className="facts">
         <span>
           Type <b>{g.kind === 'files' ? 'Files' : 'Volume image'}</b>
+        </span>
+        <span>
+          For <b>{platformName(g.platform)}</b>
         </span>
         <span>
           {g.kind === 'files' ? 'Folders' : 'Volumes'} <b>{what(g).join(', ')}</b>
@@ -380,10 +395,13 @@ export function keepText(k: Keep): string {
   return parts.length ? parts.join(', ') : 'keep all'
 }
 
+const defaultSource: Record<GroupJob['platform'], string> = { windows: 'C:\\Users', unix: '/Users' }
+
 export function newGroupJob(clients: number[]): Partial<GroupJob> {
   return {
     name: 'User files',
     kind: 'files',
+    platform: 'windows',
     backup_id: '',
     sources: ['C:\\Users'],
     excludes: [],
@@ -574,7 +592,9 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
   const chosen = j.clients ?? []
   const allClients = tags.includes(ALL_CLIENTS)
   const knownTags = [...new Set((clients.data ?? []).flatMap((c) => c.tags))].sort()
-  const matching = (clients.data ?? []).filter((c) => allClients || chosen.includes(c.id) || c.tags.some((t) => tags.includes(t)))
+  const platform = j.platform ?? 'windows'
+  const ofPlatform = (c: { os: string }) => clientPlatform(c.os) === platform
+  const matching = (clients.data ?? []).filter((c) => ofPlatform(c) && (allClients || chosen.includes(c.id) || c.tags.some((t) => tags.includes(t))))
   const shown = (clients.data ?? []).filter((c) => !filter || c.name.includes(filter.toLowerCase()) || c.tags.some((t) => t.includes(filter.toLowerCase())))
   const toggleTag = (t: string) => set({ tags: tags.includes(t) ? tags.filter((x) => x !== t) : [...tags, t] })
   const files = j.kind === 'files'
@@ -624,12 +644,41 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
                   <input value={j.name ?? ''} onChange={(e) => set({ name: e.target.value })} autoFocus />
                 </Field>
                 <Field label="Type" hint={j.id ? 'The type of an existing job cannot be changed.' : undefined}>
-                  <select value={j.kind} onChange={(e) => set({ kind: e.target.value as GroupJob['kind'], backup_id: '' })} disabled={!!j.id}>
+                  <select
+                    value={j.kind}
+                    onChange={(e) => {
+                      const kind = e.target.value as GroupJob['kind']
+                      set({ kind, backup_id: '', ...(kind === 'image' ? { platform: 'windows' as const } : {}) })
+                    }}
+                    disabled={!!j.id}
+                  >
                     <option value="files">Files and folders (pxar)</option>
                     <option value="image">Volume image (block level)</option>
                   </select>
                 </Field>
               </div>
+              <Field
+                label="For"
+                hint={
+                  files
+                    ? 'Only clients of this OS become members: folders are paths in its syntax. Changing it moves the job to the other clients.'
+                    : 'Volume images are only available for Windows.'
+                }
+              >
+                <select
+                  value={platform}
+                  onChange={(e) => {
+                    const p = e.target.value as GroupJob['platform']
+                    // The default folder follows; folders entered by hand stay.
+                    const untouched = (j.sources ?? []).join('\n') === defaultSource[platform]
+                    set({ platform: p, ...(untouched ? { sources: [defaultSource[p]] } : {}) })
+                  }}
+                  disabled={!files}
+                >
+                  <option value="windows">Windows PCs</option>
+                  <option value="unix">macOS and Linux</option>
+                </select>
+              </Field>
               <Field
                 label="Backup ID (PBS backup group)"
                 hint={`Empty = the client's name${j.kind === 'image' ? ' plus “-image”' : ''}. Every client has its own namespace, so members never share a group.`}
@@ -675,12 +724,23 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
                     {shown.length === 0 && <span className="muted-text">No clients.</span>}
                     {shown.map((c) => {
                       const viaTag = c.tags.filter((t) => tags.includes(t))
+                      const other = !ofPlatform(c)
                       return (
-                        <label key={c.id} title={viaTag.length && !chosen.includes(c.id) ? `Selected through ${viaTag.map((t) => '#' + t).join(', ')}` : ''}>
+                        <label
+                          key={c.id}
+                          className={other ? 'muted-text' : ''}
+                          title={
+                            other
+                              ? `Not a member: this job is for ${platformName(platform)}`
+                              : viaTag.length && !chosen.includes(c.id)
+                                ? `Selected through ${viaTag.map((t) => '#' + t).join(', ')}`
+                                : ''
+                          }
+                        >
                           <input
                             type="checkbox"
-                            checked={chosen.includes(c.id) || viaTag.length > 0}
-                            disabled={viaTag.length > 0 && !chosen.includes(c.id)}
+                            checked={!other && (chosen.includes(c.id) || viaTag.length > 0)}
+                            disabled={other || (viaTag.length > 0 && !chosen.includes(c.id))}
                             onChange={(e) => set({ clients: e.target.checked ? [...chosen, c.id] : chosen.filter((x) => x !== c.id) })}
                           />
                           <OnlineDot online={c.online} /> {c.name}
@@ -702,7 +762,7 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
             (files ? (
               <>
                 <div className="grid2">
-                  <Field label="Folders to back up" hint="One absolute path per line.">
+                  <Field label="Folders to back up" hint={`One absolute path per line, like ${platform === 'unix' ? '/Users/alice' : 'C:\\Users'}.`}>
                     <textarea rows={6} value={(j.sources ?? []).join('\n')} onChange={(e) => set({ sources: lines(e.target.value) })} />
                   </Field>
                   <Field
@@ -814,8 +874,8 @@ export function GroupJobEditor({ job, onClose }: { job: Partial<GroupJob>; onClo
               )}
               {j.schedule && (j.on_battery || j.on_metered) && (
                 <p className="muted-text small">
-                  A run that waits starts as soon as the PC is plugged in or off the metered network: on time within the start window, after it as a
-                  catch-up, or it is recorded as missed if catch-up is off. A stopped run starts over.
+                  A run that waits starts as soon as the PC is plugged in or off the metered network: on time within the start window, after it as a catch-up,
+                  or it is recorded as missed if catch-up is off. A stopped run starts over.
                 </p>
               )}
               <h3>Bandwidth</h3>

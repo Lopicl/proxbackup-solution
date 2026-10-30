@@ -176,7 +176,21 @@ func validateGroupJob(g *GroupJob) error {
 	case g.SpreadMinutes < 0 || g.SpreadMinutes > maxSpreadMinutes:
 		return fmt.Errorf("start spread must be between 0 and %d minutes", maxSpreadMinutes)
 	}
-	if err := api.CheckLocalPaths("source", g.Sources...); err != nil {
+	switch g.Platform {
+	case "":
+		g.Platform = PlatformWindows
+	case PlatformWindows, PlatformUnix:
+	default:
+		return errors.New("platform must be windows or unix")
+	}
+	if g.Kind == api.KindImage && g.Platform != PlatformWindows {
+		return errors.New("volume image jobs are only available for Windows")
+	}
+	check := api.CheckLocalPaths
+	if g.Platform == PlatformUnix {
+		check = api.CheckUnixPaths
+	}
+	if err := check("source", g.Sources...); err != nil {
 		return err
 	}
 	if err := api.CheckLocalVolumes(g.Volumes...); err != nil {

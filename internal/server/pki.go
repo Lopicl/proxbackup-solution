@@ -242,6 +242,7 @@ var (
 	colTargetSecret = sealedCol{"targets", "admin_secret_enc"}
 	colClientToken  = sealedCol{"clients", "token_secret_enc"}
 	colClientKey    = sealedCol{"clients", "crypt_key_enc"}
+	colOldClientKey = sealedCol{"client_keys", "key_enc"}
 	colEnrollCmd    = sealedCol{"enrollments", "command_enc"}
 	colSetupToken   = sealedCol{"setup_tokens", "token_enc"}
 	colSMTPPass     = sealedCol{"settings", "notifications.smtp_pass_enc"} // id 0

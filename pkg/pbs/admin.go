@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Admin API helpers used by the management server (requires a privileged token).
@@ -54,6 +55,41 @@ func (c *Client) ListSnapshots(ctx context.Context, store, ns, btype, id string)
 	var out []SnapshotInfo
 	err := c.Call(ctx, http.MethodGet, "admin/datastore/"+url.PathEscape(store)+"/snapshots", params, &out)
 	return out, err
+}
+
+// IsForbidden reports whether err is a 403 from PBS.
+func IsForbidden(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusForbidden
+}
+
+// AwaitAccess waits, up to max, while PBS refuses the client access to
+// namespace ns of store (HTTP 403). PBS applies a new ACL only after a few
+// seconds, so a token used right after it got its rights is refused at
+// first. retrying, if not nil, is called before the first retry. It returns
+// the last error of the check (nil once access is granted); callers can
+// ignore it and let their own requests report what PBS refuses.
+func (c *Client) AwaitAccess(ctx context.Context, store, ns string, max time.Duration, retrying func()) error {
+	params := map[string]any{}
+	if ns != "" {
+		params["ns"] = ns
+	}
+	deadline := time.Now().Add(max)
+	for delay := time.Second; ; delay = min(2*delay, 8*time.Second) {
+		err := c.Call(ctx, http.MethodGet, "admin/datastore/"+url.PathEscape(store)+"/groups", params, nil)
+		if !IsForbidden(err) || time.Now().Add(delay).After(deadline) {
+			return err
+		}
+		if retrying != nil {
+			retrying()
+			retrying = nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
 }
 
 // SetProtected sets or clears the protected flag of a snapshot. PBS refuses to

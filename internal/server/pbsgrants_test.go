@@ -247,7 +247,7 @@ func TestUnusedLocalTargetsRemoved(t *testing.T) {
 	if err := s.store.CreateClient(ctx, c, s.sealer.sealFor("tok", colClientToken)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.store.CreateEnrollment(ctx, "code", "pc2", pending.ID, 0, time.Hour, s.sealer.sealFor("cmd", colEnrollCmd)); err != nil {
+	if _, err := s.store.CreateEnrollment(ctx, "code", "pc2", pending.ID, 0, false, time.Hour, s.sealer.sealFor("cmd", colEnrollCmd)); err != nil {
 		t.Fatal(err)
 	}
 	names, err := s.store.DeleteUnusedLocalTargets(ctx)
