@@ -1,9 +1,11 @@
 #!/bin/sh
 # Sets up ProxBackup Console on this Proxmox Backup Server:
 #   - a system user "proxbackup" the service runs as
-#   - a PBS user proxbackup@pbs with DatastoreAdmin on /datastore, which the
-#     console signs in as and which owns the agents' API tokens (password in
-#     /etc/proxbackup/pbs-password)
+#   - a PBS user proxbackup@pbs, which the console signs in as and which owns
+#     the agents' API tokens (password in /etc/proxbackup/pbs-password). It gets
+#     rights only on the root namespaces of the datastores added to the console,
+#     from proxbackup-server-grants.service
+#   - proxbackup-server-grants.path, which applies the rights the console asks for
 #   - /etc/proxbackup/proxbackup.env with this host's names (kept on upgrades)
 #   - the proxbackup-server service on port 8077
 #   - proxbackup-server-update.path, which installs updates the console requests
@@ -31,6 +33,9 @@ install -d -m 0750 -o root -g proxbackup "$CONF"
 # The console provisions namespaces, tokens and their ACLs for each PC as
 # $PBS_USER. Without Permissions.Modify it can set ACLs only for its own
 # tokens, and PBS caps those at the user's privileges.
+# Its own ACLs are set by proxbackup-server-grants.service: it asks for them
+# at startup, and the rights of older packages (DatastoreAdmin on /datastore)
+# stay until then.
 if ! proxmox-backup-manager user list --output-format json | grep -qF "\"userid\":\"$PBS_USER\""; then
 	proxmox-backup-manager user create "$PBS_USER" --comment "ProxBackup Console and its agents"
 fi
@@ -44,16 +49,6 @@ if [ ! -s "$PW_FILE" ]; then
 fi
 chown root:proxbackup "$PW_FILE"
 chmod 0640 "$PW_FILE"
-proxmox-backup-manager acl update /datastore DatastoreAdmin --auth-id "$PBS_USER"
-# An ACL on a deeper path replaces the inherited role: drop the user's others
-# (consoles up to 0.2.16 gave it DatastoreBackup on <datastore>/<root namespace>).
-proxmox-backup-manager acl list --output-format json | tr '{' '\n' | grep -F "\"ugid\":\"$PBS_USER\"" |
-	while IFS= read -r acl; do
-		path=$(printf '%s' "$acl" | sed -n 's/.*"path":"\([^"]*\)".*/\1/p')
-		role=$(printf '%s' "$acl" | sed -n 's/.*"roleid":"\([^"]*\)".*/\1/p')
-		[ "$path" = /datastore ] && [ "$role" = DatastoreAdmin ] && continue
-		proxmox-backup-manager acl update "$path" "$role" --auth-id "$PBS_USER" --delete true
-	done
 # Packages up to 0.2.16 used a root@pam token with Admin on / instead.
 proxmox-backup-manager user delete-token root@pam proxbackup-console >/dev/null 2>&1 || true
 rm -f "$CONF/pbs-token"
@@ -76,7 +71,7 @@ PROXBACKUP_HOSTNAMES=$hosts
 # Web UI and agent API (comma separated for several addresses).
 PROXBACKUP_LISTEN=:$PORT
 
-# Running on this PBS: register its datastores as targets.
+# Running on this PBS: its datastores can be added without credentials.
 PROXBACKUP_LOCAL_PBS=1
 # PBS address the agents back up to (default: host of PROXBACKUP_PUBLIC_URL, port 8007).
 #PROXBACKUP_PBS_PUBLIC_HOST=$fqdn:8007
@@ -91,6 +86,7 @@ if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload
 	systemctl enable proxbackup-server.service >/dev/null 2>&1
 	systemctl enable --now proxbackup-server-update.path >/dev/null 2>&1
+	systemctl enable --now proxbackup-server-grants.path >/dev/null 2>&1
 	systemctl restart proxbackup-server.service
 fi
 

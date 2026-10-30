@@ -39,6 +39,9 @@ func main() {
 		case "apply-update":
 			applyUpdate(os.Args[2:])
 			return
+		case "grant-datastores":
+			grantDatastores(os.Args[2:])
+			return
 		}
 	}
 	cfg := server.Config{Version: version, PrereleaseDefault: prerelease == "1"}
@@ -50,15 +53,15 @@ func main() {
 	flag.StringVar(&cfg.AgentAddr, "agent-addr", os.Getenv("PROXBACKUP_AGENT_ADDR"), "optional separate listen address(es, comma separated) for the agent API (mTLS)")
 	flag.StringVar(&cfg.PublicURL, "public-url", os.Getenv("PROXBACKUP_PUBLIC_URL"), "agent-facing URL, e.g. https://backup.example.com:8077")
 	flag.StringVar(&hosts, "hostnames", os.Getenv("PROXBACKUP_HOSTNAMES"), "comma separated host names/IPs for the server certificate")
-	flag.BoolVar(&localPBS, "local-pbs", os.Getenv("PROXBACKUP_LOCAL_PBS") == "1", "running on the PBS host: register its datastores as targets")
+	flag.BoolVar(&localPBS, "local-pbs", os.Getenv("PROXBACKUP_LOCAL_PBS") == "1", "running on the PBS host: its datastores can be added without credentials")
 	flag.StringVar(&local.APIAddr, "local-pbs-api", envOr("PROXBACKUP_LOCAL_PBS_API", "127.0.0.1:8007"), "local PBS API address")
-	flag.StringVar(&local.AuthID, "local-pbs-auth-id", envOr("PROXBACKUP_LOCAL_PBS_AUTH_ID", "proxbackup@pbs"), "local PBS user the console signs in as (DatastoreAdmin on /datastore)")
+	flag.StringVar(&local.AuthID, "local-pbs-auth-id", envOr("PROXBACKUP_LOCAL_PBS_AUTH_ID", "proxbackup@pbs"), "local PBS user the console signs in as (with rights on its datastores' root namespaces only)")
 	flag.StringVar(&local.SecretFile, "local-pbs-secret-file", envOr("PROXBACKUP_LOCAL_PBS_SECRET_FILE", credentialPath("pbs-password")), "file with the local PBS user's password")
 	flag.StringVar(&local.PublicHost, "pbs-public-host", os.Getenv("PROXBACKUP_PBS_PUBLIC_HOST"), "PBS address agents use (default: host of -public-url, port 8007)")
 	flag.StringVar(&cfg.UpdateRepo, "update-repo", os.Getenv("PROXBACKUP_UPDATE_REPO"), "GitHub repository (owner/name) to take updates from (default "+update.DefaultRepo+")")
 	cfg.UpdateMode = os.Getenv("PROXBACKUP_UPDATE_MODE") // "deb", set by the package's unit file
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: proxbackup-server [flags]\n       proxbackup-server passwd [username]   set a user password (creates an administrator if new)\n       proxbackup-server version\n       proxbackup-server apply-update        install a requested update (run as root by proxbackup-server-update.service)\n\nFlags:\n")
+		fmt.Fprintf(os.Stderr, "Usage: proxbackup-server [flags]\n       proxbackup-server passwd [username]   set a user password (creates an administrator if new)\n       proxbackup-server version\n       proxbackup-server apply-update        install a requested update (run as root by proxbackup-server-update.service)\n       proxbackup-server grant-datastores    give the console's PBS user the rights it asked for (run as root by proxbackup-server-grants.service)\n\nFlags:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -119,6 +122,20 @@ func main() {
 		log.Info("re-executing the updated binary")
 		fatal(reexec())
 	} else if err != nil && ctx.Err() == nil {
+		fatal(err)
+	}
+}
+
+// grantDatastores is run as root by proxbackup-server-grants.service.
+func grantDatastores(args []string) {
+	fs := flag.NewFlagSet("grant-datastores", flag.ExitOnError)
+	dataDir := fs.String("data-dir", envOr("PROXBACKUP_DATA_DIR", "/var/lib/proxbackup"), "console data directory")
+	authID := fs.String("local-pbs-auth-id", envOr("PROXBACKUP_LOCAL_PBS_AUTH_ID", "proxbackup@pbs"), "the console's PBS user")
+	fs.Parse(args)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := server.GrantLocalPBS(ctx, *dataDir, *authID, log); err != nil {
 		fatal(err)
 	}
 }

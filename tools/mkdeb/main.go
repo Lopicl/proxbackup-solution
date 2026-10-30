@@ -47,7 +47,8 @@ func main() {
 		{"usr/bin/proxbackup-server", 0o755, read(*binary)},
 		{"usr/share/doc/proxbackup-server/copyright", 0o644, read(filepath.Join(*src, "copyright"))},
 	}
-	for _, u := range []string{"proxbackup-server.service", "proxbackup-server-update.service", "proxbackup-server-update.path"} {
+	for _, u := range []string{"proxbackup-server.service", "proxbackup-server-update.service", "proxbackup-server-update.path",
+		"proxbackup-server-grants.service", "proxbackup-server-grants.path"} {
 		data = append(data, file{"usr/lib/systemd/system/" + u, 0o644, read(filepath.Join(*src, u))})
 	}
 	var size int

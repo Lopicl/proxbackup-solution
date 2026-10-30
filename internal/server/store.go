@@ -529,6 +529,29 @@ func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 	return err
 }
 
+// DeleteUnusedLocalTargets deletes the local targets no client, pending
+// enrollment or setup token uses, and returns their names.
+func (s *Store) DeleteUnusedLocalTargets(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `DELETE FROM targets WHERE local=1
+		AND NOT EXISTS (SELECT 1 FROM clients WHERE target_id=targets.id)
+		AND NOT EXISTS (SELECT 1 FROM enrollments WHERE target_id=targets.id AND used_at=0 AND expires>?)
+		AND NOT EXISTS (SELECT 1 FROM setup_tokens WHERE target_id=targets.id AND expires>?)
+		RETURNING name`, now(), now())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
+}
+
 // ---- clients ----
 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,

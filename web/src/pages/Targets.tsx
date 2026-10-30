@@ -87,9 +87,15 @@ export function Targets() {
           snapshots, but cannot delete, prune or read other clients' backups. Retention (prune) is run by this server.
         </p>
         <p className="muted-text">
-          Use the agent user itself as PBS admin, with its password and the <b>DatastoreAdmin</b> role on <code>/datastore</code> (or on the datastore) and
-          nothing else: PBS lets it set ACLs only for its own tokens and never gives them more than it has. On this PBS the console's own user{' '}
-          <code>proxbackup@pbs</code> is set up like that. An API token as admin needs the <b>Admin</b> role on <code>/</code>.
+          Use the agent user itself as PBS admin, with its password, the <b>DatastoreAdmin</b> role on{' '}
+          <code>/datastore/&lt;datastore&gt;/&lt;root namespace&gt;</code>, <b>DatastoreAudit</b> on <code>/datastore/&lt;datastore&gt;</code> (not propagated,
+          for the usage shown on the dashboard) and nothing else: PBS lets it set ACLs only for its own tokens and never gives them more than it has, and VM
+          backups in other namespaces stay out of its reach. Create the root namespace yourself. An API token as admin needs the <b>Admin</b> role on{' '}
+          <code>/</code>.
+        </p>
+        <p className="muted-text">
+          On this PBS the console's own user <code>proxbackup@pbs</code> is set up like that for you: adding a datastore here creates its root namespace and
+          grants those rights. It gets rights only on a root namespace that doesn't exist yet or that it could already use.
         </p>
       </Card>
       {edit && (
@@ -106,7 +112,7 @@ export function Targets() {
   )
 }
 
-function TargetEditor({ t: init, local, onClose }: { t: Form; local?: { auth_id: string; host: string }; onClose: () => void }) {
+function TargetEditor({ t: init, local, onClose }: { t: Form; local?: { auth_id: string; host: string; datastores: string[] }; onClose: () => void }) {
   const [t, setT] = useState<Form>(init)
   const isLocal = init.id ? !!init.local : !!local && t.admin_auth_id === local.auth_id && t.host === local.host
   const [error, setError] = useState('')
@@ -144,14 +150,24 @@ function TargetEditor({ t: init, local, onClose }: { t: Form; local?: { auth_id:
           <input value={t.fingerprint ?? ''} onChange={(e) => set({ fingerprint: e.target.value })} placeholder="aa:bb:cc:…" />
         </Field>
         <div className="grid2">
-          <Field label="Datastore">
-            <input value={t.datastore ?? ''} onChange={(e) => set({ datastore: e.target.value })} required />
+          <Field label="Datastore" hint={isLocal ? 'Only for PCs: the console gets no rights on the datastores you don’t add.' : undefined}>
+            <input value={t.datastore ?? ''} onChange={(e) => set({ datastore: e.target.value })} required list={isLocal ? 'local-datastores' : undefined} />
+            {isLocal && (
+              <datalist id="local-datastores">
+                {local?.datastores.map((d) => (
+                  <option key={d} value={d} />
+                ))}
+              </datalist>
+            )}
           </Field>
           <Field
             label="Root namespace"
-            hint="Each client gets a child namespace below this one. Changing it creates it on PBS and moves existing clients there; their older snapshots stay restorable."
+            hint={
+              'Each client gets a child namespace below this one. Changing it creates it on PBS and moves existing clients there; their older snapshots stay restorable.' +
+              (isLocal ? ' Required on this PBS: the console has rights only below it. Use a new one, not one holding other backups.' : '')
+            }
           >
-            <input value={t.root_ns ?? ''} onChange={(e) => set({ root_ns: e.target.value })} placeholder="pcs" />
+            <input value={t.root_ns ?? ''} onChange={(e) => set({ root_ns: e.target.value })} placeholder="pcs" required={isLocal} />
           </Field>
         </div>
         <div className="grid2">

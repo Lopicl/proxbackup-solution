@@ -38,7 +38,7 @@ type updateRequest struct {
 // installed version, so a compromised console cannot get arbitrary code run
 // as root or force a downgrade.
 func ApplyUpdate(ctx context.Context, installed, dataDir, cacheDir, repo string, log *slog.Logger) error {
-	dir, err := openUpdatesDir(dataDir)
+	dir, err := openHelperDir(dataDir, "updates")
 	if err != nil {
 		return err
 	}
@@ -47,19 +47,11 @@ func ApplyUpdate(ctx context.Context, installed, dataDir, cacheDir, repo string,
 		return nil
 	}
 	defer dir.Close()
-	fi, err := dir.Lstat(updateRequestFile)
-	if errors.Is(err, os.ErrNotExist) {
+	b, found, err := readHelperRequest(dir)
+	if !found && err == nil {
 		log.Info("no update requested")
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	var b []byte
-	if fi.Mode().IsRegular() && fi.Size() < 4096 {
-		b, err = dir.ReadFile(updateRequestFile)
-	}
-	dir.Remove(updateRequestFile) // one attempt per request; the .path unit would retrigger otherwise
 	var req updateRequest
 	if err != nil || json.Unmarshal(b, &req) != nil || !isVersion(req.Version) {
 		return errors.New("invalid update request")
@@ -79,11 +71,11 @@ func ApplyUpdate(ctx context.Context, installed, dataDir, cacheDir, repo string,
 	return err
 }
 
-// openUpdatesDir opens dataDir/updates, nil if it doesn't exist. Both belong
-// to the service user and we run as root, so every file operation goes
-// through the returned root: the service user can't redirect them elsewhere
-// by swapping in a symlink, not even between a check and the use.
-func openUpdatesDir(dataDir string) (*os.Root, error) {
+// openHelperDir opens dataDir/sub, nil if it doesn't exist. Both belong to
+// the service user and the root helpers run as root, so every file operation
+// goes through the returned root: the service user can't redirect them
+// elsewhere by swapping in a symlink, not even between a check and the use.
+func openHelperDir(dataDir, sub string) (*os.Root, error) {
 	data, err := os.OpenRoot(dataDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -92,8 +84,8 @@ func openUpdatesDir(dataDir string) (*os.Root, error) {
 		return nil, err
 	}
 	defer data.Close()
-	name := filepath.Join(dataDir, "updates")
-	fi, err := data.Lstat("updates")
+	name := filepath.Join(dataDir, sub)
+	fi, err := data.Lstat(sub)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -105,7 +97,7 @@ func openUpdatesDir(dataDir string) (*os.Root, error) {
 	}
 	// A symlink swapped in now can only point within dataDir, and is caught
 	// here: the directory we opened must be the one checked above.
-	dir, err := data.OpenRoot("updates")
+	dir, err := data.OpenRoot(sub)
 	if err != nil {
 		return nil, err
 	}
@@ -163,18 +155,41 @@ func applyDeb(ctx context.Context, installed, version, cacheDir, repo string, lo
 	}
 }
 
-// writeHelperResult writes result.json owned by the service user, so the
-// console can read it. We run as root in a directory the service user owns, so
-// never follow a planted symlink: create the file exclusively and chown the
-// open descriptor.
 func writeHelperResult(dir *os.Root, res UpdateResult, log *slog.Logger) {
 	b, _ := json.Marshal(res)
-	tmp := updateResultFile + ".tmp"
+	if err := writeHelperFile(dir, updateResultFile, b); err != nil {
+		log.Warn("cannot write update result", "err", err)
+	}
+}
+
+// readHelperRequest reads and removes the console's request in dir: one
+// attempt per request, as the .path unit would retrigger otherwise. found is
+// false when there is none; b is nil for anything but a small regular file.
+func readHelperRequest(dir *os.Root) (b []byte, found bool, err error) {
+	fi, err := dir.Lstat(updateRequestFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if fi.Mode().IsRegular() && fi.Size() < 1<<20 {
+		b, err = dir.ReadFile(updateRequestFile)
+	}
+	dir.Remove(updateRequestFile)
+	return b, true, err
+}
+
+// writeHelperFile writes name owned by the service user, so the console can
+// read it. We run as root in a directory the service user owns, so never
+// follow a planted symlink: create the file exclusively and chown the open
+// descriptor.
+func writeHelperFile(dir *os.Root, name string, b []byte) error {
+	tmp := name + ".tmp"
 	dir.Remove(tmp)
 	f, err := dir.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		log.Warn("cannot write update result", "err", err)
-		return
+		return err
 	}
 	if u, err := user.Lookup("proxbackup"); err == nil {
 		uid, _ := strconv.Atoi(u.Uid)
@@ -186,8 +201,7 @@ func writeHelperResult(dir *os.Root, res UpdateResult, log *slog.Logger) {
 		err = cerr
 	}
 	if err != nil {
-		log.Warn("cannot write update result", "err", err)
-		return
+		return err
 	}
-	dir.Rename(tmp, updateResultFile)
+	return dir.Rename(tmp, name)
 }

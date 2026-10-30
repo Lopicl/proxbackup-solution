@@ -54,6 +54,11 @@ func fakePBS(t *testing.T) (*httptest.Server, string, func() []string) {
 			json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"version": "4.0", "release": "1"}})
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/access/permissions") {
+			path := r.URL.Query().Get("path")
+			json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{path: map[string]bool{"Datastore.Modify": true}}})
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"store": "ds"}}})
 	}))
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -79,6 +84,12 @@ func TestTargetSecretsStayWithTheirPBS(t *testing.T) {
 	os.WriteFile(secretFile, []byte("local-password\n"), 0o600)
 	const localID = "proxbackup@pbs"
 	s.cfg.LocalPBS = &LocalPBS{APIAddr: localHost, PublicHost: localHost, AuthID: localID, SecretFile: secretFile}
+	root := newFakePBSRoot("ds")
+	s.grantHelper = func() {
+		if err := grantLocalPBS(ctx, s.cfg.DataDir, localID, root, s.log); err != nil {
+			t.Errorf("grant helper: %v", err)
+		}
+	}
 
 	stored := &Target{Name: "remote", Host: localHost, Fingerprint: localFP, Datastore: "ds", AdminAuthID: "admin@pbs!t",
 		PBSUser: "proxbackup@pbs"}
@@ -152,8 +163,14 @@ func TestTargetSecretsStayWithTheirPBS(t *testing.T) {
 	if c := save(0, map[string]any{"name": "l", "host": evilHost, "datastore": "ds", "admin_auth_id": localID}); c != 400 {
 		t.Fatalf("new target with local token id on another host: %d", c)
 	}
-	if c := save(0, map[string]any{"name": "l", "host": localHost, "datastore": "ds", "admin_auth_id": localID}); c != 200 {
+	if c := save(0, map[string]any{"name": "l", "host": localHost, "datastore": "ds", "admin_auth_id": localID}); c != 400 {
+		t.Fatalf("new local target without a root namespace: %d", c)
+	}
+	if c := save(0, map[string]any{"name": "l", "host": localHost, "datastore": "ds", "root_ns": "pcs", "admin_auth_id": localID}); c != 200 {
 		t.Fatalf("new local target: %d", c)
+	}
+	if !root.has(pbsACL{"/datastore/ds/pcs", true, "DatastoreAdmin", localID}) || !root.ns["ds"]["pcs"] {
+		t.Fatalf("local target got no rights: %+v %v", root.acls, root.ns)
 	}
 	ts, _ := s.store.Targets(ctx)
 	for _, tg := range ts {
@@ -216,6 +233,7 @@ func TestLocalTargetsLeaveRootToken(t *testing.T) {
 	if err := s.store.migrate(); err != nil {
 		t.Fatal(err)
 	}
+	s.store.SetSetting(ctx, unusedLocalTargetsKey, true) // see TestUnusedLocalTargetsRemoved
 	if err := s.syncLocalTargets(ctx); err != nil {
 		t.Fatal(err)
 	}

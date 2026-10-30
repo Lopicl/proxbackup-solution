@@ -43,22 +43,32 @@ make deb    # bin/proxbackup-server_<version>_{amd64,arm64}.deb
 apt install ./proxbackup-server_<version>_amd64.deb
 ```
 
-The package creates the PBS user `proxbackup@pbs` (DatastoreAdmin on `/datastore` only, password in
-`/etc/proxbackup/pbs-password`), which the console signs in as and which owns the PCs' tokens. It
-registers every local datastore as a target and starts the console on `https://<pbs-host>:8077`. Sign in as `admin` with the
-initial password from `journalctl -u proxbackup-server`; you must replace it at the first sign-in.
+The package creates the PBS user `proxbackup@pbs` (password in `/etc/proxbackup/pbs-password`),
+which the console signs in as and which owns the PCs' tokens, and starts the console on
+`https://<pbs-host>:8077`. Sign in as `admin` with the initial password from
+`journalctl -u proxbackup-server`; you must replace it at the first sign-in. Then add the datastores
+for PCs (step 3).
 
+- The user only has rights on the datastores you add, and only below their root namespace:
+  DatastoreAdmin on `/datastore/<store>/<root>`, plus DatastoreAudit on `/datastore/<store>` (not
+  propagated) for the usage on the dashboard. VM and container backups in other namespaces stay out
+  of its reach. The root helper `proxbackup-server-grants.service` sets these ACLs; it creates the
+  root namespace, and only grants one that is new or that the user could already use (see
+  `journalctl -u proxbackup-server-grants`). It also removes the user's other ACLs.
 - Settings (public URL, host names): `/etc/proxbackup/proxbackup.env`
-- Upgrading from 0.2.16 or older deletes the old `root@pam!proxbackup-console` token (Admin on `/`).
+- Upgrading replaces the user's DatastoreAdmin on `/datastore` with the rights above, and drops
+  the datastores no PC uses from the console. From 0.2.16 or older it also deletes the old
+  `root@pam!proxbackup-console` token (Admin on `/`).
 - `apt purge` removes the console and the user's password; backups, the user and the PCs' tokens stay in PBS.
 - Ports, firewall rules, hiding the console and PBS web UIs from PCs (nginx example), and hosts
   with several interfaces: [docs/network.md](docs/network.md)
 
 **Standalone:**
 
-1. Create a PBS user `proxbackup@pbs` with a password and the DatastoreAdmin role on `/datastore`
-   (nothing else). Use it as *PBS admin* and agent user of the datastore (step 4); it can only
-   grant rights to its own tokens. An API token with Admin on `/` also works.
+1. Create a PBS user `proxbackup@pbs` with a password, the root namespace (e.g. `pcs`), and give
+   the user DatastoreAdmin on `/datastore/<store>/pcs` and DatastoreAudit on `/datastore/<store>`
+   (not propagated), nothing else. Use it as *PBS admin* and agent user of the datastore (step 4);
+   it can only grant rights to its own tokens. An API token with Admin on `/` also works.
 2. Run `proxbackup-server -public-url https://backup.example.lan:8077 -hostnames backup.example.lan`
    and open port 8077.
 3. Sign in as `admin` (initial password in the log, or set `PROXBACKUP_ADMIN_PASSWORD`). Lost it?
@@ -67,9 +77,10 @@ initial password from `journalctl -u proxbackup-server`; you must replace it at 
 
 ### 3. Check the target
 
-Under *Datastores*, adjust the root namespace if needed (default `pcs`). Clients live in
-`<root>/<client>`; changing the root creates the new namespace and moves enrolled clients, while
-older snapshots stay listed and restorable.
+Under *Datastores*, add the datastore PCs back up to, or check it on a standalone console. Adjust
+the root namespace if needed (default `pcs`; required on the PBS host, and not one holding other
+backups). Clients live in `<root>/<client>`; changing the root creates the new namespace and moves
+enrolled clients, while older snapshots stay listed and restorable.
 
 ### 4. Enroll clients
 

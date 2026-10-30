@@ -366,7 +366,7 @@ export interface Me {
   must_change_password: boolean
   local_account: boolean
   permissions: Partial<Record<Perm, PermScope>>
-  local_pbs?: { auth_id: string; host: string }
+  local_pbs?: { auth_id: string; host: string; datastores: string[] }
 }
 
 export interface PermInfo {

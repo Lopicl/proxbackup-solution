@@ -308,16 +308,33 @@ read on every run.
   only) work on the same port. `-agent-addr` can still split the agent API onto its own port
   (firewall setup: [network.md](network.md)).
 * **Installed on the PBS host** (`.deb`, `packaging/deb`). The package creates the PBS user
-  `proxbackup@pbs` with a random password (`/etc/proxbackup/pbs-password`) and DatastoreAdmin on
-  `/datastore`, and runs the console as the system user `proxbackup`, which can read the
-  password. Upgrades drop the user's other ACLs (a deeper one, like the DatastoreBackup on
-  `<store>/pcs` older consoles granted, would replace the inherited role) and delete the
+  `proxbackup@pbs` with a random password (`/etc/proxbackup/pbs-password`) and runs the console
+  as the system user `proxbackup`, which can read the password. Upgrades delete the
   `root@pam!proxbackup-console` token of 0.2.16 and older; the console moves its targets to the
   user. PBS takes a password only as a command argument, so it is visible in `ps` to local users
-  while the package sets it. With `-local-pbs` the console registers
-  every local datastore as a target on first start, re-reads the PBS certificate fingerprint over
-  loopback hourly (so ACME renewals need no reconfiguration). PBS accounts can't sign in to the
-  console: it has its own users (below) on every install.
+  while the package sets it. With `-local-pbs` the admin adds local datastores without
+  credentials, and the console re-reads the PBS certificate fingerprint over loopback hourly (so
+  ACME renewals need no reconfiguration). PBS accounts can't sign in to the console: it has its
+  own users (below) on every install.
+* **Rights on the local PBS** (`internal/server/pbsgrants.go`). The user gets DatastoreAdmin on
+  `/datastore/<store>/<root ns>` of each local target and DatastoreAudit, not propagated, on
+  `/datastore/<store>` (datastore status and RRD for the dashboard; it lists the snapshots of
+  the datastore's root namespace, but can't change or read them). Other namespaces, datastore
+  config and maintenance mode stay out of reach (checked on PBS 4.2). Creating a root namespace
+  needs Datastore.Modify on the datastore, and the user can't set its own ACLs, so the console
+  writes the namespaces it needs (root namespaces, and client namespaces outside them from
+  before a root namespace change) to `pbs-grants/request`. `proxbackup-server-grants.path` then
+  runs `proxbackup-server grant-datastores` as root, which reads it through `os.Root` like the
+  update helper. A compromised console must not reach other backups through it, so the helper
+  grants a namespace only if it doesn't exist yet (it creates it, empty) or the user already
+  holds Admin, DatastoreAdmin, DatastorePowerUser or DatastoreBackup on it or a parent (only a
+  root admin can set those: older packages' `/datastore` or `<store>/pcs` grants, or a manual
+  `acl update`). It removes the user's other ACLs (tokens' ones stay), refuses `root@pam`, and
+  writes `result.json` with refusals and the datastore names for the target form. Saving a
+  local target waits for the answer and for PBS to apply the ACL (`access/permissions`), so
+  enrollment works right away; startup and the hourly sync ask again when rights are missing or
+  no longer needed. On upgrade the console drops, once, the local targets older consoles
+  registered for every datastore that no client, enrollment or setup token uses.
 * **Users and roles** (`internal/server/users.go`). Console users have argon2id password
   hashes, can be disabled, and record their last sign-in. The first start creates `admin`
   (Administrator) with a generated password that must be changed at the first sign-in; until
@@ -750,7 +767,7 @@ sequenceDiagram
   Until then it is. The release workflow pins its actions to commit SHAs and only its publish
   job, which runs no build tooling, has `contents: write`.
 * **PBS credentials:** the console provisions as the agents' PBS user itself (`proxbackup@pbs`,
-  `DatastoreAdmin` on `/datastore`), signing in with a ticket (`pkg/pbs/ticket.go`: cookie plus
+  `DatastoreAdmin` on the root namespaces only), signing in with a ticket (`pkg/pbs/ticket.go`: cookie plus
   `CSRFPreventionToken` on writes, a new sign-in after an hour or a 401). Without
   `Permissions.Modify` PBS lets a user set ACLs only for its own tokens ("Unprivileged users can
   only set ACL items for their own API tokens"), and a token never gets more than its user, even
@@ -764,7 +781,7 @@ sequenceDiagram
 ## Repository layout
 
 ```
-cmd/proxbackup-server/  ProxBackup Console entrypoint (also `apply-update` for the root helper)
+cmd/proxbackup-server/  ProxBackup Console entrypoint (also `apply-update`, `grant-datastores` for the root helpers)
 cmd/proxbackup-agent/   ProxBackup Agent entrypoint (service + CLI: enroll, backup, image, restore, tray)
 pkg/pbs/                PBS protocol: blob, chunker, catalog, backup & reader sessions, admin API
 pkg/pxar/               pxar encoder/decoder (v1 and v2 split archives)

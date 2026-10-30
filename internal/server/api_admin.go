@@ -160,8 +160,15 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 		}
 		local = true
 	}
+	if local && req.RootNS == "" {
+		httpError(w, 400, errors.New("a datastore on this PBS needs a root namespace: the console only gets rights below it"))
+		return
+	}
 	// A new root namespace must exist on PBS before agents are pointed at it.
 	nsChanged := t.ID != 0 && t.RootNS != req.RootNS
+	// On this PBS, the console needs rights on it first (see pbsgrants.go).
+	needGrant := local && (t.ID == 0 || !t.Local || t.Datastore != req.Datastore || nsChanged)
+	wasLocal := t.Local
 	t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser, t.Local =
 		req.Name, req.Host, fp, req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser, local
 	var sealSecret func(id int64) []byte
@@ -172,9 +179,17 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var pc *pbs.Client
-	if nsChanged {
+	if nsChanged || needGrant {
 		var err error
-		if pc, err = s.adminClient(t); err == nil {
+		if t.ID == 0 {
+			pc, err = pbs.NewClient(pbs.Config{Host: t.Host, Fingerprint: t.Fingerprint, AuthID: t.AdminAuthID, Secret: req.AdminSecret})
+		} else {
+			pc, err = s.adminClient(t)
+		}
+		if err == nil && needGrant {
+			err = s.syncGrants(ctx, pc, t)
+		}
+		if err == nil && nsChanged {
 			err = prepareRootNamespace(ctx, pc, t)
 		}
 		if err != nil {
@@ -185,6 +200,9 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.SaveTarget(ctx, t, sealSecret); err != nil {
 		httpError(w, 500, err)
 		return
+	}
+	if wasLocal || local {
+		defer s.refreshGrants(ctx) // drops the rights the target no longer needs
 	}
 	if nsChanged {
 		if err := s.moveTargetClients(ctx, pc, t); err != nil {
@@ -215,6 +233,7 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	s.refreshGrants(r.Context())
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -240,8 +259,10 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 			req.AdminSecret, _ = s.sealer.Open(t.adminSecretEnc, colTargetSecret, t.ID)
 		}
 	}
+	local := false
 	if req.AdminSecret == "" {
 		req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, req.Fingerprint)
+		local = req.AdminSecret != ""
 	}
 	if req.AdminSecret == "" {
 		httpError(w, 400, errMissingAdminSecret)
@@ -264,12 +285,18 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 502, fmt.Errorf("list datastores: %w", err))
 		return
 	}
-	found := false
 	names := []string{}
 	for _, st := range stores {
 		names = append(names, st.Store)
-		found = found || st.Store == req.Datastore
 	}
+	if local {
+		// The console sees only the datastores it has rights on already;
+		// saving gets it rights on the others (see pbsgrants.go).
+		names = append(names, s.localDatastores()...)
+		slices.Sort(names)
+		names = slices.Compact(names)
+	}
+	found := slices.Contains(names, req.Datastore)
 	writeJSON(w, map[string]any{"version": v["version"], "release": v["release"], "datastores": names, "datastore_found": found})
 }
 

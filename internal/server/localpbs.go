@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -18,14 +17,14 @@ import (
 )
 
 // LocalPBS describes the Proxmox Backup Server this console runs on (the .deb
-// install). The console then needs no manual setup: it registers the PBS
-// datastores as targets with the PBS user the package created and keeps their
-// certificate fingerprint current. Console users are its own (see users.go),
-// not PBS accounts.
+// install). Datastores added there use the PBS user the package created, with
+// no password to enter, and the console keeps their certificate fingerprint
+// current. Console users are its own (see users.go), not PBS accounts.
 //
-// That PBS user (proxbackup@pbs) has DatastoreAdmin on /datastore and nothing
-// else. It signs in with its password and owns the agents' tokens: PBS lets it
-// set ACLs only for those, and caps them at its own privileges.
+// That PBS user (proxbackup@pbs) has rights only on the root namespaces of
+// those datastores (see pbsgrants.go). It signs in with its password and owns
+// the agents' tokens: PBS lets it set ACLs only for those, and caps them at
+// its own privileges.
 type LocalPBS struct {
 	APIAddr    string // this host's PBS API, normally "127.0.0.1:8007"
 	PublicHost string // PBS address agents connect to, e.g. "pbs.example.lan:8007"
@@ -37,7 +36,9 @@ type LocalPBS struct {
 // Admin on /. The package now deletes it, and its targets move to the PBS user.
 const legacyLocalAuthID = "root@pam!proxbackup-console"
 
-const localTargetsInitKey = "local_pbs_targets_initialized"
+// unusedLocalTargetsKey marks the one-time removal of the local targets that
+// older consoles registered for every datastore, PCs or not.
+const unusedLocalTargetsKey = "local_pbs_unused_targets_removed"
 
 // pbsUser is the agent user of local targets: the console's own PBS user,
 // which is the only one whose tokens it may grant ACLs to.
@@ -87,7 +88,7 @@ func (l *LocalPBS) client(ctx context.Context) (*pbs.Client, string, string, err
 }
 
 // localPBSLoop syncs the local targets at startup (retrying until PBS is up)
-// and then hourly, to pick up certificate and token changes.
+// and then hourly, to pick up certificate, password and ACL changes.
 func (s *Server) localPBSLoop(ctx context.Context) {
 	delay := 5 * time.Second
 	for {
@@ -105,9 +106,8 @@ func (s *Server) localPBSLoop(ctx context.Context) {
 	}
 }
 
-// syncLocalTargets registers every datastore of the local PBS as a target the
-// first time it runs, and afterwards refreshes the fingerprint and credentials
-// of the local targets. Targets the admin deleted are not recreated.
+// syncLocalTargets refreshes the fingerprint and credentials of the local
+// targets and asks for the PBS rights they need.
 func (s *Server) syncLocalTargets(ctx context.Context) error {
 	l := s.cfg.LocalPBS
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -153,31 +153,23 @@ func (s *Server) syncLocalTargets(ctx context.Context) error {
 	}
 
 	var done bool
-	if err := s.store.Setting(ctx, localTargetsInitKey, &done); err == nil && done {
-		return nil
-	}
-	var stores []struct {
-		Store string `json:"store"`
-	}
-	if err := pc.Call(ctx, http.MethodGet, "admin/datastore", nil, &stores); err != nil {
-		return fmt.Errorf("list datastores: %w", err)
-	}
-	for _, ds := range stores {
-		exists := false
-		for _, t := range ts {
-			exists = exists || t.Datastore == ds.Store && t.Local
-		}
-		if exists {
-			continue
-		}
-		t := &Target{Name: ds.Store, Host: l.PublicHost, Fingerprint: fp, Datastore: ds.Store, RootNS: "pcs",
-			AdminAuthID: l.AuthID, PBSUser: l.pbsUser(), Local: true}
-		if err := s.store.SaveTarget(ctx, t, s.sealer.sealFor(secret, colTargetSecret)); err != nil {
+	if err := s.store.Setting(ctx, unusedLocalTargetsKey, &done); err != nil || !done {
+		names, err := s.store.DeleteUnusedLocalTargets(ctx)
+		if err != nil {
 			return err
 		}
-		s.log.Info("registered local PBS datastore", "datastore", ds.Store)
+		for _, n := range names {
+			s.log.Info("removed a local datastore no PC uses: the console no longer gets rights on it. "+
+				"Add it again under Datastores to back PCs up to it", "target", n)
+		}
+		if err := s.store.SetSetting(ctx, unusedLocalTargetsKey, true); err != nil {
+			return err
+		}
 	}
-	return s.store.SetSetting(ctx, localTargetsInitKey, true)
+	if err := s.syncGrants(ctx, pc, nil); err != nil {
+		return fmt.Errorf("datastore rights: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) wakeTargetClients(ctx context.Context, targetID int64) {

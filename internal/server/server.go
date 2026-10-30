@@ -71,6 +71,9 @@ type Server struct {
 	logins   loginLimiter  // sign-in throttling (loginlimit.go)
 	runRegs  clientLimiter // agent run registrations (runlimit.go)
 	restores clientLimiter // self-service restore pages opened by agents
+
+	grantTimeout time.Duration // how long saving a local target waits for its PBS rights (pbsgrants.go)
+	grantHelper  func()        // tests: runs the root helper on each request
 }
 
 // New opens the data directory and prepares the server.
@@ -92,7 +95,7 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	} else if n > 0 {
 		log.Info("re-sealed stored secrets, bound to their rows", "count", n)
 	}
-	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{},
+	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{}, grantTimeout: time.Minute,
 		rotateFailed: map[int64]time.Time{}, replacedAlerted: map[int64]time.Time{},
 		runRegs:  clientLimiter{perHour: runRegsPerHour, burst: runRegsBurst},
 		restores: clientLimiter{perHour: restoreSessionsPerHour, burst: restoreSessionsBurst}}

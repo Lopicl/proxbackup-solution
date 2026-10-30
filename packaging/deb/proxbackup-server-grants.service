@@ -1,0 +1,13 @@
+[Unit]
+Description=Give the ProxBackup Console's PBS user rights on its datastores
+After=proxmox-backup.service
+
+[Service]
+Type=oneshot
+# Runs as root to create root namespaces and set ACLs. The console only names
+# namespaces: it gets one only if it is new (created here, empty) or it
+# already had rights on it, so it can't reach other backups this way.
+EnvironmentFile=-/etc/proxbackup/proxbackup.env
+Environment=PROXBACKUP_DATA_DIR=/var/lib/proxbackup
+ExecStart=/usr/bin/proxbackup-server grant-datastores
+TimeoutStartSec=5min

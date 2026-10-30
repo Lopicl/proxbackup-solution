@@ -341,7 +341,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	me := map[string]any{"id": u.ID, "username": u.Name, "version": s.cfg.Version,
 		"must_change_password": u.MustChange, "local_account": !u.External, "permissions": u.Access}
 	if l := s.cfg.LocalPBS; l != nil {
-		me["local_pbs"] = map[string]string{"auth_id": l.AuthID, "host": l.PublicHost}
+		me["local_pbs"] = map[string]any{"auth_id": l.AuthID, "host": l.PublicHost, "datastores": orEmpty(s.localDatastores())}
 	}
 	writeJSON(w, me)
 }
