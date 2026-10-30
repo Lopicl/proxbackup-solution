@@ -99,6 +99,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	req.Hostname, req.OS = clip(req.Hostname, maxAgentName), clip(req.OS, maxAgentToken)
 	ctx := r.Context()
 	if st, err := s.store.SetupTokenByCode(ctx, hashToken(req.Code)); err == nil {
 		s.enrollWithSetupToken(w, r, st, req)
@@ -205,6 +206,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	clipPoll(&req)
 	ctx := r.Context()
 	serial := connSerial(r)
 	// A certificate due for renewal may be a stolen copy: what its polls report
@@ -340,10 +342,11 @@ func (s *Server) handleRegisterRun(w http.ResponseWriter, r *http.Request, c *Cl
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	if len(reg.UUID) < 16 || (reg.State != api.RunRunning && reg.State != api.RunMissed) {
+	if len(reg.UUID) < 16 || len(reg.UUID) > maxAgentToken || (reg.State != api.RunRunning && reg.State != api.RunMissed) {
 		httpError(w, http.StatusBadRequest, errors.New("invalid run registration"))
 		return
 	}
+	reg.Kind, reg.Trigger, reg.Message = clip(reg.Kind, maxAgentToken), clip(reg.Trigger, maxAgentToken), clip(reg.Message, maxAgentText)
 	ctx := r.Context()
 	if id, ok := s.store.RegisteredRun(ctx, c.ID, reg.UUID); ok { // a retry
 		writeJSON(w, api.RunRegisterResponse{RunID: id})
@@ -445,15 +448,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, c *Client)
 		lastTime = max(lastTime, ts)
 		switch e.Type {
 		case "log":
-			msg := e.Message
-			if len(msg) > 4000 {
-				msg = msg[:4000] + "…"
-			}
-			logs = append(logs, LogLine{Time: ts, Level: e.Level, Msg: msg})
+			logs = append(logs, LogLine{Time: ts, Level: logLevel(e.Level), Msg: clip(e.Message, maxAgentText)})
 		case "progress":
-			lastProgress = e.Progress
+			if e.Progress != nil {
+				lastProgress = e.Progress
+				clipProgress(lastProgress)
+			}
 		case "result":
-			result, resultAt = e.Result, ts
+			if e.Result != nil {
+				result, resultAt = e.Result, ts
+				clipResult(result)
+			}
 		}
 	}
 	if len(logs) > 0 {

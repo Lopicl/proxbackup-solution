@@ -440,7 +440,9 @@ scope = their profile folder, or none for administrators). The console returns
 `https://<console>/#/restore/<token>` and the tray opens it. The page needs no console login.
 The token sits in the URL fragment, so it never reaches a request line or log, and the page
 sends it in an `X-Restore-Session` header. It opens nothing of the admin API. A session expires
-after an hour without use, and 8 hours after it was opened at the latest. The page lists the
+after an hour without use, and 8 hours after it was opened at the latest. An agent opens at most
+30 sessions per hour (bursts of 10, then HTTP 429); a client keeps at most 10 live ones (a new one
+ends the oldest), and over-long user, SID, scope or ref fields are refused. The page lists the
 PC's snapshots and reuses the console's file browser:
 
 * *Administrators of the PC* see and restore everything, written as SYSTEM like console restores.

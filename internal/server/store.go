@@ -1189,6 +1189,9 @@ func scanRun(sc interface{ Scan(...any) error }) (*Run, error) {
 	}
 	json.Unmarshal([]byte(prog), &r.Progress)
 	json.Unmarshal([]byte(res), &r.Result)
+	if r.Result.State != "" && r.Result.Error == "" {
+		r.Result.Error = r.Error // stored once, in the error column (FinishRun)
+	}
 	return r, err
 }
 
@@ -1295,9 +1298,11 @@ func (s *Store) RegisterRun(ctx context.Context, clientID int64, reg api.RunRegi
 	if reg.State == api.RunMissed { // never started: record when it was skipped
 		state, started, finished, errMsg = api.RunMissed, 0, reg.StartedAt, reg.Message
 	}
+	// What the agent sent counts against the client's log quota.
+	size := len(reg.Kind) + len(reg.Trigger) + len(reg.UUID) + len(errMsg)
 	res, err := s.db.ExecContext(ctx, `INSERT INTO runs(job_id, client_id, kind, state, trigger, queued_at, started_at, finished_at,
-		last_event_at, error, uuid, scheduled_for) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		reg.JobID, clientID, reg.Kind, state, reg.Trigger, reg.StartedAt, started, finished, now(), errMsg, reg.UUID, reg.ScheduledFor)
+		last_event_at, error, uuid, scheduled_for, log_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		reg.JobID, clientID, reg.Kind, state, reg.Trigger, reg.StartedAt, started, finished, now(), errMsg, reg.UUID, reg.ScheduledFor, size)
 	if err != nil {
 		return 0, false, err
 	}
@@ -1365,13 +1370,17 @@ func (s *Store) RunStarted(ctx context.Context, id int64, at int64) {
 // finishedAt is when the agent finished the run: reports can arrive much later
 // (e.g. spooled while the server was offline), so the arrival time is not used.
 func (s *Store) FinishRun(ctx context.Context, id int64, r api.Result, finishedAt int64) bool {
-	b, _ := json.Marshal(r)
+	stored := r
+	stored.Error = "" // in the error column (see scanRun)
+	b, _ := json.Marshal(stored)
 	if finishedAt <= 0 || finishedAt > now()+300 {
 		finishedAt = now()
 	}
+	// The result counts against the client's log quota, like the log.
+	size := len(b) + len(r.Error) + len(r.Snapshot)
 	res, err := s.db.ExecContext(ctx, `UPDATE runs SET state=?, result=?, error=?, snapshot=?, finished_at=?, last_event_at=?,
-		started_at=CASE WHEN started_at=0 THEN ? ELSE started_at END WHERE id=? AND state IN ('dispatched','running','lost')`,
-		r.State, b, r.Error, r.Snapshot, finishedAt, now(), finishedAt, id)
+		started_at=CASE WHEN started_at=0 THEN ? ELSE started_at END, log_bytes=log_bytes+? WHERE id=? AND state IN ('dispatched','running','lost')`,
+		r.State, b, r.Error, r.Snapshot, finishedAt, now(), finishedAt, size, id)
 	if err != nil {
 		return false
 	}
@@ -1410,7 +1419,8 @@ func (s *Store) MarkMissingLost(ctx context.Context, clientID int64, running []i
 
 // A run's log holds at most this much, and a client's run logs together at
 // most maxClientLogBytes (see TrimClientLogs), so an agent can't fill the
-// console's disk with log lines.
+// console's disk with log lines. runs.log_bytes counts everything an agent
+// stored for the run: log levels and lines, and its registration and result.
 const (
 	maxRunLogLines    = 20000
 	maxRunLogBytes    = 8 << 20
@@ -1437,7 +1447,7 @@ func (s *Store) AddLogs(ctx context.Context, runID int64, lines []LogLine) error
 		return err
 	}
 	for _, l := range lines {
-		if n >= maxRunLogLines || size+len(l.Msg) > maxRunLogBytes {
+		if n >= maxRunLogLines || size+len(l.Level)+len(l.Msg) > maxRunLogBytes {
 			l = LogLine{Time: l.Time, Level: "warn", Msg: fmt.Sprintf("log truncated: a run's log keeps at most %d lines or %d MiB; the rest was dropped",
 				maxRunLogLines, maxRunLogBytes>>20)}
 			if _, err := st.ExecContext(ctx, runID, l.Time, l.Level, l.Msg); err != nil {
@@ -1449,7 +1459,7 @@ func (s *Store) AddLogs(ctx context.Context, runID int64, lines []LogLine) error
 		if _, err := st.ExecContext(ctx, runID, l.Time, l.Level, l.Msg); err != nil {
 			return err
 		}
-		n, size = n+1, size+len(l.Msg)
+		n, size = n+1, size+len(l.Level)+len(l.Msg)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET log_lines=?, log_bytes=? WHERE id=?`, n, size, runID); err != nil {
 		return err
@@ -1458,7 +1468,8 @@ func (s *Store) AddLogs(ctx context.Context, runID int64, lines []LogLine) error
 }
 
 // TrimClientLogs keeps the run logs of each client under maxBytes in total
-// by clearing the logs of its oldest runs. It returns how many it cleared.
+// by clearing the logs of its oldest runs, and shortening their errors. It
+// returns how many it cleared.
 func (s *Store) TrimClientLogs(ctx context.Context, maxBytes int64) (int, error) {
 	type over struct{ client, bytes int64 }
 	var overs []over
@@ -1499,7 +1510,8 @@ func (s *Store) TrimClientLogs(ctx context.Context, maxBytes int64) (int, error)
 		}
 		_, err1 := tx.ExecContext(ctx, `DELETE FROM run_logs WHERE run_id=?`, id)
 		_, err2 := tx.ExecContext(ctx, `INSERT INTO run_logs(run_id, ts, level, msg) VALUES(?,?,?,?)`, id, now(), "warn", msg)
-		_, err3 := tx.ExecContext(ctx, `UPDATE runs SET log_lines=?, log_bytes=0 WHERE id=?`, maxRunLogLines+1, id)
+		_, err3 := tx.ExecContext(ctx, `UPDATE runs SET log_lines=?, log_bytes=0,
+			error=CASE WHEN length(error)>200 THEN substr(error, 1, 200)||'…' ELSE error END WHERE id=?`, maxRunLogLines+1, id)
 		if err := errors.Join(err1, err2, err3); err != nil {
 			tx.Rollback()
 			return 0, err

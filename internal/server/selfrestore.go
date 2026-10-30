@@ -33,6 +33,9 @@ const (
 	restoreSessionHeader = "X-Restore-Session"
 	restoreSessionIdle   = time.Hour
 	restoreSessionMax    = 8 * time.Hour
+	// A client has at most this many live restore pages; opening another
+	// one ends its oldest.
+	maxLiveRestoreSessions = 10
 )
 
 type restoreSession struct {
@@ -47,13 +50,27 @@ type restoreSession struct {
 
 var windowsDirRe = regexp.MustCompile(`^[A-Za-z]:\\[^<>:"|?*]*$`)
 
+// CreateRestoreSession stores a restore session and ends the client's
+// oldest ones beyond maxLiveRestoreSessions.
 func (s *Store) CreateRestoreSession(ctx context.Context, tokenHash string, clientID int64, req api.RestoreSessionRequest, ttl time.Duration) (int64, error) {
 	n := time.Now()
 	expires := n.Add(min(restoreSessionIdle, ttl)).Unix()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO restore_sessions(token_hash, client_id, user_name, user_sid, admin, scope, agent_ref,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO restore_sessions(token_hash, client_id, user_name, user_sid, admin, scope, agent_ref,
 		created_at, max_expires, expires) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		tokenHash, clientID, req.User, req.SID, req.Admin, req.Scope, req.Ref, n.Unix(), n.Add(ttl).Unix(), expires)
-	return expires, err
+		tokenHash, clientID, req.User, req.SID, req.Admin, req.Scope, req.Ref, n.Unix(), n.Add(ttl).Unix(), expires); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM restore_sessions WHERE client_id=? AND token_hash NOT IN
+		(SELECT token_hash FROM restore_sessions WHERE client_id=? AND expires>? ORDER BY created_at DESC, rowid DESC LIMIT ?)`,
+		clientID, clientID, n.Unix(), maxLiveRestoreSessions); err != nil {
+		return 0, err
+	}
+	return expires, tx.Commit()
 }
 
 // RestoreSession returns a live session and extends its idle timeout.
@@ -84,8 +101,10 @@ func (s *Server) handleCreateRestoreSession(w http.ResponseWriter, r *http.Reque
 		httpError(w, 400, err)
 		return
 	}
+	// Too long is refused, not cut: a shorter Scope would be a wider one.
 	switch {
-	case len(req.Ref) < 16 || req.User == "":
+	case len(req.Ref) < 16 || len(req.Ref) > maxAgentToken || req.User == "" || len(req.User) > maxAgentName ||
+		len(req.SID) > maxAgentName || len(req.Scope) > maxAgentPath:
 		httpError(w, 400, errors.New("invalid restore session"))
 		return
 	case !req.Admin && !windowsDirRe.MatchString(req.Scope):
@@ -94,6 +113,11 @@ func (s *Server) handleCreateRestoreSession(w http.ResponseWriter, r *http.Reque
 	}
 	if req.Admin {
 		req.Scope = ""
+	}
+	if !s.restores.allow(c.ID, time.Now()) {
+		w.Header().Set("Retry-After", "120")
+		httpError(w, http.StatusTooManyRequests, errors.New("too many restore pages opened on this PC; try again in a few minutes"))
+		return
 	}
 	ttl := time.Duration(req.TTL) * time.Second
 	if ttl <= 0 || ttl > restoreSessionMax {

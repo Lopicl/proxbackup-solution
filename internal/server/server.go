@@ -66,10 +66,11 @@ type Server struct {
 	capNotified map[string]bool // "<job>/<day>" daily cap alerts already sent
 
 	versions pbsVersions
-	catalogs catalogCache // snapshot catalogs open in the restore browser
-	storage  storageCache // datastore usage shown on the dashboard
-	logins   loginLimiter // sign-in throttling (loginlimit.go)
-	runRegs  runLimiter   // agent run registrations (runlimit.go)
+	catalogs catalogCache  // snapshot catalogs open in the restore browser
+	storage  storageCache  // datastore usage shown on the dashboard
+	logins   loginLimiter  // sign-in throttling (loginlimit.go)
+	runRegs  clientLimiter // agent run registrations (runlimit.go)
+	restores clientLimiter // self-service restore pages opened by agents
 }
 
 // New opens the data directory and prepares the server.
@@ -92,7 +93,9 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 		log.Info("re-sealed stored secrets, bound to their rows", "count", n)
 	}
 	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{},
-		rotateFailed: map[int64]time.Time{}, replacedAlerted: map[int64]time.Time{}}
+		rotateFailed: map[int64]time.Time{}, replacedAlerted: map[int64]time.Time{},
+		runRegs:  clientLimiter{perHour: runRegsPerHour, burst: runRegsBurst},
+		restores: clientLimiter{perHour: restoreSessionsPerHour, burst: restoreSessionsBurst}}
 	s.notify = &Notifier{s: s}
 	s.updater = newUpdater(s)
 	return s, nil
@@ -338,6 +341,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 		s.store.PruneRestoreSessions(ctx)
 		s.logins.prune(time.Now())
 		s.runRegs.prune(time.Now())
+		s.restores.prune(time.Now())
 		if time.Since(lastLogTrim) > 10*time.Minute {
 			lastLogTrim = time.Now()
 			if n, err := s.store.TrimClientLogs(ctx, maxClientLogBytes); err != nil {

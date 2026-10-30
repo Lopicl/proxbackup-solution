@@ -16,8 +16,18 @@ const (
 	runRegsBurst   = 120
 )
 
-// runLimiter is a token bucket per client.
-type runLimiter struct {
+// An agent may open this many self-service restore pages per hour, in
+// bursts of up to as many (each "Restore files…" in the tray opens one).
+const (
+	restoreSessionsPerHour = 30
+	restoreSessionsBurst   = 10
+)
+
+// clientLimiter is a token bucket per client: burst tokens, refilled at
+// perHour.
+type clientLimiter struct {
+	perHour, burst float64
+
 	mu      sync.Mutex
 	buckets map[int64]*runBucket
 }
@@ -28,7 +38,7 @@ type runBucket struct {
 }
 
 // allow takes a token from client's bucket if it has one.
-func (l *runLimiter) allow(client int64, now time.Time) bool {
+func (l *clientLimiter) allow(client int64, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.buckets == nil {
@@ -36,10 +46,10 @@ func (l *runLimiter) allow(client int64, now time.Time) bool {
 	}
 	b := l.buckets[client]
 	if b == nil {
-		b = &runBucket{tokens: runRegsBurst, at: now}
+		b = &runBucket{tokens: l.burst, at: now}
 		l.buckets[client] = b
 	}
-	b.tokens = min(runRegsBurst, b.tokens+now.Sub(b.at).Hours()*runRegsPerHour)
+	b.tokens = min(l.burst, b.tokens+now.Sub(b.at).Hours()*l.perHour)
 	b.at = now
 	if b.tokens < 1 {
 		return false
@@ -49,11 +59,11 @@ func (l *runLimiter) allow(client int64, now time.Time) bool {
 }
 
 // prune drops full buckets, which hold nothing back.
-func (l *runLimiter) prune(now time.Time) {
+func (l *clientLimiter) prune(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for k, b := range l.buckets {
-		if b.tokens+now.Sub(b.at).Hours()*runRegsPerHour >= runRegsBurst {
+		if b.tokens+now.Sub(b.at).Hours()*l.perHour >= l.burst {
 			delete(l.buckets, k)
 		}
 	}

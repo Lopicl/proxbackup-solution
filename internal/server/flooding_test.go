@@ -99,9 +99,9 @@ func TestRunLogCaps(t *testing.T) {
 	n, all = logCount(t, s, run2)
 	size := 0
 	for _, l := range all[:n-1] {
-		size += len(l.Msg)
+		size += len(l.Level) + len(l.Msg)
 	}
-	if size > maxRunLogBytes || size < maxRunLogBytes-4000 || !strings.HasPrefix(all[n-1].Msg, "log truncated") {
+	if size > maxRunLogBytes || size < maxRunLogBytes-4100 || !strings.HasPrefix(all[n-1].Msg, "log truncated") {
 		t.Fatalf("%d bytes in %d lines, last %.40q", size, n, all[n-1].Msg)
 	}
 }
@@ -164,7 +164,7 @@ func TestRunRegistrationLimit(t *testing.T) {
 		t.Fatalf("other client: %d", code)
 	}
 	// The budget refills over time.
-	var l runLimiter
+	l := clientLimiter{perHour: runRegsPerHour, burst: runRegsBurst}
 	t0 := time.Now()
 	for range runRegsBurst {
 		l.allow(1, t0)

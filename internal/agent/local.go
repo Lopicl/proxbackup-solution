@@ -293,6 +293,9 @@ func (r *Runner) restoreLink(ctx context.Context, peer *ipc.Peer) (string, error
 	server := r.serverURL()
 	if err := postJSON(ctx, r.client(), server+"/agent/v1/restore-sessions", req, &resp); err != nil {
 		kept.Close()
+		if HTTPStatus(err) != 0 {
+			return "", fmt.Errorf("the ProxBackup Console refused the restore page: %w", err)
+		}
 		return "", fmt.Errorf("the ProxBackup Console is unreachable: %w", err)
 	}
 	link, err := ipc.CheckRestoreURL(resp.URL, server)

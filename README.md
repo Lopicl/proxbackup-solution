@@ -157,8 +157,10 @@ PBS tokens to that host.
 
 The *Dashboard* shows the usage of each datastore (now and over the last day, week, month or
 year) and how much data each client's latest backups hold. *Runs* lists active and recent runs.
-A run's log keeps at most 20,000 lines (8 MiB). Each client keeps at most 256 MiB of run logs, and the
-oldest are removed first, so a misbehaving agent can't fill the console's disk.
+A run's log keeps at most 20,000 lines (8 MiB). Each client keeps at most 256 MiB of run logs and
+results, and the oldest are removed first. The console also cuts every other string an agent sends to
+a short length, and a PC opens at most 30 restore pages per hour (10 live at once), so a misbehaving
+agent can't fill the console's disk.
 
 ### Troubleshooting
 
