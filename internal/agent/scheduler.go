@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -107,13 +106,13 @@ const (
 // NewScheduler loads the persisted configuration and state from dir.
 func NewScheduler(dir string) *Scheduler {
 	s := &Scheduler{dir: dir, now: time.Now, state: map[int64]*jobState{}, drops: map[int64]int{}, failed: map[int64]failedRun{}}
-	if b, err := os.ReadFile(filepath.Join(dir, configFile)); err == nil {
+	if b, err := readSecret(filepath.Join(dir, configFile)); err == nil {
 		var c api.AgentConfig
 		if json.Unmarshal(b, &c) == nil {
 			s.cfg = &c
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(dir, scheduleStateFile)); err == nil {
+	if b, err := readSecret(filepath.Join(dir, scheduleStateFile)); err == nil {
 		json.Unmarshal(b, &s.state)
 	}
 	// A run still marked as in progress was cut off by the agent stopping; it

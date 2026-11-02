@@ -123,6 +123,8 @@ it while the PCs are on). *Rotate* on the client page does the same for any clie
 the old certificate also asks for a new one, or either party uses the old certificate after the
 switch, the console revokes the client as *possible credential theft* and sends a notification;
 re-enroll it under *Revoked clients*. The encryption key stays: earlier backups need it.
+Agents up to 0.2.16 could hand the new certificate to a user who had planted files in the folder
+while it was open: rotate those clients again once their agents are updated and the PCs restarted.
 
 ### 5. Create jobs
 
@@ -182,7 +184,9 @@ agent can't fill the console's disk.
 
 The agent service logs to `%ProgramData%\proxbackup\logs\agent.log` (rotated at 5 MiB, 3 old files
 kept). `%ProgramData%\proxbackup` is accessible to SYSTEM and Administrators only (the agent
-resets its permissions on every start), so open the log from an elevated prompt. If it can't start the tray icon in a user session, the client page in the console says so.
+resets its permissions on every start), so open the log from an elevated prompt. Setup moves a
+`proxbackup` folder the agent didn't create aside to `proxbackup.untrusted-<time>` (check it, then
+delete it), and the service won't start from one: enroll the PC again. If it can't start the tray icon in a user session, the client page in the console says so.
 
 ### Ad-hoc use without a console
 

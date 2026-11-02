@@ -57,6 +57,9 @@ func setup(dataDir, token string) error {
 	}
 	in := bufio.NewReader(os.Stdin)
 
+	if err := prepareDataDir(dataDir); err != nil {
+		return err
+	}
 	if cfg, err := agent.LoadConfig(dataDir); err == nil {
 		fmt.Printf("This PC is already enrolled as %q with %s.\n", cfg.ClientName, cfg.ServerURL)
 		if !strings.HasPrefix(strings.ToLower(prompt(in, "Enroll it again as a new client? (y/N)", "n")), "y") {

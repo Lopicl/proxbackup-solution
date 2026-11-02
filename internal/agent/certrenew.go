@@ -94,7 +94,7 @@ func (r *Runner) doRenewCert(ctx context.Context, base string) error {
 // in client.renew.key if there is none yet, and a CSR for it.
 func renewalKeyAndCSR(c *Config) (keyPEM, csrPEM []byte, err error) {
 	hostname, _ := os.Hostname()
-	if keyPEM, err = os.ReadFile(c.path("client.renew.key")); err == nil {
+	if keyPEM, err = readSecret(c.path("client.renew.key")); err == nil {
 		if csrPEM, err = csrFor(keyPEM, hostname); err == nil {
 			return keyPEM, csrPEM, nil
 		}

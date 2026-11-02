@@ -78,6 +78,9 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		var cfg *agent.Config
+		if err = prepareDataDir(*dataDir); err != nil {
+			break
+		}
 		if cfg, err = agent.Enroll(ctx, *dataDir, fs.Arg(0)); err == nil {
 			fmt.Printf("enrolled as %q (client %d) with %s\n", cfg.ClientName, cfg.ClientID, cfg.ServerURL)
 			// On Linux and macOS the package manages the service.
@@ -98,11 +101,11 @@ func main() {
 	case "run", "install", "uninstall", "start", "stop":
 		fs.Parse(args)
 		var dirErr error
-		var removed []string
+		var removed []agent.RemovedEntry
 		if cmd == "run" {
 			// Before anything is written there: only SYSTEM and Administrators
 			// may access the data dir (see agent.SecureDataDir).
-			removed, dirErr = agent.SecureDataDir(*dataDir)
+			removed, dirErr = agent.SecureDataDir(*dataDir, true)
 		}
 		if cmd == "run" && dirErr == nil {
 			// The service has no console: also log to <data dir>\logs\agent.log.
@@ -113,8 +116,8 @@ func main() {
 				log.Warn("can't open the log file; logging to stderr only", "err", lerr)
 			}
 		}
-		for _, p := range removed {
-			log.Warn("removed a link from the data directory", "path", p)
+		for _, e := range removed {
+			log.Warn("removed from the data directory", "path", e.Path, "reason", e.Why)
 		}
 		if cmd == "install" {
 			err = installService(*dataDir)
@@ -130,6 +133,16 @@ func main() {
 	if err != nil {
 		fatalf("%v", err)
 	}
+}
+
+// prepareDataDir moves aside a data dir the agent didn't create before an
+// enrollment (see agent.PrepareDataDir) and tells where it went.
+func prepareDataDir(dataDir string) error {
+	aside, why, err := agent.PrepareDataDir(dataDir)
+	if aside != "" {
+		fmt.Printf("Moved %s aside to %s because %s. The agent starts with a new folder; check the old one and delete it.\n\n", dataDir, aside, why)
+	}
+	return err
 }
 
 func fatalf(format string, args ...any) {

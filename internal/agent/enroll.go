@@ -31,7 +31,11 @@ func Enroll(ctx context.Context, dir, token string) (*Config, error) {
 // EnrollWith enrolls with a parsed token. clientName is the name asked for
 // with a setup token (ignored by one-time codes; empty = the hostname).
 func EnrollWith(ctx context.Context, dir string, t *api.EnrollmentToken, clientName string) (*Config, error) {
-	if _, err := SecureDataDir(dir); err != nil {
+	// Callers that tell the admin about a moved data dir did this already.
+	if _, _, err := PrepareDataDir(dir); err != nil {
+		return nil, err
+	}
+	if _, err := SecureDataDir(dir, false); err != nil {
 		return nil, err
 	}
 	hostname, _ := os.Hostname()

@@ -658,10 +658,24 @@ sequenceDiagram
   and create files in them, so enrollment, setup and every service start apply a protected
   DACL instead: owner Administrators, `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`. Everything inside
   gets the same owner and inherited ACEs, so explicit grants a user added are dropped. The
-  agent refuses a data directory that is a junction or symlink, and deletes reparse points and
-  hard-linked files inside it without following them. The walk uses `SetKernelObjectSecurity`
-  on handles opened with `FILE_FLAG_OPEN_REPARSE_POINT`, because `SetSecurityInfo` on a
-  directory propagates inheritance through links. On Linux the directory is 0700.
+  walk uses `SetKernelObjectSecurity` on handles opened with `FILE_FLAG_OPEN_REPARSE_POINT`,
+  because `SetSecurityInfo` on a directory propagates inheritance through links. On Linux the
+  directory is 0700.
+  Windows checks access when a handle is opened, so a user who opened a file or the folder
+  before keeps that access after the DACL changes. Standard users can't make SYSTEM or
+  Administrators the owner of what they create, so ownership tells planted entries apart:
+  * Inside the directory, entries owned by anyone else are deleted, and so are reparse points
+    and hard-linked files (never followed). At service start, leftover `*.tmp` files go too.
+  * A data directory that is a link or that a user owns is refused: its creator can keep a
+    handle that may change its DACL. Enrollment and setup move it, or one that holds files but
+    no `agent.json`, aside to `proxbackup.untrusted-<time>` (the handles stay with the moved
+    folder) and create a new one. Windows can't move a folder while a file in it is open, so
+    enrollment stops until that program exits. The service refuses to start from such a
+    directory.
+  * Files are written under a new random name created with `CREATE_NEW` and then renamed into
+    place, so no existing file, and no handle on one, ever receives a secret. The agent reads
+    them with `FILE_SHARE_READ` only, so a file another program has open for writing is refused,
+    not trusted.
 * **Credential rotation.** Agents up to 0.2.14 left the data directory readable by all users,
   so the console marks every Windows client whose agent polls without the `data-dir-acl`
   feature (and, on upgrade, every existing Windows client) as *credentials exposed*. An admin

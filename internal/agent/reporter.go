@@ -187,7 +187,7 @@ func (s *spool) drain(ctx context.Context, r *Runner) {
 			continue
 		}
 		p := filepath.Join(s.dir, de.Name())
-		b, err := os.ReadFile(p)
+		b, err := readSecret(p)
 		var e spoolEntry
 		if err != nil || json.Unmarshal(b, &e) != nil {
 			os.Remove(p)

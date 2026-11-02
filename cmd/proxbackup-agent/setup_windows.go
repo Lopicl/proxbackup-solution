@@ -66,7 +66,7 @@ func installService(dataDir string) error {
 // one already set up that way is left as it is. If anything fails after the
 // service was stopped, it is started again as it was.
 func installAgent(dataDir string) (retErr error) {
-	if _, err := agent.SecureDataDir(dataDir); err != nil {
+	if _, err := agent.SecureDataDir(dataDir, false); err != nil {
 		return err
 	}
 	src, err := os.Executable()

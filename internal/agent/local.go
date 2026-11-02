@@ -53,10 +53,10 @@ type restoreSession struct {
 
 func (r *Runner) loadLocal() {
 	r.local.sessions = map[string]*restoreSession{}
-	if b, err := os.ReadFile(filepath.Join(r.cfg.dir, historyFile)); err == nil {
+	if b, err := readSecret(filepath.Join(r.cfg.dir, historyFile)); err == nil {
 		json.Unmarshal(b, &r.local.history)
 	}
-	if b, err := os.ReadFile(filepath.Join(r.cfg.dir, pauseFile)); err == nil {
+	if b, err := readSecret(filepath.Join(r.cfg.dir, pauseFile)); err == nil {
 		json.Unmarshal(b, &r.local.pause)
 	}
 }

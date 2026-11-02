@@ -54,7 +54,7 @@ func (c *Config) path(name string) string { return filepath.Join(c.dir, name) }
 
 // LoadConfig reads the agent configuration from dir.
 func LoadConfig(dir string) (*Config, error) {
-	b, err := os.ReadFile(filepath.Join(dir, "agent.json"))
+	b, err := readSecret(filepath.Join(dir, "agent.json"))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, errors.New("agent is not enrolled (run: proxbackup-agent enroll <token>)")
@@ -73,15 +73,29 @@ func (c *Config) save() error {
 	return writeSecret(c.path("agent.json"), b)
 }
 
+// writeSecret replaces p with a new file holding data. The data goes into a
+// file created under a random name, never into one that already exists: on
+// Windows, a handle a user opened on a file before the data dir was secured
+// keeps its access, and writing into that file would hand them the secret.
 func writeSecret(p string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), p)
+	}
+	if err != nil {
+		os.Remove(f.Name())
+	}
+	return err
 }
 
 // httpClient returns the mTLS client for the management server.
@@ -96,11 +110,19 @@ func (c *Config) httpClient() (*http.Client, error) {
 // TLSConfig returns the mTLS client configuration for the management server.
 func (c *Config) TLSConfig() (*tls.Config, error) {
 	finishCertRenewal(c)
-	cert, err := tls.LoadX509KeyPair(c.path("client.pem"), c.path("client.key"))
+	certPEM, err := readSecret(c.path("client.pem"))
 	if err != nil {
 		return nil, fmt.Errorf("load client certificate: %w", err)
 	}
-	caPEM, err := os.ReadFile(c.path("ca.pem"))
+	keyPEM, err := readSecret(c.path("client.key"))
+	if err != nil {
+		return nil, fmt.Errorf("load client certificate: %w", err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load client certificate: %w", err)
+	}
+	caPEM, err := readSecret(c.path("ca.pem"))
 	if err != nil {
 		return nil, err
 	}
