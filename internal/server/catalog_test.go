@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"proxbackup/pkg/pbs"
 	"proxbackup/pkg/pxar"
@@ -38,7 +39,8 @@ func testCatalogFile(t *testing.T) *os.File {
 func TestCatalogCache(t *testing.T) {
 	var cc catalogCache
 	var loads atomic.Int32
-	load := func(context.Context) (*os.File, error) {
+	req := catalogReq{client: 1, who: "user 1"}
+	load := func(context.Context, func(int64) error) (*os.File, error) {
 		loads.Add(1)
 		return testCatalogFile(t), nil
 	}
@@ -47,7 +49,7 @@ func TestCatalogCache(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r, err := cc.get(context.Background(), "a", load)
+			r, err := cc.get(context.Background(), "a", req, load)
 			if err != nil {
 				t.Error(err)
 				return
@@ -64,28 +66,156 @@ func TestCatalogCache(t *testing.T) {
 	}
 
 	// Failures aren't cached.
-	fail := func(context.Context) (*os.File, error) { return nil, errNoCatalog }
-	if _, err := cc.get(context.Background(), "b", fail); !errors.Is(err, errNoCatalog) {
+	fail := func(context.Context, func(int64) error) (*os.File, error) { return nil, errNoCatalog }
+	if _, err := cc.get(context.Background(), "b", req, fail); !errors.Is(err, errNoCatalog) {
 		t.Fatalf("err = %v", err)
 	}
-	if _, err := cc.get(context.Background(), "b", load); err != nil {
+	if _, err := cc.get(context.Background(), "b", req, load); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 
 	// A panic while loading fails the request instead of the process.
-	boom := func(context.Context) (*os.File, error) { panic("crafted catalog") }
-	if _, err := cc.get(context.Background(), "p", boom); err == nil || !strings.Contains(err.Error(), "crafted catalog") {
+	boom := func(context.Context, func(int64) error) (*os.File, error) { panic("crafted catalog") }
+	if _, err := cc.get(context.Background(), "p", req, boom); err == nil || !strings.Contains(err.Error(), "crafted catalog") {
 		t.Fatalf("panic: err = %v", err)
 	}
 
 	// The least recently used catalog goes once too many are open.
 	for i := range catalogMaxOpen + 2 {
-		if _, err := cc.get(context.Background(), string(rune('c'+i)), load); err != nil {
+		if _, err := cc.get(context.Background(), string(rune('c'+i)), req, load); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if len(cc.entries) > catalogMaxOpen {
 		t.Errorf("%d catalogs open", len(cc.entries))
+	}
+}
+
+// Requests for many snapshots, given up before their catalogs loaded, start
+// only a few loads; the others are refused until one ends.
+func TestCatalogCacheLoadLimits(t *testing.T) {
+	var cc catalogCache
+	release := make(chan struct{})
+	var running atomic.Int32
+	slow := func(ctx context.Context, _ func(int64) error) (*os.File, error) {
+		running.Add(1)
+		defer running.Add(-1)
+		<-release
+		return testCatalogFile(t), nil
+	}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	busy := 0
+	for i := range 40 {
+		_, err := cc.get(gone, fmt.Sprint("pc1-", i), catalogReq{client: 1, who: "pc 1"}, slow)
+		if errors.Is(err, errCatalogBusy) {
+			busy++
+		} else if !errors.Is(err, context.Canceled) {
+			t.Fatalf("get %d: %v", i, err)
+		}
+	}
+	if busy != 40-catalogMaxClientLoads {
+		t.Errorf("%d of 40 refused, want %d", busy, 40-catalogMaxClientLoads)
+	}
+	// Other clients share the global limit.
+	for i := range 10 {
+		cc.get(gone, fmt.Sprint("pc", i+2), catalogReq{client: int64(i + 2), who: fmt.Sprint("pc ", i+2)}, slow)
+	}
+	cc.mu.Lock()
+	n := len(cc.entries)
+	cc.mu.Unlock()
+	if n != catalogMaxLoads {
+		t.Errorf("%d loads started, want %d", n, catalogMaxLoads)
+	}
+	// A snapshot already loading is no new load.
+	if _, err := cc.get(gone, "pc1-0", catalogReq{client: 1, who: "pc 1"}, slow); !errors.Is(err, context.Canceled) {
+		t.Errorf("joining a load: %v", err)
+	}
+	close(release)
+	for running.Load() > 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := cc.get(context.Background(), "pc1-0", catalogReq{client: 1, who: "pc 1"}, slow); err != nil {
+		t.Errorf("after the loads: %v", err)
+	}
+	if _, err := cc.get(context.Background(), "pc1-new", catalogReq{client: 1, who: "pc 1"}, slow); err != nil {
+		t.Errorf("new load after the loads: %v", err)
+	}
+}
+
+// Each requester may start only so many loads; catalogs already loaded are free.
+func TestCatalogCacheLoadRate(t *testing.T) {
+	var cc catalogCache
+	load := func(context.Context, func(int64) error) (*os.File, error) { return testCatalogFile(t), nil }
+	me, other := catalogReq{client: 1, who: "pc 1"}, catalogReq{client: 1, who: "user 7"}
+	for i := range catalogLoadsBurst {
+		if _, err := cc.get(context.Background(), fmt.Sprint(i), me, load); err != nil {
+			t.Fatalf("load %d: %v", i, err)
+		}
+	}
+	if _, err := cc.get(context.Background(), "more", me, load); !errors.Is(err, errCatalogRate) {
+		t.Errorf("past the burst: %v", err)
+	}
+	if _, err := cc.get(context.Background(), fmt.Sprint(catalogLoadsBurst-1), me, load); err != nil {
+		t.Errorf("cached catalog: %v", err)
+	}
+	if _, err := cc.get(context.Background(), "more", other, load); err != nil {
+		t.Errorf("another requester: %v", err)
+	}
+}
+
+// The temp files of all catalogs stay under catalogMaxBytes: a load evicts
+// the least recently used catalogs, or fails if only loads hold the space.
+func TestCatalogCacheBytes(t *testing.T) {
+	var cc catalogCache
+	req := catalogReq{client: 1, who: "user 1"}
+	sized := func(n int64) catalogLoader {
+		return func(_ context.Context, charge func(int64) error) (*os.File, error) {
+			if err := charge(n); err != nil {
+				return nil, err
+			}
+			return testCatalogFile(t), nil
+		}
+	}
+	for _, k := range []string{"a", "b"} {
+		if _, err := cc.get(context.Background(), k, req, sized(catalogMaxBytes/2)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cc.get(context.Background(), "b", req, nil) // a is now the least recently used
+	if _, err := cc.get(context.Background(), "c", req, sized(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cc.entries["a"]; ok || cc.entries["b"] == nil || cc.bytes != catalogMaxBytes/2+1 {
+		t.Errorf("after c: a evicted %v, b kept %v, %d bytes", !ok, cc.entries["b"] != nil, cc.bytes)
+	}
+
+	// Space held by a load in progress isn't evicted.
+	release := make(chan struct{})
+	held := make(chan struct{})
+	hold := func(_ context.Context, charge func(int64) error) (*os.File, error) {
+		if err := charge(catalogMaxBytes - 10); err != nil {
+			return nil, err
+		}
+		close(held)
+		<-release
+		return testCatalogFile(t), nil
+	}
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	cc.get(gone, "big", req, hold)
+	<-held
+	if _, err := cc.get(context.Background(), "d", catalogReq{client: 2, who: "user 2"}, sized(100)); !errors.Is(err, errCatalogFull) {
+		t.Errorf("over the budget: %v", err)
+	}
+	close(release)
+	if _, err := cc.get(context.Background(), "big", req, nil); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if cc.bytes != catalogMaxBytes-10 || len(cc.entries) != 1 {
+		t.Errorf("%d bytes in %d catalogs", cc.bytes, len(cc.entries))
 	}
 }
 

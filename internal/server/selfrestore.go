@@ -6,6 +6,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -210,11 +212,21 @@ func (s *Server) handleSelfCatalog(w http.ResponseWriter, r *http.Request, rs *r
 				httpError(w, http.StatusForbidden, errors.New("you can only browse your own folder "+rs.Scope))
 				return
 			}
+		} else if !slices.ContainsFunc(slices.Collect(maps.Values(origins)), func(o string) bool {
+			within, ancestor := api.InScope(api.OriginPath(o, ""), rs.Scope)
+			return within || ancestor
+		}) {
+			// None of the snapshot's archives can hold the user's folder: the
+			// listing would be empty, so the catalog isn't downloaded.
+			writeJSON(w, []catalogEntry{})
+			return
 		}
 	}
-	list, code, err := s.catalogDir(r.Context(), c, q)
+	// All restore pages of a PC share one rate of catalog loads: the agent
+	// may open many.
+	list, code, err := s.catalogDir(r.Context(), c, fmt.Sprintf("pc %d", c.ID), q)
 	if err != nil {
-		httpError(w, code, err)
+		catalogError(w, code, err)
 		return
 	}
 	if rs.Scope != "" {

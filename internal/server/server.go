@@ -345,6 +345,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 		s.logins.prune(time.Now())
 		s.runRegs.prune(time.Now())
 		s.restores.prune(time.Now())
+		s.catalogs.prune(time.Now())
 		if time.Since(lastLogTrim) > 10*time.Minute {
 			lastLogTrim = time.Now()
 			if n, err := s.store.TrimClientLogs(ctx, maxClientLogBytes); err != nil {

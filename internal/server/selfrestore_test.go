@@ -120,6 +120,13 @@ func TestSelfRestore(t *testing.T) {
 		t.Fatalf("validateRestore kept the session: %+v %v", req, err)
 	}
 
+	// A snapshot none of whose archives can hold the user's folder lists as
+	// empty, without downloading its catalog.
+	w = call("GET", "/api/self-restore/catalog?backup_id=other&backup_time=1700000000&path=/", token, nil)
+	if w.Code != 200 || strings.TrimSpace(w.Body.String()) != "[]" || len(s.catalogs.entries) != 0 {
+		t.Fatalf("catalog of another backup: %d %s, %d catalogs", w.Code, w.Body, len(s.catalogs.entries))
+	}
+
 	// Expired sessions stop working.
 	s.store.db.Exec(`UPDATE restore_sessions SET expires=1`)
 	if w := call("GET", "/api/self-restore/runs", token, nil); w.Code != http.StatusUnauthorized {

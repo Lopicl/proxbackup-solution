@@ -263,6 +263,12 @@ read on every run.
   The console reads the catalog itself (`GET /api/clients/{id}/catalog`) with the target's
   PBS admin and, for encrypted snapshots, the escrowed client key. It downloads the catalog
   once into a temp file and keeps it while it is browsed (10 minutes idle, at most 8 open).
+  The temp files live on the PBS host's root file system, so loads are capped: 512 MiB per
+  catalog, 2 GiB for all of them (least recently used evicted first), 3 loads at once (2 per
+  client), and 20 new loads per requester (console user, or all restore pages of one PC) in
+  a burst, then 60 an hour. Beyond that the API answers 429 and the browser retries. A
+  scoped self-restore page skips the download when no archive of the snapshot can hold the
+  user's folder.
   "Original location" maps each archive back to its source through the client's current
   jobs (same naming as the agent: `api.SourceArchives`, `api.VolumeArchive`), so an archive
   whose source was removed from the job can only go to another folder. Snapshots without a

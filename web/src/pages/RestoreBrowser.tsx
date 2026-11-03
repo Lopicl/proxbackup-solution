@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { api, type CatalogEntry, type RestoreSpec, type Snapshot } from '../api'
+import { api, ApiError, type CatalogEntry, type RestoreSpec, type Snapshot } from '../api'
 import { bytes, dateTime, Empty, ErrorBox, Field, Link, Modal } from '../ui'
 
 /** Where the browser reads catalogs from and sends restores to. */
@@ -68,17 +68,27 @@ export function RestoreBrowser({
 
   useEffect(() => {
     let live = true
+    let retry: ReturnType<typeof setTimeout> | undefined
     setLoadError('')
-    backend.catalog(snap, '/' + dir).then(
-      (entries) => {
-        if (!live) return
-        setListing({ dir, entries })
-        if (dir === '') setOrigins(Object.fromEntries(entries.filter((e) => e.origin).map((e) => [e.name, e.origin!])))
-      },
-      (e: Error) => live && setLoadError(e.message),
-    )
+    const load = () =>
+      backend.catalog(snap, '/' + dir).then(
+        (entries) => {
+          if (!live) return
+          setLoadError('')
+          setListing({ dir, entries })
+          if (dir === '') setOrigins(Object.fromEntries(entries.filter((e) => e.origin).map((e) => [e.name, e.origin!])))
+        },
+        (e: Error) => {
+          if (!live) return
+          setLoadError(e.message)
+          // The console limits how many catalogs load at once: try again while the page is open.
+          if (e instanceof ApiError && e.status === 429) retry = setTimeout(load, 5000)
+        },
+      )
+    load()
     return () => {
       live = false
+      clearTimeout(retry)
     }
   }, [backend, snap, dir])
 

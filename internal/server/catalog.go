@@ -33,13 +33,36 @@ const (
 	catalogMaxOpen = 8
 	// catalogMaxSize caps the temp file of one catalog (about 15 million files).
 	catalogMaxSize = 512 << 20
+	// catalogMaxBytes caps the temp files of all catalogs, loaded or loading:
+	// they are on the PBS host's root file system (TMPDIR=/var/tmp).
+	catalogMaxBytes = 2 << 30
+	// At most this many catalogs load at once, of them catalogMaxClientLoads
+	// of one client. A load goes on after its request ended (up to
+	// catalogLoadTimeout), so without these limits one restore page could
+	// start one per snapshot.
+	catalogMaxLoads       = 3
+	catalogMaxClientLoads = 2
+	catalogLoadTimeout    = 5 * time.Minute
+	// Each requester (console user, or the restore pages of one PC) may
+	// start this many catalog loads per hour, in bursts of up to as many.
+	// Catalogs already loaded don't count.
+	catalogLoadsPerHour = 60
+	catalogLoadsBurst   = 20
 )
 
-var errNoCatalog = errors.New("this snapshot has no file catalog or .mpxar archive (it was taken by an older agent, or building the catalog failed)")
+var (
+	errNoCatalog   = errors.New("this snapshot has no file catalog or .mpxar archive (it was taken by an older agent, or building the catalog failed)")
+	errCatalogBusy = errors.New("other snapshot catalogs are still loading; try again in a moment")
+	errCatalogRate = errors.New("too many snapshot catalogs opened; try again in a few minutes")
+	errCatalogFull = errors.New("the snapshot catalogs being browsed fill the console's temporary space; try again later")
+)
 
 type catalogCache struct {
 	mu      sync.Mutex
 	entries map[string]*cachedCatalog
+	loading map[int64]int // loads in progress, per client
+	bytes   int64         // written to the entries' temp files
+	starts  rateLimiter[string]
 }
 
 type cachedCatalog struct {
@@ -48,6 +71,7 @@ type cachedCatalog struct {
 	r     *pbs.CatalogReader
 	err   error
 	used  time.Time
+	size  int64 // bytes taken from catalogMaxBytes
 }
 
 func (c *cachedCatalog) close() {
@@ -57,31 +81,59 @@ func (c *cachedCatalog) close() {
 	}
 }
 
+func (c *cachedCatalog) loaded() bool {
+	select {
+	case <-c.ready:
+		return c.err == nil
+	default:
+		return false
+	}
+}
+
+// catalogReq says who asks for a catalog, for the limits on loading one.
+type catalogReq struct {
+	client int64  // the snapshot's client
+	who    string // the requester, for catalogLoadsPerHour
+}
+
+// catalogLoader writes a catalog to a temp file, calling charge before each
+// write: an error from it ends the load.
+type catalogLoader func(ctx context.Context, charge func(n int64) error) (*os.File, error)
+
 // get returns the cached catalog for key, loading it with load on a miss.
 // Concurrent requests for the same snapshot share one download; failures
-// aren't cached.
-func (cc *catalogCache) get(ctx context.Context, key string, load func(context.Context) (*os.File, error)) (*pbs.CatalogReader, error) {
+// aren't cached. A miss beyond the limits on loads fails with
+// errCatalogBusy or errCatalogRate.
+func (cc *catalogCache) get(ctx context.Context, key string, req catalogReq, load catalogLoader) (*pbs.CatalogReader, error) {
 	cc.mu.Lock()
 	if cc.entries == nil {
-		cc.entries = map[string]*cachedCatalog{}
+		cc.entries, cc.loading = map[string]*cachedCatalog{}, map[int64]int{}
+		cc.starts = rateLimiter[string]{perHour: catalogLoadsPerHour, burst: catalogLoadsBurst}
 	}
 	cc.evictLocked(time.Now())
 	e, ok := cc.entries[key]
 	if !ok {
+		if err := cc.admitLocked(req); err != nil {
+			cc.mu.Unlock()
+			return nil, err
+		}
 		e = &cachedCatalog{ready: make(chan struct{}), used: time.Now()}
 		cc.entries[key] = e
+		cc.loading[req.client]++
 		go func() {
 			// Not tied to the request: a reload of the page shouldn't abort a download others wait for.
-			lctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			lctx, cancel := context.WithTimeout(context.Background(), catalogLoadTimeout)
 			defer cancel()
-			f, r, err := loadCatalog(lctx, load)
+			f, r, err := loadCatalog(lctx, func(ctx context.Context) (*os.File, error) {
+				return load(ctx, func(n int64) error { return cc.charge(e, n) })
+			})
 			cc.mu.Lock()
 			e.f, e.r, e.err = f, r, err
+			if cc.loading[req.client]--; cc.loading[req.client] <= 0 {
+				delete(cc.loading, req.client)
+			}
 			if err != nil {
-				e.close()
-				if cc.entries[key] == e {
-					delete(cc.entries, key)
-				}
+				cc.removeLocked(key, e)
 			}
 			cc.mu.Unlock()
 			close(e.ready)
@@ -95,6 +147,42 @@ func (cc *catalogCache) get(ctx context.Context, key string, load func(context.C
 		return nil, ctx.Err()
 	}
 	return e.r, e.err
+}
+
+// admitLocked checks the limits on starting a load for req. A busy refusal
+// doesn't take from the requester's rate.
+func (cc *catalogCache) admitLocked(req catalogReq) error {
+	n := 0
+	for _, k := range cc.loading {
+		n += k
+	}
+	if n >= catalogMaxLoads || cc.loading[req.client] >= catalogMaxClientLoads || len(cc.entries) >= catalogMaxOpen {
+		return errCatalogBusy
+	}
+	if !cc.starts.allow(req.who, time.Now()) {
+		return errCatalogRate
+	}
+	return nil
+}
+
+// charge takes n bytes of e's temp file from catalogMaxBytes, evicting the
+// least recently used catalogs to make room.
+func (cc *catalogCache) charge(e *cachedCatalog, n int64) error {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	for cc.bytes+n > catalogMaxBytes {
+		if !cc.evictOldestLocked() {
+			return errCatalogFull
+		}
+	}
+	cc.bytes += n
+	e.size += n
+	return nil
+}
+
+// prune drops full rate buckets.
+func (cc *catalogCache) prune(now time.Time) {
+	cc.starts.prune(now)
 }
 
 // loadCatalog runs load and opens the catalog it wrote. The catalog is data
@@ -116,34 +204,40 @@ func loadCatalog(ctx context.Context, load func(context.Context) (*os.File, erro
 	return f, r, err
 }
 
-// evictLocked drops idle catalogs and, above catalogMaxOpen, the least recently used.
+// evictLocked drops idle catalogs and, from catalogMaxOpen on, the least
+// recently used. Loads in progress count but stay.
 func (cc *catalogCache) evictLocked(now time.Time) {
-	loaded := func(e *cachedCatalog) bool {
-		select {
-		case <-e.ready:
-			return e.err == nil
-		default:
-			return false
-		}
-	}
 	for k, e := range cc.entries {
-		if loaded(e) && now.Sub(e.used) > catalogIdle {
-			e.close()
-			delete(cc.entries, k)
+		if e.loaded() && now.Sub(e.used) > catalogIdle {
+			cc.removeLocked(k, e)
 		}
 	}
-	for len(cc.entries) >= catalogMaxOpen {
-		var oldest string
-		for k, e := range cc.entries {
-			if loaded(e) && (oldest == "" || e.used.Before(cc.entries[oldest].used)) {
-				oldest = k
-			}
+	for len(cc.entries) >= catalogMaxOpen && cc.evictOldestLocked() {
+	}
+}
+
+// evictOldestLocked drops the least recently used loaded catalog, if any.
+func (cc *catalogCache) evictOldestLocked() bool {
+	var oldest string
+	for k, e := range cc.entries {
+		if e.loaded() && (oldest == "" || e.used.Before(cc.entries[oldest].used)) {
+			oldest = k
 		}
-		if oldest == "" {
-			return
-		}
-		cc.entries[oldest].close()
-		delete(cc.entries, oldest)
+	}
+	if oldest == "" {
+		return false
+	}
+	cc.removeLocked(oldest, cc.entries[oldest])
+	return true
+}
+
+// removeLocked deletes e's temp file and, if it still is key's, its entry.
+func (cc *catalogCache) removeLocked(key string, e *cachedCatalog) {
+	e.close()
+	cc.bytes -= e.size
+	e.size = 0
+	if cc.entries[key] == e {
+		delete(cc.entries, key)
 	}
 }
 
@@ -165,17 +259,33 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	out, code, err := s.catalogDir(r.Context(), c, r.URL.Query())
+	who := "console"
+	if u := sessionUser(r); u != nil {
+		who = fmt.Sprintf("user %d", u.ID)
+	}
+	out, code, err := s.catalogDir(r.Context(), c, who, r.URL.Query())
 	if err != nil {
-		httpError(w, code, err)
+		catalogError(w, code, err)
 		return
 	}
 	writeJSON(w, out)
 }
 
-// catalogDir lists the directory q["path"] of the snapshot q identifies. On
-// error it also returns an HTTP status.
-func (s *Server) catalogDir(ctx context.Context, c *Client, q url.Values) ([]catalogEntry, int, error) {
+// catalogError writes an error of catalogDir.
+func catalogError(w http.ResponseWriter, code int, err error) {
+	switch {
+	case errors.Is(err, errCatalogBusy):
+		w.Header().Set("Retry-After", "5")
+	case code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable:
+		w.Header().Set("Retry-After", "60")
+	}
+	httpError(w, code, err)
+}
+
+// catalogDir lists the directory q["path"] of the snapshot q identifies,
+// for the requester who (see catalogReq). On error it also returns an HTTP
+// status.
+func (s *Server) catalogDir(ctx context.Context, c *Client, who string, q url.Values) ([]catalogEntry, int, error) {
 	backupID, ns, dir := q.Get("backup_id"), q.Get("ns"), q.Get("path")
 	backupTime, _ := strconv.ParseInt(q.Get("backup_time"), 10, 64)
 	if backupID == "" || backupTime == 0 {
@@ -192,11 +302,17 @@ func (s *Server) catalogDir(ctx context.Context, c *Client, q url.Values) ([]cat
 	}
 	ref := pbs.SnapshotRef{Store: t.Datastore, NS: ns, Type: "host", ID: backupID, Time: backupTime}
 	key := fmt.Sprintf("%d|%s|%s|%s|%d", t.ID, t.Datastore, ns, backupID, backupTime)
-	cat, err := s.catalogs.get(ctx, key, func(ctx context.Context) (*os.File, error) { return s.downloadCatalog(ctx, t, c, ref) })
-	if errors.Is(err, errNoCatalog) {
+	cat, err := s.catalogs.get(ctx, key, catalogReq{client: c.ID, who: who}, func(ctx context.Context, charge func(int64) error) (*os.File, error) {
+		return s.downloadCatalog(ctx, t, c, ref, charge)
+	})
+	switch {
+	case errors.Is(err, errNoCatalog):
 		return nil, 404, err
-	}
-	if err != nil {
+	case errors.Is(err, errCatalogBusy), errors.Is(err, errCatalogRate):
+		return nil, http.StatusTooManyRequests, err
+	case errors.Is(err, errCatalogFull):
+		return nil, http.StatusServiceUnavailable, err
+	case err != nil:
 		return nil, 502, err
 	}
 	list, err := cat.ListDir(dir)
@@ -225,8 +341,9 @@ func (s *Server) catalogDir(ctx context.Context, c *Client, q url.Values) ([]cat
 	return out, 0, nil
 }
 
-// downloadCatalog copies ref's catalog into a temp file.
-func (s *Server) downloadCatalog(ctx context.Context, t *Target, c *Client, ref pbs.SnapshotRef) (*os.File, error) {
+// downloadCatalog copies ref's catalog into a temp file, calling charge
+// before each write.
+func (s *Server) downloadCatalog(ctx context.Context, t *Target, c *Client, ref pbs.SnapshotRef, charge func(int64) error) (*os.File, error) {
 	pc, err := s.adminClient(t)
 	if err != nil {
 		return nil, err
@@ -294,7 +411,7 @@ func (s *Server) downloadCatalog(ctx context.Context, t *Target, c *Client, ref 
 			os.Remove(f.Name())
 		}
 	}()
-	w := &limitedWriter{w: f, n: catalogMaxSize}
+	w := &limitedWriter{w: f, n: catalogMaxSize, charge: charge}
 	if i >= 0 {
 		err = copyArchive(ctx, rs, w, meta[0])
 	} else {
@@ -309,15 +426,21 @@ func (s *Server) downloadCatalog(ctx context.Context, t *Target, c *Client, ref 
 	return f, nil
 }
 
-// limitedWriter fails writes past n bytes.
+// limitedWriter fails writes past n bytes, or refused by charge.
 type limitedWriter struct {
-	w io.Writer
-	n int64
+	w      io.Writer
+	n      int64
+	charge func(int64) error
 }
 
 func (l *limitedWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > l.n {
 		return 0, fmt.Errorf("catalog larger than %d MiB", catalogMaxSize>>20)
+	}
+	if l.charge != nil {
+		if err := l.charge(int64(len(p))); err != nil {
+			return 0, err
+		}
 	}
 	l.n -= int64(len(p))
 	return l.w.Write(p)

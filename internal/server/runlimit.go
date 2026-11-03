@@ -23,31 +23,33 @@ const (
 	restoreSessionsBurst   = 10
 )
 
-// clientLimiter is a token bucket per client: burst tokens, refilled at
-// perHour.
-type clientLimiter struct {
+// rateLimiter is a token bucket per key: burst tokens, refilled at perHour.
+type rateLimiter[K comparable] struct {
 	perHour, burst float64
 
 	mu      sync.Mutex
-	buckets map[int64]*runBucket
+	buckets map[K]*runBucket
 }
+
+// clientLimiter is a token bucket per client.
+type clientLimiter = rateLimiter[int64]
 
 type runBucket struct {
 	tokens float64
 	at     time.Time
 }
 
-// allow takes a token from client's bucket if it has one.
-func (l *clientLimiter) allow(client int64, now time.Time) bool {
+// allow takes a token from key's bucket if it has one.
+func (l *rateLimiter[K]) allow(key K, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.buckets == nil {
-		l.buckets = map[int64]*runBucket{}
+		l.buckets = map[K]*runBucket{}
 	}
-	b := l.buckets[client]
+	b := l.buckets[key]
 	if b == nil {
 		b = &runBucket{tokens: l.burst, at: now}
-		l.buckets[client] = b
+		l.buckets[key] = b
 	}
 	b.tokens = min(l.burst, b.tokens+now.Sub(b.at).Hours()*l.perHour)
 	b.at = now
@@ -59,7 +61,7 @@ func (l *clientLimiter) allow(client int64, now time.Time) bool {
 }
 
 // prune drops full buckets, which hold nothing back.
-func (l *clientLimiter) prune(now time.Time) {
+func (l *rateLimiter[K]) prune(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for k, b := range l.buckets {
