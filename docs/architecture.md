@@ -323,16 +323,27 @@ read on every run.
   user. The PBS CLI takes a password only as a command argument, which local users can read in
   `ps`, so the package sets a throwaway password that way, then signs in as the user over the
   loopback API (pinned to the PBS certificate's key, every secret read from 0600 files) and
-  changes it to the real one. Without curl or the API, the throwaway password is kept. Purge
-  removes the user and its ACLs (and its tokens' ACLs) only once it owns no tokens. With `-local-pbs` the admin adds local datastores without
+  changes it to the real one. Without curl or the API, the throwaway password is kept.
+  Accepted residual risk: the throwaway password shows in `ps` for the moment until the API
+  change, and a ticket obtained with it in that window stays valid for 2 hours (PBS doesn't
+  revoke tickets on a password change). Exploiting that needs a local user racing the install.
+  Disabling the user meanwhile wouldn't help: it couldn't sign in to change its password, and
+  disabling revokes no tickets. Purge removes the user and its ACLs (and its tokens' ACLs) only
+  once it owns no tokens. With `-local-pbs` the admin adds local datastores without
   credentials, and the console re-reads the PBS certificate fingerprint over loopback hourly (so
-  ACME renewals need no reconfiguration). PBS accounts can't sign in to the console: it has its
-  own users (below) on every install.
+  ACME renewals need no reconfiguration). Port 8007 isn't privileged, so while
+  proxmox-backup-proxy is down any local user could listen there and collect the console's
+  password: the console trusts the loopback certificate only once the root grants helper (below)
+  reports the same fingerprint for `/etc/proxmox-backup/proxy.pem` (`root:backup 0640`, which
+  the console can't read). A different certificate makes it ask the helper again (at most every
+  10 s) and refuse to sign in unless the helper confirms it. PBS accounts can't sign in to the
+  console: it has its own users (below) on every install.
 * **Rights on the local PBS** (`internal/server/pbsgrants.go`). The user gets DatastoreAdmin on
   `/datastore/<store>/<root ns>` of each local target and DatastoreAudit, not propagated, on
-  `/datastore/<store>` (datastore status and RRD for the dashboard; it lists the snapshots of
-  the datastore's root namespace, but can't change or read them). Other namespaces, datastore
-  config and maintenance mode stay out of reach (checked on PBS 4.2). Creating a root namespace
+  `/datastore/<store>` (datastore status and RRD for the dashboard). That also lets it list the
+  snapshots of the datastore's root namespace: VM and container ids, backup times, sizes and
+  notes. It can't change them or read their contents. Other namespaces, datastore config and
+  maintenance mode stay out of reach (checked on PBS 4.2). Creating a root namespace
   needs Datastore.Modify on the datastore, and the user can't set its own ACLs, so the console
   writes the namespaces it needs (root namespaces, and client namespaces outside them from
   before a root namespace change) to `pbs-grants/request`. `proxbackup-server-grants.path` then
@@ -341,8 +352,13 @@ read on every run.
   grants a namespace only if it doesn't exist yet (it creates it, empty) or the user already
   holds Admin, DatastoreAdmin, DatastorePowerUser or DatastoreBackup on it or a parent (only a
   root admin can set those: older packages' `/datastore` or `<store>/pcs` grants, or a manual
-  `acl update`). It removes the user's other ACLs (tokens' ones stay), refuses `root@pam`, and
-  writes `result.json` with refusals and the datastore names for the target form. Saving a
+  `acl update`). It creates namespaces only as a new top-level tree or below a namespace the
+  user manages, never inside others (e.g. below VM namespaces), and at most 100 per request.
+  PBS's create call also succeeds for an existing namespace, so "new" rests on the namespace
+  listing alone: before granting one it created, the helper checks that it holds no backup
+  groups. It removes the user's other ACLs (tokens' ones stay), refuses `root@pam`, and writes
+  `result.json` with refusals, the datastore names for the target form, and the fingerprint of
+  the PBS certificate. Saving a
   local target waits for the answer and for PBS to apply the ACL (`access/permissions`), so
   enrollment works right away; startup and the hourly sync ask again when rights are missing or
   no longer needed. On upgrade the console drops, once, the local targets older consoles

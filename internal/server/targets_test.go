@@ -86,6 +86,7 @@ func TestTargetSecretsStayWithTheirPBS(t *testing.T) {
 	const localID = "proxbackup@pbs"
 	s.cfg.LocalPBS = &LocalPBS{APIAddr: localHost, PublicHost: localHost, AuthID: localID, SecretFile: secretFile}
 	root := newFakePBSRoot("ds")
+	root.proxyFP = localFP
 	s.grantHelper = func() {
 		if err := grantLocalPBS(ctx, s.cfg.DataDir, localID, root, s.log); err != nil {
 			t.Errorf("grant helper: %v", err)
@@ -216,6 +217,7 @@ func TestLocalTargetsLeaveRootToken(t *testing.T) {
 	secretFile := filepath.Join(t.TempDir(), "pbs-password")
 	os.WriteFile(secretFile, []byte("local-password\n"), 0o600)
 	s.cfg.LocalPBS = &LocalPBS{APIAddr: localHost, PublicHost: localHost, AuthID: "proxbackup@pbs", SecretFile: secretFile}
+	localHelper(t, s, localFP)
 
 	// Saved by an older console: no local column yet.
 	if _, err := s.store.db.Exec(`ALTER TABLE targets DROP COLUMN local`); err != nil {
@@ -253,6 +255,70 @@ func TestLocalTargetsLeaveRootToken(t *testing.T) {
 	}
 	if tg := got["remote"]; tg.Local || tg.Host != "remote.example:8007" || len(tg.adminSecretEnc) != 0 {
 		t.Fatalf("remote target %+v", tg)
+	}
+}
+
+// localHelper runs the root helper on each request, on a PBS with datastore
+// "ds" whose proxy.pem has fingerprint proxyFP.
+func localHelper(t *testing.T, s *Server, proxyFP string) *fakePBSRoot {
+	root := newFakePBSRoot("ds")
+	root.proxyFP = proxyFP
+	s.grantHelper = func() {
+		if err := grantLocalPBS(context.Background(), s.cfg.DataDir, s.cfg.LocalPBS.AuthID, root, s.log); err != nil {
+			t.Errorf("grant helper: %v", err)
+		}
+	}
+	return root
+}
+
+// TestLocalPBSCertificatePinned checks that the console sends its PBS
+// password only to the certificate in PBS's proxy.pem, as the root helper
+// reports it, and follows a renewal.
+func TestLocalPBSCertificatePinned(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	real, realFP, realAuths := fakePBS(t)
+	impostor, _, impostorAuths := fakePBS(t)
+	renewed, renewedFP, renewedAuths := fakePBS(t)
+	secretFile := filepath.Join(t.TempDir(), "pbs-password")
+	os.WriteFile(secretFile, []byte("local-password\n"), 0o600)
+	l := &LocalPBS{APIAddr: real.Listener.Addr().String(), PublicHost: "pbs.example:8007", AuthID: "proxbackup@pbs", SecretFile: secretFile}
+	s.cfg.LocalPBS = l
+	root := localHelper(t, s, realFP)
+	s.proxyCertEvery = 0
+	login := func() error {
+		pc, _, _, err := s.localClient(ctx)
+		if err == nil {
+			_, err = pc.Version(ctx)
+		}
+		return err
+	}
+
+	if err := login(); err != nil {
+		t.Fatalf("local PBS: %v", err)
+	}
+	if a := realAuths(); len(a) != 1 || a[0] != "password:local-password" {
+		t.Fatalf("local PBS received %q", a)
+	}
+	// Something else listening on the port while PBS is down gets nothing.
+	l.APIAddr = impostor.Listener.Addr().String()
+	if err := login(); err == nil || !strings.Contains(err.Error(), "isn't the one in") {
+		t.Fatalf("impostor: %v", err)
+	}
+	if a := impostorAuths(); len(a) != 0 {
+		t.Fatalf("impostor received %q", a)
+	}
+	// A renewed certificate is trusted once the helper reports it.
+	root.proxyFP = renewedFP
+	l.APIAddr = renewed.Listener.Addr().String()
+	if err := login(); err != nil {
+		t.Fatalf("renewed certificate: %v", err)
+	}
+	if a := renewedAuths(); len(a) != 1 {
+		t.Fatalf("renewed PBS received %q", a)
+	}
+	if fp, err := s.localFingerprint(ctx); err != nil || fp != renewedFP {
+		t.Fatalf("fingerprint %q %v", fp, err)
 	}
 }
 

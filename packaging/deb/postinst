@@ -25,6 +25,9 @@ PORT=8077
 # a throwaway password, and the user then changes it to the real one over
 # the local API, with every secret read from 0600 files (printf is a shell
 # builtin). If the API can't be reached, the throwaway password is kept.
+# Accepted residual (docs/architecture.md): a local user racing the install
+# can read the throwaway one in ps, and a ticket obtained with it before the
+# change stays valid for 2 hours.
 new_password() {
 	tmp=$(mktemp -d)
 	pw1=$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')

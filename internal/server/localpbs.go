@@ -57,10 +57,9 @@ func (l *LocalPBS) secret() (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-// fingerprint returns the SHA-256 fingerprint of the certificate the local PBS
-// presents. Reading it over loopback is what the PBS host itself would trust,
-// and it follows certificate renewals (e.g. ACME) without reconfiguration.
-func (l *LocalPBS) fingerprint(ctx context.Context) (string, error) {
+// presentedFingerprint returns the SHA-256 fingerprint of the certificate
+// whatever listens on the local PBS API presents (see localFingerprint).
+func (l *LocalPBS) presentedFingerprint(ctx context.Context) (string, error) {
 	d := tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}, NetDialer: &net.Dialer{Timeout: 5 * time.Second}}
 	c, err := d.DialContext(ctx, "tcp", l.APIAddr)
 	if err != nil {
@@ -74,12 +73,80 @@ func (l *LocalPBS) fingerprint(ctx context.Context) (string, error) {
 	return pbs.FormatFingerprint(sha256.Sum256(certs[0].Raw)), nil
 }
 
-func (l *LocalPBS) client(ctx context.Context) (*pbs.Client, string, string, error) {
+// proxyCertWait is how long the console waits for the root helper to report
+// the PBS certificate.
+const proxyCertWait = 30 * time.Second
+
+// localFingerprint returns the fingerprint of the local PBS's certificate. It
+// is read over loopback, so it follows renewals (e.g. ACME), but only trusted
+// once the root helper reports the same one for /etc/proxmox-backup/proxy.pem:
+// port 8007 isn't privileged, so while proxmox-backup-proxy is down (restart,
+// upgrade) any local user could listen there and collect the console's
+// password. A new certificate makes the console ask the helper again.
+func (s *Server) localFingerprint(ctx context.Context) (string, error) {
+	fp, err := s.cfg.LocalPBS.presentedFingerprint(ctx)
+	if err != nil {
+		return "", err
+	}
+	confirmed := func(res *grantsResultFile) bool {
+		return res != nil && res.ProxyFingerprint != "" && pbs.NormalizeFingerprint(res.ProxyFingerprint) == pbs.NormalizeFingerprint(fp)
+	}
+	if confirmed(s.grantsResult()) {
+		return fp, nil
+	}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, proxyCertWait)
+	defer cancel()
+	for {
+		id, at, err := s.askProxyCert(ctx)
+		if err != nil {
+			return "", err
+		}
+		res := s.grantsResult()
+		if confirmed(res) {
+			return fp, nil
+		}
+		// Only an answer to a request made since this certificate showed up counts.
+		if res != nil && res.ID == id && !at.Before(start) {
+			s.log.Warn("the certificate on the local PBS API isn't the PBS's own: not signing in", "addr", s.cfg.LocalPBS.APIAddr,
+				"presented", fp, "proxy_pem", res.ProxyFingerprint)
+			return "", fmt.Errorf("local PBS: the certificate on %s isn't the one in %s", s.cfg.LocalPBS.APIAddr, pbsProxyCert)
+		}
+		select {
+		case <-ctx.Done():
+			return "", errors.New("local PBS: the console's root helper didn't confirm the PBS certificate (see journalctl -u proxbackup-server-grants)")
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// askProxyCert has the root helper run again (it reports the certificate on
+// every run), at most every proxyCertEvery, and returns the last request's
+// id and time.
+func (s *Server) askProxyCert(ctx context.Context) (string, time.Time, error) {
+	s.proxyCertMu.Lock()
+	defer s.proxyCertMu.Unlock()
+	if time.Since(s.proxyCertAsked) >= s.proxyCertEvery {
+		want, err := s.neededGrants(ctx, nil)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		if s.proxyCertAskID, err = s.requestGrants(want); err != nil {
+			return "", time.Time{}, err
+		}
+		s.proxyCertAsked = time.Now()
+	}
+	return s.proxyCertAskID, s.proxyCertAsked, nil
+}
+
+// localClient signs in to the local PBS as the console's PBS user.
+func (s *Server) localClient(ctx context.Context) (*pbs.Client, string, string, error) {
+	l := s.cfg.LocalPBS
 	secret, err := l.secret()
 	if err != nil {
 		return nil, "", "", err
 	}
-	fp, err := l.fingerprint(ctx)
+	fp, err := s.localFingerprint(ctx)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -112,7 +179,7 @@ func (s *Server) syncLocalTargets(ctx context.Context) error {
 	l := s.cfg.LocalPBS
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	pc, fp, secret, err := l.client(ctx)
+	pc, fp, secret, err := s.localClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -186,7 +253,7 @@ func (s *Server) wakeTargetClients(ctx context.Context, targetID int64) {
 // local PBS user, so the target form can leave it empty.
 func (s *Server) localFingerprintFor(ctx context.Context, authID, host string) string {
 	if l := s.cfg.LocalPBS; l != nil && authID == l.AuthID && l.isLocalHost(host) {
-		fp, _ := l.fingerprint(ctx)
+		fp, _ := s.localFingerprint(ctx)
 		return fp
 	}
 	return ""
@@ -201,7 +268,7 @@ func (s *Server) localSecretFor(ctx context.Context, authID, host, fp string) st
 	if l == nil || authID != l.AuthID || !l.isLocalHost(host) {
 		return ""
 	}
-	local, err := l.fingerprint(ctx)
+	local, err := s.localFingerprint(ctx)
 	if err != nil || pbs.NormalizeFingerprint(fp) != pbs.NormalizeFingerprint(local) {
 		return ""
 	}

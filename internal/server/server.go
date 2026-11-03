@@ -74,6 +74,11 @@ type Server struct {
 
 	grantTimeout time.Duration // how long saving a local target waits for its PBS rights (pbsgrants.go)
 	grantHelper  func()        // tests: runs the root helper on each request
+
+	proxyCertMu    sync.Mutex
+	proxyCertEvery time.Duration // how often the root helper is asked for the PBS certificate at most (localpbs.go)
+	proxyCertAsked time.Time
+	proxyCertAskID string
 }
 
 // New opens the data directory and prepares the server.
@@ -95,7 +100,7 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	} else if n > 0 {
 		log.Info("re-sealed stored secrets, bound to their rows", "count", n)
 	}
-	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{}, grantTimeout: time.Minute,
+	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{}, grantTimeout: time.Minute, proxyCertEvery: 10 * time.Second,
 		rotateFailed: map[int64]time.Time{}, replacedAlerted: map[int64]time.Time{},
 		runRegs:  clientLimiter{perHour: runRegsPerHour, burst: runRegsBurst},
 		restores: clientLimiter{perHour: restoreSessionsPerHour, burst: restoreSessionsBurst}}

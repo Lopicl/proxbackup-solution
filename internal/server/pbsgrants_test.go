@@ -4,22 +4,35 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"proxbackup/pkg/pbs"
 )
 
 // fakePBSRoot is the PBS as the root helper sees it.
 type fakePBSRoot struct {
-	ns   map[string]map[string]bool // datastore → namespaces ("" is the root)
-	acls []pbsACL
+	ns      map[string]map[string]bool // datastore → namespaces ("" is the root)
+	hidden  map[string]map[string]bool // namespaces the listing misses
+	groups  map[string]bool            // "<datastore>/<ns>" holding backups
+	acls    []pbsACL
+	proxyFP string
 }
 
 func newFakePBSRoot(stores ...string) *fakePBSRoot {
@@ -49,11 +62,22 @@ func (f *fakePBSRoot) Namespaces(_ context.Context, store string) ([]string, err
 }
 
 func (f *fakePBSRoot) CreateNamespace(_ context.Context, store, parent, name string) error {
-	if !f.ns[store][parent] {
+	if !f.ns[store][parent] && !f.hidden[store][parent] {
 		return errors.New("no parent namespace")
 	}
 	f.ns[store][strings.TrimPrefix(parent+"/"+name, "/")] = true
 	return nil
+}
+
+func (f *fakePBSRoot) HasGroups(_ context.Context, store, ns string) (bool, error) {
+	return f.groups[store+"/"+ns], nil
+}
+
+func (f *fakePBSRoot) ProxyFingerprint() (string, error) {
+	if f.proxyFP == "" {
+		return "", errors.New("no certificate")
+	}
+	return f.proxyFP, nil
 }
 
 func (f *fakePBSRoot) ACLs(context.Context) ([]pbsACL, error) { return slices.Clone(f.acls), nil }
@@ -171,6 +195,62 @@ func TestGrantsUpgrade(t *testing.T) {
 	}
 	if !root.has(pbsACL{"/datastore/pcstore/old/pc1", true, "DatastoreAdmin", pbsUser}) || root.has(pbsACL{"/datastore/pcstore/old", true, "DatastoreAdmin", pbsUser}) {
 		t.Fatalf("ACLs %+v", root.acls)
+	}
+}
+
+// TestGrantsNoNamespacesInOthers checks that the helper creates namespaces
+// only as new top-level trees or below ones the user manages, and never hands
+// over one that holds backups although PBS didn't list it.
+func TestGrantsNoNamespacesInOthers(t *testing.T) {
+	root := newFakePBSRoot("store")
+	root.ns["store"]["pve"], root.ns["store"]["pcs"] = true, true
+	root.acls = []pbsACL{{"/datastore/store/pcs", false, "DatastoreAdmin", pbsUser}} // not propagated
+	root.hidden = map[string]map[string]bool{"store": {"lost": true}}
+	root.groups = map[string]bool{"store/lost": true}
+	root.proxyFP = "aa:bb"
+	res, err := runGrants(t, root, pbsUser, grantNS{"store", "pve/pcs"}, grantNS{"store", "pcs/sub"}, grantNS{"store", "lost"}, grantNS{"store", "new/pcs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Refused["/datastore/store/pve/pcs"], "inside namespace pve") || root.ns["store"]["pve/pcs"] {
+		t.Fatalf("namespace inside another one: %v", res.Refused)
+	}
+	if _, ok := res.Refused["/datastore/store/pcs/sub"]; ok || !root.ns["store"]["pcs/sub"] {
+		t.Fatalf("namespace below a managed one: %v", res.Refused)
+	}
+	if !strings.Contains(res.Refused["/datastore/store/lost"], "holds backups") || root.has(pbsACL{"/datastore/store/lost", true, "DatastoreAdmin", pbsUser}) {
+		t.Fatalf("unlisted namespace with backups: %v %+v", res.Refused, root.acls)
+	}
+	if !root.has(pbsACL{"/datastore/store/new/pcs", true, "DatastoreAdmin", pbsUser}) || len(res.Refused) != 2 {
+		t.Fatalf("new top-level namespace: %v %+v", res.Refused, root.acls)
+	}
+	if res.ProxyFingerprint != "aa:bb" {
+		t.Fatalf("proxy fingerprint %q", res.ProxyFingerprint)
+	}
+
+	// One request creates a bounded number of namespaces.
+	root = newFakePBSRoot("store")
+	var many []grantNS
+	for i := range maxNewNamespaces + 5 {
+		many = append(many, grantNS{"store", fmt.Sprintf("n%03d", i)})
+	}
+	res, err = runGrants(t, root, pbsUser, many...)
+	if err != nil || len(res.Refused) != 5 || len(root.ns["store"]) != maxNewNamespaces+1 {
+		t.Fatalf("%v: %d refused, %d namespaces", err, len(res.Refused), len(root.ns["store"]))
+	}
+}
+
+func TestCertFileFingerprint(t *testing.T) {
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotAfter: time.Now().Add(time.Hour)}
+	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	kb, _ := x509.MarshalECPrivateKey(key)
+	path := filepath.Join(t.TempDir(), "proxy.pem")
+	os.WriteFile(path, append(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...), 0o600)
+	got, err := certFileFingerprint(path)
+	if want := pbs.FormatFingerprint(sha256.Sum256(der)); err != nil || got != want {
+		t.Fatalf("got %q %v, want %q", got, err, want)
 	}
 }
 

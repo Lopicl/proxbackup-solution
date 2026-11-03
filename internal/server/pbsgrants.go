@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,8 +29,10 @@ import (
 // The console's PBS user has rights only on the namespaces it backs PCs up
 // to: DatastoreAdmin on each root namespace (e.g. /datastore/<store>/pcs) and
 // Datastore.Audit, not propagated, on the datastore itself for its usage
-// figures. Other namespaces, and the VM and container backups in them, stay
-// out of its reach, and it can't reconfigure a datastore.
+// figures. Other namespaces stay out of its reach, and it can't reconfigure a
+// datastore. That Datastore.Audit does let it list the root namespace's
+// snapshots (VM and container ids, times, sizes and notes), but not read
+// their contents.
 //
 // It can't grant itself rights, and creating a root namespace needs
 // Datastore.Modify on the datastore. So the console writes the namespaces it
@@ -36,11 +40,21 @@ import (
 // them as root (GrantLocalPBS). Compromising the console must not reach other
 // backups that way, so the helper only grants a namespace it creates itself
 // (an empty one) or one the user can already manage, and drops every other
-// ACL of the user.
+// ACL of the user. It creates namespaces only as a new top-level tree or
+// below one the user manages, never inside other namespaces (of VMs).
+//
+// The helper also reports the fingerprint of PBS's certificate
+// (/etc/proxmox-backup/proxy.pem, which the console can't read). The console
+// pins its loopback connection to it: port 8007 isn't privileged, so while
+// proxmox-backup-proxy is down any local user could listen there.
 
 const (
 	grantsDirName = "pbs-grants"
 	grantsResult  = "result.json"
+	pbsProxyCert  = "/etc/proxmox-backup/proxy.pem"
+	// maxNewNamespaces caps the namespaces one request creates (a console
+	// needs a few root namespaces).
+	maxNewNamespaces = 100
 )
 
 // grantNS is a namespace on a local datastore.
@@ -63,7 +77,9 @@ type grantsResultFile struct {
 	Requested  []grantNS         `json:"requested"`
 	Refused    map[string]string `json:"refused,omitempty"` // ACL path → reason
 	Datastores []string          `json:"datastores"`        // all datastores of this PBS, for the target form
-	Error      string            `json:"error,omitempty"`
+	// ProxyFingerprint is the SHA-256 fingerprint of PBS's certificate.
+	ProxyFingerprint string `json:"proxy_fingerprint,omitempty"`
+	Error            string `json:"error,omitempty"`
 }
 
 var datastoreNameRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]*$`)
@@ -81,9 +97,11 @@ type pbsRoot interface {
 	Datastores(ctx context.Context) ([]string, error)
 	Namespaces(ctx context.Context, store string) ([]string, error)
 	CreateNamespace(ctx context.Context, store, parent, name string) error
+	HasGroups(ctx context.Context, store, ns string) (bool, error)
 	ACLs(ctx context.Context) ([]pbsACL, error)
 	SetACL(ctx context.Context, a pbsACL) error
 	DeleteACL(ctx context.Context, a pbsACL) error
+	ProxyFingerprint() (string, error)
 }
 
 // GrantLocalPBS is the root side (proxbackup-server grant-datastores, run by
@@ -111,6 +129,11 @@ func grantLocalPBS(ctx context.Context, dataDir, authID string, root pbsRoot, lo
 	}
 	var req grantsRequest
 	res := grantsResultFile{Time: time.Now().Unix()}
+	if fp, ferr := root.ProxyFingerprint(); ferr != nil {
+		log.Warn("cannot read the PBS certificate", "err", ferr)
+	} else {
+		res.ProxyFingerprint = fp
+	}
 	if err == nil {
 		err = json.Unmarshal(b, &req)
 	}
@@ -207,6 +230,7 @@ func applyGrants(ctx context.Context, root pbsRoot, authID string, res *grantsRe
 		log.Warn("refused datastore rights", "path", g.path(), "reason", reason)
 	}
 
+	created := 0
 	want := map[pbsACL]bool{}
 	for _, g := range res.Requested {
 		if !slices.Contains(stores, g.Store) {
@@ -225,17 +249,42 @@ func applyGrants(ctx context.Context, root pbsRoot, authID string, res *grantsRe
 					"proxmox-backup-manager acl update %s DatastoreAdmin --auth-id %s", g.path(), authID))
 				continue
 			}
-			parent := ""
-			for part := range strings.SplitSeq(g.NS, "/") {
-				full := strings.TrimPrefix(parent+"/"+part, "/")
-				if !have[full] {
-					if err := root.CreateNamespace(ctx, g.Store, parent, part); err != nil {
-						return fmt.Errorf("create namespace %s on %s: %w", full, g.Store, err)
-					}
-					have[full] = true
-					log.Info("created namespace", "datastore", g.Store, "ns", full)
+			parts := strings.Split(g.NS, "/")
+			parent, depth := "", 0 // the deepest existing namespace on the way
+			for i := range parts {
+				if p := strings.Join(parts[:i+1], "/"); have[p] {
+					parent, depth = p, i+1
 				}
+			}
+			if parent != "" && !entrusted(mine, pbs.DatastoreACLPath(g.Store, parent)) {
+				refuse(g, fmt.Sprintf("it would be created inside namespace %s, which the console can't manage. Use a new top-level "+
+					"namespace, or to use this one anyway, run on the PBS: proxmox-backup-manager acl update %s DatastoreAdmin --auth-id %s",
+					parent, g.path(), authID))
+				continue
+			}
+			if created+len(parts)-depth > maxNewNamespaces {
+				refuse(g, "too many new namespaces in one request")
+				continue
+			}
+			for _, part := range parts[depth:] {
+				full := strings.TrimPrefix(parent+"/"+part, "/")
+				if err := root.CreateNamespace(ctx, g.Store, parent, part); err != nil {
+					return fmt.Errorf("create namespace %s on %s: %w", full, g.Store, err)
+				}
+				have[full] = true
+				created++
+				log.Info("created namespace", "datastore", g.Store, "ns", full)
 				parent = full
+			}
+			// PBS's create call also succeeds for a namespace that exists, so
+			// only the listing above says it is new: make sure it is empty.
+			groups, err := root.HasGroups(ctx, g.Store, g.NS)
+			if err != nil {
+				return fmt.Errorf("list backup groups of %s on %s: %w", g.NS, g.Store, err)
+			}
+			if groups {
+				refuse(g, "the namespace holds backups already, although PBS didn't list it")
+				continue
 			}
 		}
 		want[pbsACL{Path: g.path(), Propagate: true, Role: "DatastoreAdmin", UGID: authID}] = true
@@ -314,6 +363,33 @@ func (c pbsCLI) CreateNamespace(ctx context.Context, store, parent, name string)
 		args = append(args, "--parent", parent)
 	}
 	return c.run(ctx, nil, "proxmox-backup-debug", args...)
+}
+
+func (c pbsCLI) HasGroups(ctx context.Context, store, ns string) (bool, error) {
+	var list []json.RawMessage
+	err := c.run(ctx, &list, "proxmox-backup-debug", "api", "get", "/admin/datastore/"+url.PathEscape(store)+"/groups", "--ns", ns,
+		"--output-format", "json")
+	return len(list) > 0, err
+}
+
+func (pbsCLI) ProxyFingerprint() (string, error) { return certFileFingerprint(pbsProxyCert) }
+
+// certFileFingerprint returns the SHA-256 fingerprint of the first
+// certificate in a PEM file.
+func certFileFingerprint(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for {
+		var blk *pem.Block
+		if blk, b = pem.Decode(b); blk == nil {
+			return "", fmt.Errorf("%s: no certificate", path)
+		}
+		if blk.Type == "CERTIFICATE" {
+			return pbs.FormatFingerprint(sha256.Sum256(blk.Bytes)), nil
+		}
+	}
 }
 
 func (c pbsCLI) ACLs(ctx context.Context) ([]pbsACL, error) {
@@ -479,7 +555,7 @@ func (s *Server) refreshGrants(ctx context.Context) {
 	if l == nil {
 		return
 	}
-	pc, _, _, err := l.client(ctx)
+	pc, _, _, err := s.localClient(ctx)
 	if err == nil {
 		err = s.syncGrants(ctx, pc, nil)
 	}
