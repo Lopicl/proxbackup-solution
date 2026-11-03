@@ -130,3 +130,84 @@ func must(s string, err error) string {
 	}
 	return s
 }
+
+// Failed sign-ins are recorded without signing in, so the audit log must not
+// store large usernames or keep an unbounded number of them.
+func TestAuditSignInSizeLimits(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	if _, err := s.EnsureAdmin(ctx, "admin-password"); err != nil {
+		t.Fatal(err)
+	}
+	ui := s.uiRoutes()
+	login := func(user string) int {
+		body, _ := json.Marshal(map[string]string{"username": user, "password": "wrong"})
+		r := httptest.NewRequest("POST", "/api/login", strings.NewReader(string(body)))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set(csrfHeader, "1")
+		w := httptest.NewRecorder()
+		ui.ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := login(strings.Repeat("a", 3<<20)); code != http.StatusBadRequest {
+		t.Fatalf("huge username: %d", code)
+	}
+	if code := login("nobody"); code != http.StatusUnauthorized {
+		t.Fatalf("wrong password: %d", code)
+	}
+	es, err := s.store.AuditLog(ctx, AuditFilter{Limit: 500})
+	if err != nil || len(es) != 1 || es[0].Username != "nobody" {
+		t.Fatalf("audit after sign-ins: %v %+v", err, es)
+	}
+
+	// AddAudit clips every caller's fields.
+	big := strings.Repeat("é", 1<<20)
+	s.store.AddAudit(ctx, &AuditEntry{Username: big, Action: big, Target: big, Detail: big, IP: big})
+	es, _ = s.store.AuditLog(ctx, AuditFilter{Limit: 1})
+	e := es[0]
+	for _, f := range []struct {
+		v string
+		n int
+	}{{e.Username, maxAuditName}, {e.Action, maxAuditName}, {e.IP, maxAuditName}, {e.Target, maxAuditText}, {e.Detail, maxAuditText}} {
+		if len(f.v) > f.n+len("…") || !strings.HasSuffix(f.v, "é…") {
+			t.Fatalf("field not clipped on a rune boundary: %d bytes", len(f.v))
+		}
+	}
+
+	// Rows stored before the clipping are cut on upgrade.
+	if _, err := s.store.db.Exec(`INSERT INTO audit_log(ts, username, action, detail) VALUES(1, ?, 'sign-in', ?)`, big, big); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	s.store.db.QueryRow(`SELECT COUNT(*) FROM audit_log WHERE length(username)>? OR length(detail)>?`, maxAuditName, maxAuditText).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d oversized rows left after migrate", n)
+	}
+
+	// Only failed sign-ins are capped, oldest first.
+	s.store.db.Exec(`DELETE FROM audit_log`)
+	for i := range 10 {
+		s.store.AddAudit(ctx, &AuditEntry{Username: "x" + jsonNum(int64(i)), Action: "sign-in", Status: http.StatusUnauthorized})
+		s.store.AddAudit(ctx, &AuditEntry{Username: "admin", Action: "create user", Status: http.StatusOK})
+	}
+	s.store.AddAudit(ctx, &AuditEntry{Username: "admin", Action: "sign-in", Status: http.StatusOK})
+	if got, err := s.store.TrimFailedSignIns(ctx, 3); err != nil || got != 7 {
+		t.Fatalf("trim: %d %v", got, err)
+	}
+	if got, err := s.store.TrimFailedSignIns(ctx, 3); err != nil || got != 0 {
+		t.Fatalf("second trim: %d %v", got, err)
+	}
+	es, _ = s.store.AuditLog(ctx, AuditFilter{Limit: 500})
+	var failed []string
+	for _, e := range es {
+		if e.Action == "sign-in" && e.Status != http.StatusOK {
+			failed = append(failed, e.Username)
+		}
+	}
+	if len(es) != 14 || strings.Join(failed, ",") != "x9,x8,x7" {
+		t.Fatalf("after trim: %d entries, failed %v", len(es), failed)
+	}
+}

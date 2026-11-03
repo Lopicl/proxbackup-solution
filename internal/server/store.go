@@ -252,6 +252,13 @@ func (s *Store) migrate() error {
 	if err := s.migrateGroupJobs(); err != nil {
 		return err
 	}
+	// Before AddAudit clipped them, a sign-in could store a username of
+	// megabytes (substr counts characters, so this keeps a little more).
+	if _, err := s.db.Exec(`UPDATE audit_log SET username=substr(username,1,?), target=substr(target,1,?), detail=substr(detail,1,?)
+		WHERE length(username)>? OR length(target)>? OR length(detail)>?`,
+		maxAuditName, maxAuditText, maxAuditText, maxAuditName, maxAuditText, maxAuditText); err != nil {
+		return err
+	}
 	return s.repairJobRefs()
 }
 

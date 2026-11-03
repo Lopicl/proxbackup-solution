@@ -173,7 +173,7 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 Read-only or custom ones, each for all clients or only chosen clients and tags. Restore-only users
 can restore files anywhere except system folders (see *Restore*); they can still write into users'
 profiles, so give the role only to people you'd trust with those users' accounts. The *Audit log* tab lists
-sign-ins and every change. Users change their own password under the profile menu. Repeated failed
+sign-ins and every change for two years; it keeps only the newest 100,000 failed sign-ins. Users change their own password under the profile menu. Repeated failed
 sign-ins from one address or for one username are slowed down (HTTP 429 with the time to wait).
 Users who signed in from an address before aren't slowed down by others' failures there (shared
 NAT); only their own failed attempts count. Changing the host or

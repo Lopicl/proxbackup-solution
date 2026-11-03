@@ -290,6 +290,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	req.Username = strings.TrimSpace(req.Username)
+	if len(req.Username) > maxAuditName { // no account has one this long (see usernameRe)
+		httpError(w, http.StatusBadRequest, errors.New("the username is too long"))
+		return
+	}
 	wait, done := s.logins.begin(clientIP(r), req.Username)
 	if done == nil {
 		tooManyAttempts(w, wait)

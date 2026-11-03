@@ -353,6 +353,11 @@ func (s *Server) housekeeping(ctx context.Context) {
 			} else if n > 0 {
 				s.log.Warn("removed the oldest run logs of clients over their log quota", "runs", n)
 			}
+			if n, err := s.store.TrimFailedSignIns(ctx, maxFailedSignIns); err != nil {
+				s.log.Error("trim failed sign-ins", "err", err)
+			} else if n > 0 {
+				s.log.Warn("removed the oldest failed sign-ins from the audit log", "entries", n)
+			}
 		}
 		if time.Since(lastDaily) > 24*time.Hour {
 			lastDaily = time.Now()

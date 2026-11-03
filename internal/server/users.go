@@ -697,10 +697,24 @@ type AuditEntry struct {
 	IP       string `json:"ip"`
 }
 
+// Audit fields are clipped to these sizes (bytes), so a request can't store
+// arbitrarily large rows that are kept for auditRetention.
+const (
+	maxAuditName = 256  // username, action, IP
+	maxAuditText = 4000 // target, detail
+)
+
+// maxFailedSignIns is how many failed sign-ins the audit log keeps. Anyone who
+// can reach the console can add them, so only they are capped: the oldest go
+// first and they never push out changes made by signed-in users.
+const maxFailedSignIns = 100000
+
 func (s *Store) AddAudit(ctx context.Context, e *AuditEntry) error {
 	if e.Time == 0 {
 		e.Time = now()
 	}
+	e.Username, e.Action, e.IP = clip(e.Username, maxAuditName), clip(e.Action, maxAuditName), clip(e.IP, maxAuditName)
+	e.Target, e.Detail = clip(e.Target, maxAuditText), clip(e.Detail, maxAuditText)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_log(ts, user_id, username, action, target, detail, status, ip) VALUES(?,?,?,?,?,?,?,?)`,
 		e.Time, e.UserID, e.Username, e.Action, e.Target, e.Detail, e.Status, e.IP)
 	return err
@@ -746,6 +760,17 @@ func (s *Store) AuditLog(ctx context.Context, f AuditFilter) ([]*AuditEntry, err
 
 func (s *Store) PruneAudit(ctx context.Context, maxAge time.Duration) {
 	s.db.ExecContext(ctx, `DELETE FROM audit_log WHERE ts<?`, time.Now().Add(-maxAge).Unix())
+}
+
+// TrimFailedSignIns removes the oldest failed sign-ins beyond keep and returns
+// how many it removed.
+func (s *Store) TrimFailedSignIns(ctx context.Context, keep int) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM audit_log WHERE action='sign-in' AND status<>200 AND id<=(
+		SELECT id FROM audit_log WHERE action='sign-in' AND status<>200 ORDER BY id DESC LIMIT 1 OFFSET ?)`, keep)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ClientTags returns the tags of every client, revoked ones included (for
