@@ -321,3 +321,32 @@ func TestTargetRepointNeedsRestore(t *testing.T) {
 		t.Fatalf("new host with restore for all clients: %d", c)
 	}
 }
+
+// The console reaches this PBS on loopback even when agents get a reverse
+// proxy that refuses password sign-ins (docs/network.md).
+func TestLocalTargetsUseLoopbackAPI(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	api, fp, auths := fakePBS(t)
+	secretFile := filepath.Join(t.TempDir(), "secret")
+	os.WriteFile(secretFile, []byte("local-password\n"), 0o600)
+	const proxy = "pbs.invalid:8443" // must never be dialed
+	s.cfg.LocalPBS = &LocalPBS{APIAddr: api.Listener.Addr().String(), PublicHost: proxy, AuthID: "proxbackup@pbs", SecretFile: secretFile}
+	tg := &Target{Name: "local", Host: proxy, Fingerprint: fp, Datastore: "ds", AdminAuthID: "proxbackup@pbs", PBSUser: "proxbackup@pbs", Local: true}
+	if err := s.store.SaveTarget(ctx, tg, s.sealer.sealFor("local-password", colTargetSecret)); err != nil {
+		t.Fatal(err)
+	}
+	pc, err := s.adminClient(tg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pc.Version(ctx); err != nil {
+		t.Fatalf("local target via loopback: %v", err)
+	}
+	if a := auths(); len(a) != 1 || a[0] != "password:local-password" {
+		t.Fatalf("loopback API received %q", a)
+	}
+	if h := s.pbsAPIHost("other.example:8007"); h != "other.example:8007" {
+		t.Fatalf("remote PBS rerouted to %s", h)
+	}
+}

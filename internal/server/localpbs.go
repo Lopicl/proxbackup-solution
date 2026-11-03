@@ -209,6 +209,18 @@ func (s *Server) localSecretFor(ctx context.Context, authID, host, fp string) st
 	return secret
 }
 
+// pbsAPIHost is the address the console itself uses for a PBS at host. For
+// this PBS that is its API on loopback, not the address agents get: that may
+// be a reverse proxy refusing password sign-ins (docs/network.md), and the
+// console signs in as its PBS user with a password. The client still pins the
+// target's fingerprint, which is the same certificate.
+func (s *Server) pbsAPIHost(host string) string {
+	if l := s.cfg.LocalPBS; l != nil && l.APIAddr != "" && l.isLocalHost(host) {
+		return l.APIAddr
+	}
+	return host
+}
+
 func (l *LocalPBS) isLocalHost(host string) bool {
 	return sameHost(host, l.PublicHost) || sameHost(host, l.APIAddr)
 }

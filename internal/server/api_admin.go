@@ -186,7 +186,7 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	if nsChanged || needGrant {
 		var err error
 		if t.ID == 0 {
-			pc, err = pbs.NewClient(pbs.Config{Host: t.Host, Fingerprint: t.Fingerprint, AuthID: t.AdminAuthID, Secret: req.AdminSecret})
+			pc, err = pbs.NewClient(pbs.Config{Host: s.pbsAPIHost(t.Host), Fingerprint: t.Fingerprint, AuthID: t.AdminAuthID, Secret: req.AdminSecret})
 		} else {
 			pc, err = s.adminClient(t)
 		}
@@ -272,7 +272,7 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, errMissingAdminSecret)
 		return
 	}
-	pc, err := pbs.NewClient(pbs.Config{Host: req.Host, Fingerprint: req.Fingerprint, AuthID: req.AdminAuthID, Secret: req.AdminSecret})
+	pc, err := pbs.NewClient(pbs.Config{Host: s.pbsAPIHost(req.Host), Fingerprint: req.Fingerprint, AuthID: req.AdminAuthID, Secret: req.AdminSecret})
 	if err != nil {
 		httpError(w, 400, err)
 		return

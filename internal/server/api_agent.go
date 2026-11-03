@@ -569,7 +569,7 @@ func (s *Server) adminClient(t *Target) (*pbs.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decrypt admin token: %w", err)
 	}
-	return pbs.NewClient(pbs.Config{Host: t.Host, Fingerprint: t.Fingerprint, AuthID: t.AdminAuthID, Secret: secret})
+	return pbs.NewClient(pbs.Config{Host: s.pbsAPIHost(t.Host), Fingerprint: t.Fingerprint, AuthID: t.AdminAuthID, Secret: secret})
 }
 
 // clientNamespace is the PBS namespace a client named name gets on t.
