@@ -154,6 +154,10 @@ func TestReenrollRevokedClient(t *testing.T) {
 	if rec := adminCall(s.handleEnrollmentCommand, "GET", es[0].ID, ""); rec.Code != 200 {
 		t.Fatalf("re-enrollment command for an admin: %d", rec.Code)
 	}
+	// Nor to cancel it there.
+	if rec := callWith(manager, s.handleDeleteEnrollment, "DELETE", es[0].ID, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("re-enrollment canceled with clients.manage: %d", rec.Code)
+	}
 
 	rec, resp := enrollWith(t, s, created.Command, "NEW-PC")
 	if rec.Code != 200 || resp.ClientID != c.ID || resp.ClientName != "pc-1" {

@@ -120,8 +120,11 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	case req.Name == "" || req.Host == "" || req.Datastore == "" || req.AdminAuthID == "":
 		httpError(w, 400, errors.New("name, host, datastore and PBS admin are required"))
 		return
-	case !strings.Contains(req.AdminAuthID, "@"):
+	case !pbs.ValidAuthID(req.AdminAuthID):
 		httpError(w, 400, errors.New("PBS admin must be a user (user@realm) or an API token id (user@realm!token)"))
+		return
+	case !pbs.ValidAuthID(req.PBSUser) || pbs.IsTokenID(req.PBSUser):
+		httpError(w, 400, errors.New("the agent user must be a PBS user (user@realm)"))
 		return
 	case !pbs.IsTokenID(req.AdminAuthID) && req.AdminAuthID != req.PBSUser:
 		// PBS lets a user without Permissions.Modify set ACLs only for its own tokens.
@@ -140,18 +143,20 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	// Only someone who may already read all their backups may do that. The
 	// agent user owns the tokens clients get from now on (enrolled,
 	// un-revoked, re-enrolled, rotated), which can read their groups: a PBS
-	// account of the editor's choice must not get them either.
+	// account of the editor's choice must not get them either. A datastore or
+	// root namespace change sends future backups (and client tokens) to
+	// storage the editor may be able to read.
 	if t.ID != 0 && (!sameHost(t.Host, req.Host) ||
 		pbs.NormalizeFingerprint(t.Fingerprint) != pbs.NormalizeFingerprint(fp) ||
-		t.PBSUser != req.PBSUser) && !access(r).Global(PermRestore) {
+		t.PBSUser != req.PBSUser || t.Datastore != req.Datastore || t.RootNS != req.RootNS) && !access(r).Global(PermRestore) {
 		n, err := s.store.TargetClientCount(ctx, t.ID)
 		if err != nil {
 			httpError(w, 500, err)
 			return
 		}
 		if n > 0 {
-			httpError(w, http.StatusForbidden, fmt.Errorf("%d clients use this PBS server: changing its host, fingerprint or agent user "+
-				"also needs the permission Restore (for all clients)", n))
+			httpError(w, http.StatusForbidden, fmt.Errorf("%d clients use this PBS server: changing its host, fingerprint, datastore, "+
+				"root namespace or agent user also needs the permission Restore (for all clients)", n))
 			return
 		}
 	}
@@ -647,6 +652,16 @@ func (s *Server) handleDeleteEnrollment(w http.ResponseWriter, r *http.Request) 
 	id, err := pathID(r)
 	if err != nil {
 		httpError(w, 400, err)
+		return
+	}
+	// A pending re-enrollment is managed with the revoked client.
+	reenroll, err := s.store.EnrollmentReenrollID(r.Context(), id)
+	if err != nil {
+		httpError(w, statusFor(err), err)
+		return
+	}
+	if reenroll > 0 && !access(r).Global(PermManageRevoked) {
+		httpError(w, http.StatusForbidden, errors.New("you don't have the permission: Manage revoked clients"))
 		return
 	}
 	if err := s.store.DeleteEnrollment(r.Context(), id); err != nil {

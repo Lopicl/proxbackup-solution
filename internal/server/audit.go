@@ -52,6 +52,7 @@ func auditDetail(r *http.Request, format string, args ...any) {
 // sensitiveReads are GET routes that are recorded too.
 var sensitiveReads = map[string]bool{
 	"GET /api/clients/{id}/encryption-key":       true,
+	"GET /api/clients/{id}/reenroll":             true, // hands a PC a revoked client's backups
 	"GET /api/enrollments/{id}/command":          true,
 	"GET /api/setup-tokens/{id}":                 true,
 	"GET /api/setup-tokens/{id}/download/{arch}": true,
@@ -66,12 +67,16 @@ var auditActions = map[string]string{
 	"POST /api/targets/test":                     "test PBS server",
 	"DELETE /api/clients/{id}":                   "revoke client",
 	"POST /api/clients/{id}/unrevoke":            "restore revoked client",
+	"POST /api/clients/{id}/reenroll":            "create re-enrollment",
+	"GET /api/clients/{id}/reenroll":             "show re-enrollment command",
+	"DELETE /api/clients/{id}/reenroll":          "cancel re-enrollment",
 	"POST /api/clients/{id}/agent-update":        "push agent update",
 	"POST /api/clients/{id}/rotate-credentials":  "rotate client credentials",
 	"POST /api/clients/rotate-credentials":       "rotate credentials of clients",
 	"POST /api/clients/{id}/restore":             "start restore",
 	"GET /api/clients/{id}/encryption-key":       "download client encryption key",
 	"PUT /api/clients/{id}/tags":                 "change client tags",
+	"PUT /api/clients/{id}/bandwidth":            "change client bandwidth limit",
 	"POST /api/enrollments":                      "create enrollment",
 	"GET /api/enrollments/{id}/command":          "show enrollment command",
 	"DELETE /api/enrollments/{id}":               "cancel enrollment",

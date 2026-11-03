@@ -404,9 +404,10 @@ read on every run.
   re-enrollment or a token rotation.
 
   Clients get the target's host and fingerprint with their token secret, and the agent user
-  owns the tokens issued from then on, which can read the clients' groups. So changing a
-  target's host, fingerprint or agent user while clients use it also needs `restore` for all
-  clients.
+  owns the tokens issued from then on, which can read the clients' groups. A new datastore or
+  root namespace sends future backups, and the clients' token grants, to storage the editor
+  may be able to read. So changing a target's host, fingerprint, datastore, root namespace or
+  agent user while clients use it also needs `restore` for all clients.
 
   **Changing the root namespace** of a target first creates the new namespace on PBS and
   grants the agent user `DatastoreBackup` on it; if PBS refuses, the error is shown and the

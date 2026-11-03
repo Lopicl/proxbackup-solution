@@ -11,6 +11,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -276,14 +277,19 @@ func TestTargetRepointNeedsRestore(t *testing.T) {
 	targetsOnly := []RoleAssignment{{RoleID: 1, AllClients: true}}
 	someRestore := append(targetsOnly, RoleAssignment{RoleID: 2, Clients: []int64{c.ID}})
 	allRestore := append(targetsOnly, RoleAssignment{RoleID: 2, AllClients: true})
-	saveAs := func(tg *Target, ras []RoleAssignment, host, fp, pbsUser string) int {
-		b, _ := json.Marshal(map[string]any{"name": tg.Name, "host": host, "fingerprint": fp, "datastore": "ds",
-			"admin_auth_id": "admin@pbs!t", "admin_secret": "made-up", "pbs_user": pbsUser})
+	saveWith := func(tg *Target, ras []RoleAssignment, host, fp, pbsUser string, extra map[string]any) int {
+		req := map[string]any{"name": tg.Name, "host": host, "fingerprint": fp, "datastore": "ds",
+			"admin_auth_id": "admin@pbs!t", "admin_secret": "made-up", "pbs_user": pbsUser}
+		maps.Copy(req, extra)
+		b, _ := json.Marshal(req)
 		r := as(httptest.NewRequest("PUT", "/api/targets/x", strings.NewReader(string(b))), ras)
 		r.SetPathValue("id", strconv.FormatInt(tg.ID, 10))
 		rec := httptest.NewRecorder()
 		s.handleSaveTarget(rec, r)
 		return rec.Code
+	}
+	saveAs := func(tg *Target, ras []RoleAssignment, host, fp, pbsUser string) int {
+		return saveWith(tg, ras, host, fp, pbsUser, nil)
 	}
 	save := func(tg *Target, ras []RoleAssignment, host, fp string) int {
 		return saveAs(tg, ras, host, fp, "proxbackup@pbs")
@@ -302,7 +308,21 @@ func TestTargetRepointNeedsRestore(t *testing.T) {
 	if c := saveAs(used, targetsOnly, "pbs:8007", "aa", "evil@pbs"); c != 403 {
 		t.Fatalf("new agent user without restore: %d", c)
 	}
-	if got, _ := s.store.Target(ctx, used.ID); got.Host != "pbs:8007" || got.Fingerprint != "aa" || got.PBSUser != "proxbackup@pbs" {
+	// A new datastore or root namespace sends backups and client tokens elsewhere.
+	if c := saveWith(used, targetsOnly, "pbs:8007", "aa", "proxbackup@pbs", map[string]any{"datastore": "other"}); c != 403 {
+		t.Fatalf("new datastore without restore: %d", c)
+	}
+	if c := saveWith(used, targetsOnly, "pbs:8007", "aa", "proxbackup@pbs", map[string]any{"root_ns": "elsewhere"}); c != 403 {
+		t.Fatalf("new root namespace without restore: %d", c)
+	}
+	// Auth ids go into request headers.
+	if c := saveWith(empty, allRestore, "pbs:8007", "aa", "proxbackup@pbs", map[string]any{"admin_auth_id": "admin@pbs!t\r\nX-Evil: 1"}); c != 400 {
+		t.Fatalf("auth id with CR/LF: %d", c)
+	}
+	if c := saveAs(empty, allRestore, "pbs:8007", "aa", "proxbackup@pbs!tok"); c != 400 {
+		t.Fatalf("token as agent user: %d", c)
+	}
+	if got, _ := s.store.Target(ctx, used.ID); got.Host != "pbs:8007" || got.Fingerprint != "aa" || got.PBSUser != "proxbackup@pbs" || got.Datastore != "ds" || got.RootNS != "" {
 		t.Fatalf("target changed: %+v", got)
 	}
 	if c := save(used, targetsOnly, "PBS", "AA"); c != 200 {

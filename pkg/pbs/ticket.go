@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -42,6 +43,14 @@ var tickets = struct {
 
 // IsTokenID reports whether id is an API token id (user@realm!name) rather than a user id.
 func IsTokenID(id string) bool { return strings.Contains(id, "!") }
+
+// authIDRe matches a PBS user id (name@realm) or API token id
+// (name@realm!token). Auth ids go into request headers, so whitespace and
+// control characters must never get through.
+var authIDRe = regexp.MustCompile(`^[^\s\x00-\x1f\x7f:/@!]+@[A-Za-z0-9_][A-Za-z0-9._-]*(![A-Za-z0-9_][A-Za-z0-9._-]*)?$`)
+
+// ValidAuthID reports whether id is a well-formed PBS user or token id.
+func ValidAuthID(id string) bool { return authIDRe.MatchString(id) }
 
 func ticketFor(addr string, cfg Config) *ticket {
 	key := sha256.Sum256([]byte(addr + "\x00" + NormalizeFingerprint(cfg.Fingerprint) + "\x00" + cfg.AuthID + "\x00" + cfg.Secret))

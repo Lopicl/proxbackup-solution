@@ -57,7 +57,7 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.Host == "" || cfg.AuthID == "" || cfg.Secret == "" {
 		return nil, errors.New("pbs: host, auth id and secret are required")
 	}
-	if !strings.Contains(cfg.AuthID, "@") {
+	if !ValidAuthID(cfg.AuthID) {
 		return nil, errors.New("pbs: auth id must be a user (user@realm) or an API token id (user@realm!name)")
 	}
 	addr := cfg.Host

@@ -88,3 +88,19 @@ func TestTicketAuth(t *testing.T) {
 		t.Fatal("auth id without realm accepted")
 	}
 }
+
+func TestValidAuthID(t *testing.T) {
+	for _, id := range []string{"proxbackup@pbs", "backup@pbs!pc-01", "root@pam!proxbackup-console", "a.b@pve!x_y.2", "domain-user@ad"} {
+		if !ValidAuthID(id) {
+			t.Errorf("%q rejected", id)
+		}
+	}
+	for _, id := range []string{"", "nobody", "@pbs", "a@", "a@pbs!", "a b@pbs", "a@pbs\r\nX: y", "a@pbs!t\n", "a@pbs!t!u", "a/b@pbs", "a:b@pbs", "a@p bs"} {
+		if ValidAuthID(id) {
+			t.Errorf("%q accepted", id)
+		}
+	}
+	if _, err := NewClient(Config{Host: "pbs", AuthID: "a@pbs!t\r\nX-Evil: 1", Secret: "s"}); err == nil {
+		t.Error("NewClient took an auth id with CR/LF")
+	}
+}

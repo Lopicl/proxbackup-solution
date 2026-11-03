@@ -1040,6 +1040,17 @@ func (s *Store) PendingReenrollments(ctx context.Context) (map[int64]Enrollment,
 }
 
 // DeleteEnrollment cancels an enrollment that no PC has completed.
+// EnrollmentReenrollID returns the revoked client an enrollment no PC has
+// completed yet re-enrolls (0 = a new client).
+func (s *Store) EnrollmentReenrollID(ctx context.Context, id int64) (int64, error) {
+	var reenroll int64
+	err := s.db.QueryRowContext(ctx, `SELECT reenroll_id FROM enrollments WHERE id=? AND client_id=0`, id).Scan(&reenroll)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, errNotFound
+	}
+	return reenroll, err
+}
+
 func (s *Store) DeleteEnrollment(ctx context.Context, id int64) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM enrollments WHERE id=? AND client_id=0`, id)
 	if err != nil {
