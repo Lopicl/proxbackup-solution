@@ -301,6 +301,7 @@ func (s *Server) agentConfig(ctx context.Context, c *Client) (*api.AgentConfig, 
 	cfg := &api.AgentConfig{
 		Crypt:     key,
 		Bandwidth: c.Bandwidth,
+		PauseDays: s.pauseDays(ctx, c),
 		Target: api.PBSTarget{Host: t.Host, Fingerprint: t.Fingerprint, Datastore: t.Datastore, Namespace: c.Namespace,
 			AuthID: c.TokenID, Secret: secret},
 		Jobs: []api.JobConfig{},

@@ -180,6 +180,11 @@ type AgentConfig struct {
 	Crypt *CryptKey `json:"crypt,omitempty"`
 	// Bandwidth limits uploads of every job of the client.
 	Bandwidth Bandwidth `json:"bandwidth,omitzero"`
+	// PauseDays limits how long PC users may keep scheduled backups paused
+	// from the tray app: pauses cover at most this many days in a row,
+	// counted from the first, until a scheduled backup has started again.
+	// 0 = no pauses, nil = no limit (FeaturePauseLimit).
+	PauseDays *int `json:"pause_days,omitempty"`
 }
 
 // Spec turns a job config into an executable job spec.
@@ -235,6 +240,9 @@ const (
 	// system folders unless RestoreSpec.SystemFolders is set. Older agents
 	// write wherever a restore points them.
 	FeatureProtectedRestore = "protected-restore"
+	// FeaturePauseLimit: the agent honours AgentConfig.PauseDays. Older
+	// agents let PC users pause scheduled backups whatever the console says.
+	FeaturePauseLimit = "pause-limit"
 )
 
 // PollResponse carries config updates, on-demand work and cancellations.

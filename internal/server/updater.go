@@ -108,11 +108,12 @@ type updater struct {
 	status UpdateStatus
 	latest *update.Release
 	agents map[string]agentBinary // by arch, for s.cfg.Version
+	pushed map[int64]bool         // clients an admin pushed the agent update to (PushAgent)
+	busy   sync.Mutex             // one check/install at a time
+
 	// agentSums and agentSig are the release's SHA256SUMS and signature,
 	// which agents check the binaries with.
 	agentSums, agentSig []byte
-	pushed map[int64]bool         // clients an admin pushed the agent update to (PushAgent)
-	busy   sync.Mutex             // one check/install at a time
 
 	resultMod time.Time
 	restart   func()

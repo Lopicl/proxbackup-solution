@@ -38,11 +38,19 @@ type localState struct {
 	history  []ipc.RunInfo // newest first
 	pause    pauseState
 	sessions map[string]*restoreSession
+
+	// pauseDays is the console's limit on paused days in a row (nil = none,
+	// 0 = no pauses; applyPausePolicy).
+	pauseDays *int
 }
 
 type pauseState struct {
 	Until int64  `json:"until"`
 	By    string `json:"by"`
+	// Since is when the current run of pauses began: the console's limit
+	// counts from it until a scheduled backup has started again (0 = none
+	// since then). Resuming early doesn't reset it.
+	Since int64 `json:"since,omitempty"`
 }
 
 type restoreSession struct {
@@ -63,12 +71,8 @@ func (r *Runner) loadLocal() {
 
 // pausedBy is the Scheduler's pause hook.
 func (r *Runner) pausedBy() string {
-	r.local.mu.Lock()
-	defer r.local.mu.Unlock()
-	if p := r.local.pause; p.Until > time.Now().Unix() {
-		return p.By
-	}
-	return ""
+	_, by := r.pauseInfo()
+	return by
 }
 
 func (r *Runner) pauseInfo() (until int64, by string) {
@@ -78,6 +82,96 @@ func (r *Runner) pauseInfo() (until int64, by string) {
 		return p.Until, p.By
 	}
 	return 0, ""
+}
+
+// pauseAllowed returns when the run of pauses a pause starting at now
+// belongs to began, and until when the console's limit lets it last (zero =
+// no limit), or why no pause is allowed. Caller holds r.local.mu.
+func (r *Runner) pauseAllowed(now time.Time) (since int64, end time.Time, err error) {
+	since = r.local.pause.Since
+	if since == 0 {
+		since = now.Unix()
+	}
+	switch days := r.local.pauseDays; {
+	case days == nil:
+		return since, time.Time{}, nil
+	case *days <= 0:
+		return 0, time.Time{}, errors.New("Your administrator has turned off pausing backups on this PC")
+	default:
+		end = time.Unix(since, 0).Add(time.Duration(*days) * 24 * time.Hour)
+		if !now.Before(end) {
+			return 0, time.Time{}, fmt.Errorf("Backups were paused for %s in a row, the most your administrator allows. "+
+				"You can pause them again after the next scheduled backup", daysText(*days))
+		}
+		return since, end, nil
+	}
+}
+
+func daysText(n int) string {
+	if n == 1 {
+		return "1 day"
+	}
+	return fmt.Sprintf("%d days", n)
+}
+
+// pause pauses scheduled backups for d, within the console's limit, and
+// returns until when.
+func (r *Runner) pause(by string, d time.Duration) (time.Time, error) {
+	now := time.Now()
+	r.local.mu.Lock()
+	since, end, err := r.pauseAllowed(now)
+	r.local.mu.Unlock()
+	if err != nil {
+		return time.Time{}, err
+	}
+	until := now.Add(d)
+	if !end.IsZero() && until.After(end) {
+		until = end
+	}
+	return until, r.setPause(pauseState{Until: until.Unix(), By: by, Since: since})
+}
+
+// applyPausePolicy follows the console's limit on paused days in a row: a
+// pause in effect is cut to what the limit allows (or ends at once with
+// pauses off).
+func (r *Runner) applyPausePolicy(cfg *api.AgentConfig) {
+	var days *int
+	if cfg != nil && cfg.PauseDays != nil {
+		d := *cfg.PauseDays
+		days = &d
+	}
+	now := time.Now()
+	r.local.mu.Lock()
+	r.local.pauseDays = days
+	p := r.local.pause
+	var cut int64
+	if p.Until > now.Unix() && days != nil {
+		cut = now.Unix()
+		if _, end, err := r.pauseAllowed(now); err == nil && !end.IsZero() {
+			cut = end.Unix()
+		}
+	}
+	r.local.mu.Unlock()
+	if cut > 0 && cut < p.Until {
+		p.Until = cut
+		if err := r.setPause(p); err != nil {
+			r.log.Warn("cannot shorten the tray pause", "err", err)
+		}
+		r.log.Info("tray pause shortened to the console's limit", "until", time.Unix(cut, 0).Format(time.RFC3339))
+	}
+}
+
+// pauseStreakOver is called when a scheduled backup starts: pauses after it
+// count anew against the console's limit.
+func (r *Runner) pauseStreakOver() {
+	r.local.mu.Lock()
+	p := r.local.pause
+	r.local.mu.Unlock()
+	if p.Since != 0 && p.Until <= time.Now().Unix() {
+		if err := r.setPause(pauseState{}); err != nil {
+			r.log.Warn("cannot reset the tray pause count", "err", err)
+		}
+	}
 }
 
 func (r *Runner) setPause(p pauseState) error {
@@ -190,14 +284,17 @@ func (r *Runner) handleLocal(ctx context.Context, peer *ipc.Peer, req ipc.Reques
 		if d <= 0 || d > maxPause {
 			return ipc.Response{Error: fmt.Sprintf("backups can be paused for up to %s", maxPause)}
 		}
-		until := time.Now().Add(d)
-		if err := r.setPause(pauseState{Until: until.Unix(), By: peer.User}); err != nil {
+		until, err := r.pause(peer.User, d)
+		if err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
 		r.log.Info("scheduled backups paused from the tray", "by", peer.User, "until", until.Format(time.RFC3339))
 		return ipc.Response{Message: "Scheduled backups are paused until " + until.Format("Mon 15:04"), Status: r.localStatus(peer)}
 	case ipc.OpResume:
-		if err := r.setPause(pauseState{}); err != nil {
+		r.local.mu.Lock()
+		since := r.local.pause.Since // resuming early doesn't reset the limit's count
+		r.local.mu.Unlock()
+		if err := r.setPause(pauseState{Since: since}); err != nil {
 			return ipc.Response{Error: err.Error()}
 		}
 		r.log.Info("scheduled backups resumed from the tray", "by", peer.User)
@@ -218,6 +315,10 @@ func (r *Runner) localStatus(peer *ipc.Peer) *ipc.Status {
 		Jobs: []ipc.Job{}, Recent: []ipc.RunInfo{}}
 	st.Exe, _ = os.Executable()
 	st.PausedUntil, st.PausedBy = r.pauseInfo()
+	r.local.mu.Lock()
+	_, _, perr := r.pauseAllowed(time.Now())
+	r.local.mu.Unlock()
+	st.PauseOff = perr != nil
 	cfg := r.sched.Config()
 	next := map[int64]int64{}
 	for _, js := range r.sched.States() {

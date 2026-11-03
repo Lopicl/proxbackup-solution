@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react'
 import { ALL_CLIENTS, api, clientName, type Bandwidth, type Client, type GroupJob, type GroupMember, type Snapshot } from '../api'
 import { adminBackend, RestoreBrowser } from './RestoreBrowser'
 import { RunsTable } from './RunsTable'
+import { PauseLimitEditor, pauseDaysText } from './PauseLimit'
 import { BandwidthFields, bandwidthText, GroupJobEditor, JobTags, keepText, MemberEditor, newGroupJob, ScheduleText } from './Jobs'
 import { usePerms } from '../perms'
 import { ago, bytes, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, OnlineDot, StateBadge, useLoad } from '../ui'
@@ -11,10 +12,12 @@ import { ago, bytes, Card, dateTime, Empty, ErrorBox, Field, Link, Modal, Online
 export function ClientDetail({ id, tab }: { id: number; tab: string }) {
   const { data, error, reload } = useLoad(() => api.client(id), [id], 5000)
   const groups = useLoad(api.groupJobs, [], 5000)
+  const agentSettings = useLoad(api.agentSettings, [])
   const [editing, setEditing] = useState<Partial<GroupJob> | null>(null)
   const [member, setMember] = useState<{ m: GroupMember; group: string } | null>(null)
   const [editingTags, setEditingTags] = useState(false)
   const [editingBandwidth, setEditingBandwidth] = useState(false)
+  const [editingPause, setEditingPause] = useState(false)
   const [msg, setMsg] = useState('')
   const perms = usePerms()
   if (error) return <ErrorBox error={error} />
@@ -147,6 +150,26 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
             </button>
           )}
         </span>
+        {!c.revoked && (
+          <span title="How many days in a row PC users may pause scheduled backups from the ProxBackup tray icon">
+            Tray pauses{' '}
+            <b>
+              {c.pause_days !== null
+                ? pauseDaysText(c.pause_days)
+                : agentSettings.data
+                  ? `${pauseDaysText(agentSettings.data.pause_days)} (console default)`
+                  : 'console default'}
+              {c.agent_version && !c.agent_features.includes('pause-limit') && (
+                <span className="warn-text"> (not enforced by this agent version: update it)</span>
+              )}
+            </b>{' '}
+            {canManage && (
+              <button className="small ghost" onClick={() => setEditingPause(true)}>
+                Edit
+              </button>
+            )}
+          </span>
+        )}
         <span>
           Namespace <code>{c.namespace}</code>
         </span>
@@ -424,6 +447,16 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
           onClose={() => {
             setMember(null)
             reloadAll()
+          }}
+        />
+      )}
+      {editingPause && (
+        <PauseLimitEditor
+          clientId={id}
+          days={c.pause_days}
+          onClose={() => {
+            setEditingPause(false)
+            reload()
           }}
         />
       )}

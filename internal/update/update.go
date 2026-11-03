@@ -82,7 +82,9 @@ func Newer(candidate, current string) bool {
 }
 
 // Asset names for a version and architecture.
-func DebAsset(version, arch string) string { return fmt.Sprintf("proxbackup-server_%s_%s.deb", version, arch) }
+func DebAsset(version, arch string) string {
+	return fmt.Sprintf("proxbackup-server_%s_%s.deb", version, arch)
+}
 func ServerAsset(goos, arch string) string { return fmt.Sprintf("proxbackup-server-%s-%s", goos, arch) }
 func AgentAsset(arch string) string        { return fmt.Sprintf("proxbackup-agent-windows-%s.exe", arch) }
 

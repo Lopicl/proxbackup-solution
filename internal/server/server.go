@@ -237,6 +237,7 @@ func (s *Server) uiRoutes() http.Handler {
 	// Tags decide which clients scoped roles cover: only for all clients.
 	api.HandleFunc("PUT /api/clients/{id}/tags", s.needGlobal(manage, s.handleClientTags))
 	api.HandleFunc("PUT /api/clients/{id}/bandwidth", s.need(manage, s.handleClientBandwidth))
+	api.HandleFunc("PUT /api/clients/{id}/pause-limit", s.need(manage, s.handleClientPauseLimit))
 	// New clients aren't in anyone's scope yet: enrolling needs all clients.
 	api.HandleFunc("GET /api/enrollments", s.needGlobal(manage, s.handleEnrollments))
 	api.HandleFunc("POST /api/enrollments", s.needGlobal(manage, s.handleCreateEnrollment))
@@ -269,6 +270,9 @@ func (s *Server) uiRoutes() http.Handler {
 	api.HandleFunc("PUT /api/settings/updates", s.need(PermUpdates, s.handleSaveUpdates))
 	api.HandleFunc("GET /api/settings/encryption", signedIn(s.handleGetEncryption)) // public key only
 	api.HandleFunc("PUT /api/settings/encryption", s.need(PermEncryption, s.handleSaveEncryption))
+	api.HandleFunc("GET /api/settings/agents", s.need(view, s.handleGetAgentSettings))
+	// The default applies to every client.
+	api.HandleFunc("PUT /api/settings/agents", s.needGlobal(manage, s.handleSaveAgentSettings))
 	api.HandleFunc("POST /api/updates/check", s.need(PermUpdates, s.handleCheckUpdates))
 	api.HandleFunc("POST /api/updates/install", s.need(PermUpdates, s.handleInstallUpdate))
 	api.HandleFunc("GET /api/permissions", s.need(PermUsers, s.handlePermissions))

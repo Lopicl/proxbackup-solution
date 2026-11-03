@@ -73,6 +73,9 @@ type Status struct {
 	// PausedUntil (unix seconds) while scheduled backups are paused.
 	PausedUntil int64  `json:"paused_until,omitempty"`
 	PausedBy    string `json:"paused_by,omitempty"`
+	// PauseOff: PC users can't pause scheduled backups now (the console's
+	// limit on paused days in a row).
+	PauseOff bool `json:"pause_off,omitempty"`
 	// Waiting: a scheduled backup waits for the PC to leave battery power or
 	// a metered network (e.g. "on battery power"; "" = none waits).
 	Waiting string      `json:"waiting,omitempty"`

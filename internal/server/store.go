@@ -201,6 +201,9 @@ func (s *Store) migrate() error {
 		{"enrollments", "new_crypt_key", "INTEGER NOT NULL DEFAULT 0"},
 		// The OS a group job is for (see GroupJob.Platform).
 		{"group_jobs", "platform", "TEXT NOT NULL DEFAULT 'windows'"},
+		// How many days in a row PC users may pause the client's scheduled
+		// backups from the tray (NULL = the console's default, see pauselimit.go).
+		{"clients", "pause_days", "INTEGER"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -361,6 +364,10 @@ type Client struct {
 	TrayError string `json:"tray_error"`
 	// Bandwidth limits the uploads of all the client's jobs.
 	Bandwidth api.Bandwidth `json:"bandwidth"`
+	// PauseDays limits how many days in a row PC users may pause scheduled
+	// backups from the tray app: nil = the console's default, -1 = no limit,
+	// 0 = no pauses (agents with api.FeaturePauseLimit; see pauselimit.go).
+	PauseDays *int `json:"pause_days"`
 	// AgentUpdate is the version the agent can be updated to (the console's), and
 	// AgentUpdatePushed whether an admin pushed it and the agent hasn't fetched it yet.
 	AgentUpdate       string `json:"agent_update,omitempty"`
@@ -572,16 +579,17 @@ func (s *Store) DeleteUnusedLocalTargets(ctx context.Context) ([]string, error) 
 const clientCols = `id, name, hostname, os, agent_version, COALESCE(cert_serial,''), target_id, namespace, token_id, token_secret_enc, last_seen, revoked, created_at,
 	config_rev, schedule_state, time_zone, crypt_key_enc, crypt_fingerprint, crypt_created, old_namespaces, tags, paused_until, paused_by,
 	tray_error, revoked_at, revoked_serial, revoked_jobs, bandwidth, creds_exposed, rotate_token, token_rotated_at, cert_renew, cert_renewed_at,
-	pending_serial, agent_features, pending_key, prev_serial, revoked_reason`
+	pending_serial, agent_features, pending_key, prev_serial, revoked_reason, pause_days`
 
 func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c := &Client{}
 	var sched, oldNS, tags, revJobs, bw, features string
+	var pauseDays sql.NullInt64
 	err := sc.Scan(&c.ID, &c.Name, &c.Hostname, &c.OS, &c.AgentVersion, &c.CertSerial, &c.TargetID, &c.Namespace, &c.TokenID,
 		&c.tokenSecretEnc, &c.LastSeen, &c.Revoked, &c.CreatedAt, &c.ConfigRev, &sched, &c.TimeZone,
 		&c.cryptKeyEnc, &c.EncryptionFingerprint, &c.EncryptionCreated, &oldNS, &tags, &c.PausedUntil, &c.PausedBy,
 		&c.TrayError, &c.RevokedAt, &c.revokedSerial, &revJobs, &bw, &c.CredsExposed, &c.RotateToken, &c.TokenRotatedAt, &c.CertRenew,
-		&c.CertRenewedAt, &c.pendingSerial, &features, &c.pendingKey, &c.prevSerial, &c.RevokedReason)
+		&c.CertRenewedAt, &c.pendingSerial, &features, &c.pendingKey, &c.prevSerial, &c.RevokedReason, &pauseDays)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -594,6 +602,10 @@ func scanClient(sc interface{ Scan(...any) error }) (*Client, error) {
 	c.Tags = nonNil(c.Tags)
 	json.Unmarshal([]byte(revJobs), &c.revokedJobs)
 	json.Unmarshal([]byte(bw), &c.Bandwidth)
+	if pauseDays.Valid {
+		d := int(pauseDays.Int64)
+		c.PauseDays = &d
+	}
 	json.Unmarshal([]byte(features), &c.Features)
 	c.Features = nonNil(c.Features)
 	c.Restorable = c.Revoked && c.revokedSerial != ""

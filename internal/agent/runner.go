@@ -108,6 +108,7 @@ func NewRunner(cfg *Config, version string, log *slog.Logger) (*Runner, error) {
 	r.sched.conn = r.connection
 	r.sched.cond = r.conditions
 	r.loadLocal()
+	r.applyPausePolicy(r.sched.Config())
 	r.sched.logf = func(level, format string, args ...any) { r.log.Info(fmt.Sprintf(format, args...), "level", level) }
 	return r, nil
 }
@@ -365,7 +366,7 @@ func (r *Runner) poll(ctx context.Context, base string, wait int) (*api.PollResp
 	req.PausedUntil, req.PausedBy = r.pauseInfo()
 	req.TrayError = r.trayError()
 	// The service only runs once the data dir is secured (see SecureDataDir).
-	req.Features = []string{api.FeatureDataDirACL, api.FeatureCertRenewal}
+	req.Features = []string{api.FeatureDataDirACL, api.FeatureCertRenewal, api.FeaturePauseLimit}
 	if runtime.GOOS == "windows" {
 		req.Features = append(req.Features, api.FeatureProtectedRestore)
 	}
@@ -379,6 +380,7 @@ func (r *Runner) poll(ctx context.Context, base string, wait int) (*api.PollResp
 			r.log.Error("rejecting configuration", "err", err)
 		} else {
 			r.log.Info("configuration updated", "rev", resp.Config.Rev[:12], "jobs", len(resp.Config.Jobs))
+			r.applyPausePolicy(resp.Config)
 			r.sched.Tick()
 		}
 	}
@@ -453,7 +455,11 @@ func (r *Runner) busy(jobID int64) bool {
 
 // startLocal queues a scheduled or catch-up run (called by the Scheduler).
 func (r *Runner) startLocal(spec api.JobSpec, job api.JobConfig, trigger string, slot time.Time) bool {
-	return r.queueLocal(task{spec: spec, job: job, local: true, trigger: trigger, slot: slot})
+	if !r.queueLocal(task{spec: spec, job: job, local: true, trigger: trigger, slot: slot}) {
+		return false
+	}
+	r.pauseStreakOver()
+	return true
 }
 
 // queueLocal queues a run the agent starts itself, unless its job is queued or running.

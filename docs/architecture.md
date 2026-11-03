@@ -486,7 +486,14 @@ was updated, the running tray starts the new executable and exits.
 * **Pause scheduled backups** for 1, 4 or 24 hours (no indefinite pause). While paused, due slots
   of jobs with catch-up wait and start when the pause ends; others are recorded as `missed`
   ("paused on the PC by DOMAIN\user"). The pause is kept across restarts (`pause.json`) and
-  reported in the poll, and the client page in the console shows it.
+  reported in the poll, and the client page in the console shows it. Any interactive user can
+  pause again and again, so the console limits how many **days in a row** pauses may cover
+  (`pause_days` in the agent config; default 1, set under *Console Settings → Agents*, and
+  overridable per client: 0 = no pauses, -1 = no limit). The count starts with the first pause
+  (`pause.json` keeps it) and ends only when a scheduled or catch-up run starts; resuming early
+  or "Back up now" doesn't reset it. A pause is cut to the end of the allowance, further ones
+  are refused, the tray hides the menu item, and a stricter limit shortens a pause in effect.
+  Agents without the `pause-limit` feature ignore the setting.
 * **Restore files…** opens a restore page for this PC in the browser (below).
 
 **Self-service restore page.** On *Restore files…* the agent registers a restore session with

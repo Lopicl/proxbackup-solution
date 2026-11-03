@@ -21,7 +21,7 @@ See [docs/architecture.md](docs/architecture.md) for the design, security model 
 
 | Component | Description |
 | --- | --- |
-| `proxbackup-agent` | **ProxBackup Agent** — Windows service. Runs the schedule pushed by the console, backs up (VSS → pxar archive or volume image → chunks to PBS) and restores. Tray icon per user session: status, *Back up now*, pause, recent runs, *Restore files…* |
+| `proxbackup-agent` | **ProxBackup Agent** — Windows service. Runs the schedule pushed by the console, backs up (VSS → pxar archive or volume image → chunks to PBS) and restores. Tray icon per user session: status, *Back up now*, pause (limited to a number of days in a row, default 1), recent runs, *Restore files…* |
 | `proxbackup-server` | **ProxBackup Console** — on-premises management server with web UI: enrollment, jobs, run history and live logs, snapshot/file browser, restore, retention, locks, encryption keys, notifications, updates. |
 | `pkg/pbs`, `pkg/pxar` | Go implementations of the PBS client protocol and the pxar format (v1 and v2 split archives). |
 

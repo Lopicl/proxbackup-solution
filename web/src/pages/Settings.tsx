@@ -5,14 +5,16 @@ import { api, type EncryptionSettings, type NotifySettings, type Perm } from '..
 import { generateMasterKeyPair } from '../masterkey'
 import { Card, ErrorBox, Field } from '../ui'
 import { usePerms } from '../perms'
+import { AgentsCard } from './PauseLimit'
 import { Targets } from './Targets'
 import { UpdatesCard } from './Updates'
 import { AuditLog, RoleList, UserList } from './Users'
 
 /** The Console Settings tabs the user may open, in display order. */
-export function settingsTabs(can: (p: Perm) => boolean): [string, string][] {
+export function settingsTabs(can: (p: Perm) => boolean, all: (p: Perm) => boolean): [string, string][] {
   const tabs: [string, string][] = []
   if (can('clients.view') || can('targets.manage')) tabs.push(['datastores', 'Datastores'])
+  if (all('clients.manage')) tabs.push(['agents', 'Agents'])
   if (can('notifications.manage')) tabs.push(['notifications', 'Notifications'])
   if (can('encryption.manage')) tabs.push(['encryption', 'Encryption'])
   if (can('updates.manage')) tabs.push(['updates', 'Updates'])
@@ -23,8 +25,8 @@ export function settingsTabs(can: (p: Perm) => boolean): [string, string][] {
 }
 
 export function Settings({ tab }: { tab?: string }) {
-  const { can } = usePerms()
-  const tabs = settingsTabs(can)
+  const { can, all } = usePerms()
+  const tabs = settingsTabs(can, all)
   const current = tabs.find(([k]) => k === tab)?.[0] ?? tabs[0][0]
   return (
     <>
@@ -37,6 +39,7 @@ export function Settings({ tab }: { tab?: string }) {
         ))}
       </nav>
       {current === 'datastores' && <Targets />}
+      {current === 'agents' && <AgentsCard />}
       {current === 'notifications' && <NotificationsCard />}
       {current === 'encryption' && <EncryptionCard />}
       {current === 'updates' && <UpdatesCard />}

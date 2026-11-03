@@ -97,6 +97,7 @@ export interface Client {
   paused_by: string
   tray_error: string // the agent can't start the tray app on the PC ('' = fine)
   bandwidth: Bandwidth // upload limit for all the client's jobs
+  pause_days: number | null // days in a row PC users may pause scheduled backups (null = console default, -1 = no limit, 0 = none)
   revoked: boolean
   revoked_at: number
   restorable: boolean // revoked and can be un-revoked (its agent reconnects)
@@ -292,6 +293,11 @@ export interface NotifySettings {
   on_success: boolean
   on_failure: boolean
   stale_days: number
+}
+
+/** Console-wide agent settings. */
+export type AgentSettings = {
+  pause_days: number // days in a row PC users may pause scheduled backups (-1 = no limit, 0 = none)
 }
 
 export interface EncryptionSettings {
@@ -596,6 +602,9 @@ export const api = {
   runGroupJob: (id: number) => request<{ run_ids: number[]; skipped: number }>('POST', `/group-jobs/${id}/run`),
   setClientTags: (id: number, tags: string[]) => request<{ tags: string[] }>('PUT', `/clients/${id}/tags`, { tags }),
   setClientBandwidth: (id: number, b: Bandwidth) => request<Bandwidth>('PUT', `/clients/${id}/bandwidth`, b),
+  setClientPauseLimit: (id: number, days: number | null) => request<{ days: number | null }>('PUT', `/clients/${id}/pause-limit`, { days }),
+  agentSettings: () => request<AgentSettings>('GET', '/settings/agents'),
+  saveAgentSettings: (s: AgentSettings) => request<AgentSettings>('PUT', '/settings/agents', s),
 
   runs: (q: { client_id?: number; active?: boolean; limit?: number } = {}) => {
     const p = new URLSearchParams()

@@ -171,10 +171,14 @@ func (t *app) apply(st *ipc.Status) {
 	}
 	enable(t.restore, st != nil)
 	enable(t.pause, st != nil && st.Configured)
-	if v.paused {
+	switch {
+	case st != nil && st.PauseOff:
+		t.pause.Hide()
+		t.resume.Hide()
+	case v.paused:
 		t.pause.Hide()
 		t.resume.Show()
-	} else {
+	default:
 		t.resume.Hide()
 		t.pause.Show()
 	}
