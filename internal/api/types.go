@@ -80,6 +80,11 @@ type RestoreSpec struct {
 	Session string `json:"session,omitempty"`
 	// RequestedBy is the Windows account of that user (for the run log).
 	RequestedBy string `json:"requested_by,omitempty"`
+	// SystemFolders lets the restore write into protected system folders
+	// (see ProtectedFolder): the console user has the "Restore to system
+	// folders" permission. Without it, agents with FeatureProtectedRestore
+	// refuse such targets and skip what would land in them.
+	SystemFolders bool `json:"system_folders,omitempty"`
 }
 
 // JobSpec is sent from server to agent to start a run.
@@ -226,6 +231,10 @@ const (
 	// FeatureCertRenewal: the agent gets a new client certificate when
 	// PollResponse.RenewCert asks for it (POST /agent/v1/cert).
 	FeatureCertRenewal = "cert-renewal"
+	// FeatureProtectedRestore: the agent keeps restores out of protected
+	// system folders unless RestoreSpec.SystemFolders is set. Older agents
+	// write wherever a restore points them.
+	FeatureProtectedRestore = "protected-restore"
 )
 
 // PollResponse carries config updates, on-demand work and cancellations.

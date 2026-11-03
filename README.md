@@ -156,6 +156,13 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 - Restores never write through a junction or symbolic link in the target folder (that entry is
   skipped with a warning), and refuse a target whose path contains one. A folder the agent creates
   directly on a drive (like `C:\Restore`) is open only to SYSTEM and administrators.
+- **System folders.** The agent restores as SYSTEM, so a restore into Windows, Program Files,
+  ProgramData, the agent's own folders, the Default user profile or a user's Startup folder could
+  replace what the PC runs. Only console users with *Restore to system folders* (Administrator and
+  Operator roles) and PC administrators may do that. For everyone else, the console and the agent
+  refuse such targets and skip what would land in them (a restore to `C:\` skips `C:\Windows`).
+  Older agents can't enforce this, so they only take restores from users with that permission
+  until they are updated.
 - On Windows, backup sources, volumes and restore targets must be on a local drive (`C:\...`). Network paths
   (`\\server\share`) are refused by the console and the agent, so the agent never signs in to
   another machine with the PC's account.
@@ -163,7 +170,9 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 ### 7. Users
 
 *Console Settings* (gear icon) → *Users* adds console users and gives them roles: Administrator, Operator, Restore-only,
-Read-only or custom ones, each for all clients or only chosen clients and tags. Its *Audit log* tab lists
+Read-only or custom ones, each for all clients or only chosen clients and tags. Restore-only users
+can restore files anywhere except system folders (see *Restore*); they can still write into users'
+profiles, so give the role only to people you'd trust with those users' accounts. The *Audit log* tab lists
 sign-ins and every change. Users change their own password under the profile menu. Repeated failed
 sign-ins from one address or for one username are slowed down (HTTP 429 with the time to wait).
 Users who signed in from an address before aren't slowed down by others' failures there (shared

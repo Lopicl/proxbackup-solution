@@ -334,6 +334,26 @@ func validateRestore(req *api.RestoreSpec, c *Client) error {
 	case req.Namespace != "" && !slices.Contains(c.OldNamespaces, req.Namespace):
 		return errors.New("snapshot namespace does not belong to this client")
 	}
-	req.Session, req.RequestedBy = "", ""
+	req.Session, req.RequestedBy, req.SystemFolders = "", "", false
+	return nil
+}
+
+// restoreSystemAllowed decides whether a console restore to client c may
+// write into protected system folders (see api.ProtectedFolder): only if the
+// user has the "Restore to system folders" permission (system). Without it,
+// targets there are refused, and the agent skips what would land in them;
+// Windows agents that can't do that get no such restores.
+func restoreSystemAllowed(req *api.RestoreSpec, c *Client, system bool) error {
+	if system {
+		req.SystemFolders = true
+		return nil
+	}
+	if f := api.ProtectedFolder(req.TargetDir); f != "" {
+		return fmt.Errorf(`%s is a protected system folder: restoring there needs the "Restore to system folders" permission`, f)
+	}
+	// The OS is unknown until the agent first connects.
+	if goos, _, _ := strings.Cut(c.OS, "/"); (goos == "windows" || goos == "") && !slices.Contains(c.Features, api.FeatureProtectedRestore) {
+		return fmt.Errorf(`the agent on this PC (%s) can't keep restores out of system folders; update the agent, or ask someone with the "Restore to system folders" permission to restore`, c.AgentVersion)
+	}
 	return nil
 }

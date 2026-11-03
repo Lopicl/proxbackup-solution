@@ -80,7 +80,11 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 		dec = pxar.NewSplitDecoder(src, countingReader{pstream, &j.bytesRead})
 	}
 
-	root, err := openRestoreRoot(spec.TargetDir)
+	protect, err := restoreProtection(spec)
+	if err != nil {
+		return res, err
+	}
+	root, err := openRestoreRoot(spec.TargetDir, protect)
 	if err != nil {
 		return res, err
 	}
@@ -110,7 +114,8 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 
 // errNotFollowed and errBadName make a restore skip an entry: restores don't
 // write through junctions or symbolic links below the target, which a user
-// could have put there or a crafted archive could have restored.
+// could have put there or a crafted archive could have restored. So does
+// errProtected.
 var (
 	errNotFollowed = errors.New("junction or symbolic link, not followed")
 	errBadName     = errors.New("name not valid on Windows")
@@ -118,11 +123,15 @@ var (
 
 // skipEntry reports whether err only means the entry at path is skipped.
 func (j *job) skipEntry(path string, err error) bool {
-	if !errors.Is(err, errNotFollowed) && !errors.Is(err, errBadName) {
+	if !errors.Is(err, errNotFollowed) && !errors.Is(err, errBadName) && !errors.Is(err, errProtected) {
 		return false
 	}
 	j.skipped.Add(1)
-	j.logf("warn", "skipped %s: %v", path, err)
+	if errors.Is(err, errProtected) {
+		j.logf("warn", "skipped %s with everything in it: %v", path, err)
+	} else {
+		j.logf("warn", "skipped %s: %v", path, err)
+	}
 	return true
 }
 
@@ -157,6 +166,7 @@ func (j *job) restorePxar(ctx context.Context, root *restoreRoot, dec *pxar.Deco
 		return false
 	}
 	var dirs []dirMeta
+	var protected []string // folders skipped with what they hold (errProtected)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -168,7 +178,7 @@ func (j *job) restorePxar(ctx context.Context, root *restoreRoot, dec *pxar.Deco
 		if err != nil {
 			return err
 		}
-		if !selected(e.Path) {
+		if !selected(e.Path) || belowAny(protected, e.Path) {
 			continue
 		}
 		rel := filepath.FromSlash(e.Path)
@@ -178,6 +188,9 @@ func (j *job) restorePxar(ctx context.Context, root *restoreRoot, dec *pxar.Deco
 		switch e.Kind {
 		case pxar.KindDir:
 			if err := root.MkdirAll(rel); err != nil {
+				if errors.Is(err, errProtected) {
+					protected = append(protected, e.Path)
+				}
 				if j.skipEntry(e.Path, err) {
 					continue
 				}

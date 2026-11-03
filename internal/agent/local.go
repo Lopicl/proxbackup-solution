@@ -331,6 +331,11 @@ func (r *Runner) restoreAs(ctx context.Context, spec api.JobSpec, rep Reporter) 
 	if err := api.RestoreAllowed(sess.scope, origin, rs.Paths, rs.TargetDir, strings.HasSuffix(rs.Archive, ".img.fidx")); err != nil {
 		return api.Result{State: api.RunFailed, Error: err.Error()}
 	}
+	// PC administrators may restore into system folders; other users write
+	// with their own rights anyway.
+	own := *rs
+	own.SystemFolders = sess.peer.Admin
+	spec.Restore = &own
 	if sess.peer.Admin {
 		rep.Log("info", fmt.Sprintf("restore requested on the PC by administrator %s", sess.peer.User))
 		return Run(ctx, spec, rep)

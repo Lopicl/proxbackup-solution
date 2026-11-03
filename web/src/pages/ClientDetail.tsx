@@ -400,7 +400,12 @@ export function ClientDetail({ id, tab }: { id: number; tab: string }) {
       )}
 
       {tab === 'snapshots' && canRestore && (
-        <Snapshots clientId={id} online={c.online} onQueued={(runs) => (location.hash = runs.length === 1 ? `/runs/${runs[0]}` : `/clients/${id}/runs`)} />
+        <Snapshots
+          clientId={id}
+          online={c.online}
+          systemFolders={perms.can('restore.system', c)}
+          onQueued={(runs) => (location.hash = runs.length === 1 ? `/runs/${runs[0]}` : `/clients/${id}/runs`)}
+        />
       )}
 
       {editing && (
@@ -510,11 +515,21 @@ function TagsEditor({ clientId, tags, onClose }: { clientId: number; tags: strin
   )
 }
 
-function Snapshots({ clientId, online, onQueued }: { clientId: number; online: boolean; onQueued: (runIds: number[]) => void }) {
+function Snapshots({
+  clientId,
+  online,
+  systemFolders,
+  onQueued,
+}: {
+  clientId: number
+  online: boolean
+  systemFolders: boolean
+  onQueued: (runIds: number[]) => void
+}) {
   const { data, error } = useLoad(() => api.snapshots(clientId), [clientId])
   const [restore, setRestore] = useState<{ snap: Snapshot; archive: string } | null>(null)
   const [browse, setBrowse] = useState<Snapshot | null>(null)
-  const backend = useMemo(() => adminBackend(clientId), [clientId])
+  const backend = useMemo(() => adminBackend(clientId, systemFolders), [clientId, systemFolders])
   return (
     <Card title="Snapshots on PBS">
       <ErrorBox error={error} />

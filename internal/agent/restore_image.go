@@ -70,7 +70,11 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 		}
 	}
 
-	rroot, err := openRestoreRoot(spec.TargetDir)
+	protect, err := restoreProtection(spec)
+	if err != nil {
+		return res, err
+	}
+	rroot, err := openRestoreRoot(spec.TargetDir, protect)
 	if err != nil {
 		return res, err
 	}
@@ -79,6 +83,7 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 	root := filepath.Clean(spec.TargetDir)
 	var dirs []*ntfs.File
 	var dirRels []string
+	var protected []string // folders skipped with what they hold (errProtected)
 	for _, s := range sels {
 		if covered(s.rel) {
 			continue
@@ -88,6 +93,9 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 			if !withinDir(root, filepath.Join(root, target)) {
 				return fmt.Errorf("refusing to restore outside target: %q", rel)
 			}
+			if belowAny(protected, rel) {
+				return nil
+			}
 			if why := imageSkipReason(f); why != "" {
 				j.skipped.Add(1)
 				j.logf("warn", "skipped %s: %s", rel, why)
@@ -95,6 +103,9 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 			}
 			if f.IsDir {
 				if err := rroot.MkdirAll(target); err != nil {
+					if errors.Is(err, errProtected) {
+						protected = append(protected, rel)
+					}
 					if j.skipEntry(rel, err) {
 						return nil
 					}

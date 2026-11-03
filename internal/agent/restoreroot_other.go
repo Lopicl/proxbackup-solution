@@ -27,7 +27,7 @@ type restoreEntry struct {
 	path, tmp string
 }
 
-func openRestoreRoot(dir string) (*restoreRoot, error) {
+func openRestoreRoot(dir string, _ protectedFolders) (*restoreRoot, error) {
 	dir = filepath.Clean(dir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err

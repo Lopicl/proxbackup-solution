@@ -377,7 +377,9 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 		spec.Kind, spec.Volumes = api.KindImage, sources
 	case "restore":
 		spec.Kind = api.KindRestore
-		spec.Restore = &api.RestoreSpec{BackupID: *id, BackupTime: *backupTime, Archive: *archive, Paths: paths, TargetDir: *target, Overwrite: *overwrite}
+		// The command runs with its caller's own rights, not as the service.
+		spec.Restore = &api.RestoreSpec{BackupID: *id, BackupTime: *backupTime, Archive: *archive, Paths: paths, TargetDir: *target, Overwrite: *overwrite,
+			SystemFolders: true}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

@@ -30,6 +30,7 @@ const (
 	PermManageJobs    Perm = "jobs.manage"     // group jobs and member settings
 	PermRunBackups    Perm = "backups.run"     // start and cancel backups
 	PermRestore       Perm = "restore"         // browse snapshots, restore, download client keys
+	PermRestoreSystem Perm = "restore.system"  // restore into Windows, Program Files and other system folders
 	PermTargets       Perm = "targets.manage"  // datastores
 	PermNotifications Perm = "notifications.manage"
 	PermUpdates       Perm = "updates.manage" // console update settings and installs
@@ -55,6 +56,8 @@ var permissions = []PermInfo{
 	{PermManageJobs, "Manage jobs", "Change member job settings. Creating and editing group jobs needs all clients.", true},
 	{PermRunBackups, "Run backups", "Start and cancel backups.", true},
 	{PermRestore, "Restore", "Browse snapshots, restore files and download client encryption keys.", true},
+	{PermRestoreSystem, "Restore to system folders", "With Restore: restore into Windows, Program Files, ProgramData, the Default user profile and users' Startup folders. " +
+		"Restores run as SYSTEM, so this lets the user replace what the PC runs. Without it, restores there are refused or skipped.", true},
 	{PermTargets, "Manage datastores", "Add, change and remove the PBS datastores clients back up to. Pointing a datastore in use at another host or fingerprint also needs Restore for all clients.", false},
 	{PermNotifications, "Manage notifications", "Email and webhook notification settings.", false},
 	{PermUpdates, "Manage updates", "Console update settings and installing updates.", false},
@@ -79,10 +82,10 @@ var builtinRoles = []struct {
 	perms           []Perm
 }{
 	{"admin", "Administrator", "Everything, including users and console settings.", []Perm{PermViewClients, PermManageClients,
-		PermManageRevoked, PermManageJobs, PermRunBackups, PermRestore, PermTargets, PermNotifications, PermUpdates, PermEncryption, PermUsers, PermAudit}},
+		PermManageRevoked, PermManageJobs, PermRunBackups, PermRestore, PermRestoreSystem, PermTargets, PermNotifications, PermUpdates, PermEncryption, PermUsers, PermAudit}},
 	{"operator", "Operator", "Day-to-day work: clients, jobs, backups and restores.", []Perm{PermViewClients, PermManageClients,
-		PermManageJobs, PermRunBackups, PermRestore}},
-	{"restore", "Restore-only", "Sees clients and restores their files.", []Perm{PermViewClients, PermRestore}},
+		PermManageJobs, PermRunBackups, PermRestore, PermRestoreSystem}},
+	{"restore", "Restore-only", "Sees clients and restores their files, except into system folders.", []Perm{PermViewClients, PermRestore}},
 	{"readonly", "Read-only", "Sees clients, jobs and runs.", []Perm{PermViewClients}},
 }
 

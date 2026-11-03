@@ -534,6 +534,13 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	if err := restoreSystemAllowed(&req, c, access(r).Client(PermRestoreSystem, c)); err != nil {
+		httpError(w, http.StatusForbidden, err)
+		return
+	}
+	if req.SystemFolders {
+		auditDetail(r, "%s from %s/%d to %s, system folders allowed", req.Archive, req.BackupID, req.BackupTime, req.TargetDir)
+	}
 	runID, err := s.store.QueueRun(ctx, 0, id, api.KindRestore, "manual", &req)
 	if err != nil {
 		httpError(w, 400, err)

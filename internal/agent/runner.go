@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -95,6 +96,7 @@ func NewRunner(cfg *Config, version string, log *slog.Logger) (*Runner, error) {
 		inflight: map[int64]bool{},
 		queue:    make(chan task, 64),
 	}
+	agentDataDir = cfg.dir
 	r.sched = NewScheduler(cfg.dir)
 	r.sched.start = r.startLocal
 	r.sched.busy = r.busy
@@ -361,6 +363,9 @@ func (r *Runner) poll(ctx context.Context, base string, wait int) (*api.PollResp
 	req.TrayError = r.trayError()
 	// The service only runs once the data dir is secured (see SecureDataDir).
 	req.Features = []string{api.FeatureDataDirACL, api.FeatureCertRenewal}
+	if runtime.GOOS == "windows" {
+		req.Features = append(req.Features, api.FeatureProtectedRestore)
+	}
 	var resp api.PollResponse
 	if err := postJSON(ctx, r.client(), fmt.Sprintf("%s/agent/v1/poll?wait=%d", base, wait), req, &resp); err != nil {
 		return nil, err

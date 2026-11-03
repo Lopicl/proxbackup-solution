@@ -363,6 +363,7 @@ export type Perm =
   | 'jobs.manage'
   | 'backups.run'
   | 'restore'
+  | 'restore.system'
   | 'targets.manage'
   | 'notifications.manage'
   | 'updates.manage'

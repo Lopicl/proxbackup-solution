@@ -60,6 +60,12 @@ func linkDir(t *testing.T, target, link string) {
 // into target.
 func restoreArchive(t *testing.T, target, overwrite string) *job {
 	t.Helper()
+	return restoreArchiveProtected(t, target, overwrite, nil)
+}
+
+// restoreArchiveProtected is restoreArchive keeping out of protect.
+func restoreArchiveProtected(t *testing.T, target, overwrite string, protect protectedFolders) *job {
+	t.Helper()
 	var buf bytes.Buffer
 	dm := pxar.Metadata{Mode: pxar.ModeIFDIR | 0o755, MtimeSecs: 1700000000}
 	fm := pxar.Metadata{Mode: pxar.ModeIFREG | 0o644, MtimeSecs: 1700000001}
@@ -82,7 +88,7 @@ func restoreArchive(t *testing.T, target, overwrite string) *job {
 	must(enc.Close())
 
 	j := &job{rep: nopReporter{}}
-	root, err := openRestoreRoot(target)
+	root, err := openRestoreRoot(target, protect)
 	must(err)
 	defer root.Close()
 	must(j.restorePxar(context.Background(), root, pxar.NewDecoder(&buf), &api.RestoreSpec{TargetDir: target, Overwrite: overwrite}))
@@ -129,7 +135,7 @@ func TestRestoreReplacesFileLink(t *testing.T) {
 // write through either, and neither is a link in the target's own path.
 func TestRestoreRootRefusesLinks(t *testing.T) {
 	target, outside := t.TempDir(), t.TempDir()
-	root, err := openRestoreRoot(target)
+	root, err := openRestoreRoot(target, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +161,7 @@ func TestRestoreRootRefusesLinks(t *testing.T) {
 	}
 	link := filepath.Join(t.TempDir(), "link")
 	linkDir(t, outside, link)
-	if r, err := openRestoreRoot(filepath.Join(link, "restore")); err == nil {
+	if r, err := openRestoreRoot(filepath.Join(link, "restore"), nil); err == nil {
 		r.Close()
 		t.Error("target below a link accepted")
 	}

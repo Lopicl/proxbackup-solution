@@ -363,10 +363,11 @@ read on every run.
   | `jobs.manage` | member job settings; group job definitions need all clients | ✓ |
   | `backups.run` | start and cancel backups | ✓ |
   | `restore` | snapshots, file browser, restores, client key download | ✓ |
+  | `restore.system` | with `restore`: restores into system folders (`api.ProtectedFolder`; the agent checks folder IDs too) | ✓ |
   | `targets.manage`, `notifications.manage`, `updates.manage`, `encryption.manage`, `users.manage`, `audit.view` | console settings, users and roles, audit log | — |
 
   Built-in roles (kept in sync at startup, not editable): Administrator (all), Operator
-  (client permissions except `clients.revoked`), Restore-only (view + restore), Read-only (view); custom roles pick any
+  (client permissions except `clients.revoked`), Restore-only (view + restore, not `restore.system`), Read-only (view); custom roles pick any
   set. A user gets one or more roles, each for **all clients** or for chosen clients and
   **tags** (clients tagged later are included). Console permissions only count from roles for
   all clients; any client permission implies seeing that client. Enrollment, client tags and
@@ -494,6 +495,28 @@ PC's snapshots and reuses the console's file browser:
 
 Restores from the page are ordinary restore runs in the client history, recorded with the
 requesting user.
+
+**Protected system folders.** Restores run as SYSTEM with `SeRestorePrivilege` and apply the
+archive's owners and DACLs, so a restore into a system folder could plant or downgrade what the PC
+runs. `RestoreSpec.SystemFolders` allows it. The console sets it only for users with
+`restore.system` on the client, and the agent only for PC administrators' self-service restores.
+Without it:
+
+* The console refuses targets in `api.ProtectedFolder`'s usual locations on any drive:
+  `Windows`, `Program Files` (also `(x86)` and `(Arm)`), `ProgramData`, `Users\Default` and
+  `Users\*\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`. It also refuses
+  restores to Windows agents that don't report `protected-restore` (older agents, or ones that
+  never connected).
+* The agent (`protected_windows.go`) finds where these folders really are: known folders, the
+  environment, its own executable and data folders, and the profile list (Default profile and
+  each user's Startup folder). It records their volume serial number and 128-bit file ID (64-bit
+  on FAT). The restore root checks every folder it opens on the way to and below the target, by
+  name before opening (so a missing Startup folder isn't created) and by file ID after (so 8.3
+  names, case and other drive letters don't get around it). A protected target fails the run. A
+  protected folder below the target (target `C:\`, archive folder `Windows`) is skipped with
+  everything in it, and the run ends with a warning.
+* Users' own profiles stay writable, since restoring them is the role's purpose. A Restore-only
+  user can therefore still write into any profile on the PCs in their scope.
 
 ## Client-side scheduling
 

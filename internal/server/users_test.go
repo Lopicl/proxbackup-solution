@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"proxbackup/internal/api"
 )
 
 // asAdmin signs r in as an administrator (for tests calling handlers directly).
@@ -274,5 +276,75 @@ func TestUsersAndPermissions(t *testing.T) {
 		if !strings.Contains(all, want) {
 			t.Errorf("audit log lacks %q: %s", want, all)
 		}
+	}
+}
+
+// Restores run as SYSTEM: a Restore-only user can't restore into system
+// folders, or to a PC whose agent can't keep restores out of them.
+func TestRestoreSystemFolders(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	if _, err := s.EnsureAdmin(ctx, "admin-password"); err != nil {
+		t.Fatal(err)
+	}
+	cs := groupTestClients(t, s, "pc1")
+	ui := s.uiRoutes()
+	admin, _ := login(t, ui, "admin", "admin-password")
+	var roles []*Role
+	json.NewDecoder(admin.call("GET", "/api/roles", nil).Body).Decode(&roles)
+	var restoreRole int64
+	for _, r := range roles {
+		if r.Builtin == "restore" {
+			restoreRole = r.ID
+		}
+	}
+	if w := admin.call("POST", "/api/users", map[string]any{"username": "helpdesk", "password": "helpdesk-pw", "enabled": true,
+		"roles": []RoleAssignment{{RoleID: restoreRole, Clients: []int64{cs[0].ID}}}}); w.Code != 200 {
+		t.Fatalf("create user: %d %s", w.Code, w.Body)
+	}
+	user, _ := login(t, ui, "helpdesk", "helpdesk-pw")
+	restore := func(c *session, target string) *httptest.ResponseRecorder {
+		return c.call("POST", "/api/clients/"+jsonNum(cs[0].ID)+"/restore", map[string]any{"backup_id": "pc1", "backup_time": 1700000000,
+			"archive": "c-users.pxar.didx", "target_dir": target, "overwrite": "overwrite", "system_folders": true})
+	}
+
+	// An agent from before the fix (or one that never connected).
+	s.store.TouchClient(ctx, cs[0].ID, api.PollRequest{OS: "windows/amd64", AgentVersion: "0.2.17.40"}, true)
+	if w := restore(user, `C:\Restore`); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "update the agent") {
+		t.Fatalf("restore with an old agent: %d %s", w.Code, w.Body)
+	}
+	if w := restore(admin, `C:\Windows\System32`); w.Code != 200 {
+		t.Fatalf("admin restore with an old agent: %d %s", w.Code, w.Body)
+	}
+
+	s.store.TouchClient(ctx, cs[0].ID, api.PollRequest{OS: "windows/amd64", Features: []string{api.FeatureProtectedRestore}}, true)
+	for _, target := range []string{`C:\Windows\System32`, `c:\program files\ProxBackup`, `C:\ProgramData\proxbackup`,
+		`C:\Restore\..\Windows`, `C:\Users\bob\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup`, `D:\Users\Default\AppData`} {
+		if w := restore(user, target); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "protected system folder") {
+			t.Errorf("restore to %s: %d %s", target, w.Code, w.Body)
+		}
+	}
+	// Above a protected folder: the agent skips what would land in one.
+	for _, target := range []string{`C:\`, `C:\Restore\2026`, `C:\Users\bob`} {
+		if w := restore(user, target); w.Code != 200 {
+			t.Errorf("restore to %s: %d %s", target, w.Code, w.Body)
+		}
+	}
+	if w := restore(admin, `C:\Windows`); w.Code != 200 {
+		t.Fatalf("admin restore: %d %s", w.Code, w.Body)
+	}
+
+	runs, err := s.store.Runs(ctx, RunFilter{ClientID: cs[0].ID, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range runs {
+		admin := strings.HasPrefix(r.Restore.TargetDir, `C:\Windows`)
+		if r.Restore.SystemFolders != admin {
+			t.Errorf("run to %s: system_folders = %v", r.Restore.TargetDir, r.Restore.SystemFolders)
+		}
+	}
+	if len(runs) != 5 {
+		t.Errorf("%d runs queued, want 5", len(runs))
 	}
 }

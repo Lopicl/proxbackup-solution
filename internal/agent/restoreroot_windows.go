@@ -28,8 +28,9 @@ import (
 // refused. Files are written, given their metadata and renamed into place
 // through their own handles.
 type restoreRoot struct {
-	h    windows.Handle
-	path string
+	h       windows.Handle
+	path    string
+	protect protectedFolders // folders it refuses to open
 	// The last folder opened, as archives list a folder's files together.
 	lastRel string
 	last    windows.Handle
@@ -161,8 +162,9 @@ func openChildDir(parent windows.Handle, name string, create bool, sd *windows.S
 
 // openRestoreRoot opens the target folder of a restore, creating it as
 // needed. Every folder on the way is opened like those below it, so a
-// junction anywhere in the path is refused rather than followed.
-func openRestoreRoot(dir string) (*restoreRoot, error) {
+// junction anywhere in the path is refused rather than followed. Folders in
+// protect are refused, there and below the target.
+func openRestoreRoot(dir string, protect protectedFolders) (*restoreRoot, error) {
 	enableRestorePrivilege()
 	dir = filepath.Clean(dir)
 	vol := filepath.VolumeName(dir)
@@ -182,6 +184,10 @@ func openRestoreRoot(dir string) (*restoreRoot, error) {
 				windows.CloseHandle(h)
 				return nil, fmt.Errorf("target folder %s: %w", p, err)
 			}
+			if err := protect.checkPath(p); err != nil {
+				windows.CloseHandle(h)
+				return nil, fmt.Errorf("target folder %s: %w", p, err)
+			}
 			var sd *windows.SECURITY_DESCRIPTOR
 			if i == 0 {
 				sd, _ = windows.SecurityDescriptorFromString(topLevelSDDL)
@@ -191,13 +197,18 @@ func openRestoreRoot(dir string) (*restoreRoot, error) {
 			if errors.Is(err, errNotFollowed) {
 				return nil, fmt.Errorf("target folder: %s is a junction or symbolic link; restore to the folder it points to instead", p)
 			}
+			if err == nil {
+				if err = protect.check(c); err != nil {
+					windows.CloseHandle(c)
+				}
+			}
 			if err != nil {
 				return nil, fmt.Errorf("target folder %s: %w", p, err)
 			}
 			h = c
 		}
 	}
-	return &restoreRoot{h: h, path: dir}, nil
+	return &restoreRoot{h: h, path: dir, protect: protect}, nil
 }
 
 func (r *restoreRoot) Close() error {
@@ -234,9 +245,17 @@ func (r *restoreRoot) walk(rel string, create bool) (windows.Handle, error) {
 	for _, name := range strings.Split(rel, `\`) {
 		done = filepath.Join(done, name)
 		err := checkName(name)
+		if err == nil {
+			err = r.protect.checkPath(filepath.Join(r.path, done))
+		}
 		var c windows.Handle
 		if err == nil {
 			c, err = openChildDir(h, name, create, nil)
+		}
+		if err == nil {
+			if err = r.protect.check(c); err != nil {
+				windows.CloseHandle(c)
+			}
 		}
 		windows.CloseHandle(h)
 		if err != nil {

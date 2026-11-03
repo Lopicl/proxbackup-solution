@@ -16,12 +16,18 @@ export interface RestoreBackend {
   note?: ReactNode
 }
 
-/** The console admin's backend for a client. */
-export function adminBackend(clientId: number): RestoreBackend {
+/** The console admin's backend for a client; systemFolders: the user may restore into system folders. */
+export function adminBackend(clientId: number, systemFolders: boolean): RestoreBackend {
   return {
     catalog: (snap, path) => api.catalog(clientId, snap, path),
     restore: (spec) => api.restore(clientId, spec),
     footer: <Link to={`/clients/${clientId}/runs`}>Restore progress appears in the client history.</Link>,
+    note: systemFolders ? undefined : (
+      <>
+        Restores can't go into Windows, Program Files, ProgramData, the Default user profile or users' Startup folders; files that would land
+        there are skipped. That needs the <i>Restore to system folders</i> permission.
+      </>
+    ),
   }
 }
 
