@@ -841,15 +841,18 @@ sequenceDiagram
   account before ignores that account's backoff, so a flood can't lock its owner out. At most
   4 argon2id hashes (64 MiB each) run at once, and the systemd unit caps the console at
   `MemoryMax=1G`, so a sign-in flood can't exhaust the PBS host's memory.
-* **Updates:** the console and its root helper only install release assets whose SHA-256
-  matches the release's `SHA256SUMS`, and never downgrade. Agents verify the binary's size,
-  hash and reported version and only fetch it from the console over mTLS. Release signing is
-  ready but not switched on yet: once `internal/update/release.pub` holds a minisign public
-  key, builds carrying it accept only releases whose `SHA256SUMS.minisig` checks out with a
-  trusted comment naming the release's version. The secret key stays off GitHub
-  (`scripts/release.sh --sign`), so the repository is then no longer part of the trust base.
-  Until then it is. The release workflow pins its actions to commit SHAs and only its publish
-  job, which runs no build tooling, has `contents: write`.
+* **Updates:** releases are signed: `internal/update/release.pub` holds the minisign public
+  key, and builds accept only releases whose `SHA256SUMS.minisig` checks out with a trusted
+  comment naming the release's version. The secret key stays off GitHub
+  (`scripts/release.sh --sign`), so the repository isn't part of the trust base. The console
+  and its root helper only install release assets whose SHA-256 matches the signed
+  `SHA256SUMS`, and never downgrade. Agents don't take the console's word for an update: the
+  offer carries the release's `SHA256SUMS` and signature, and the agent checks them with its
+  own built-in key, takes the binary's hash from them, and installs only newer versions. So a
+  compromised console (or its PBS host) can't push a binary of its own or an older release to
+  the PCs. They fetch the binary from the console over mTLS and verify its size, hash and
+  reported version before swapping it in. The release workflow pins its actions to commit SHAs
+  and only its publish job, which runs no build tooling, has `contents: write`.
 * **PBS credentials:** the console provisions as the agents' PBS user itself (`proxbackup@pbs`,
   `DatastoreAdmin` on the root namespaces only), signing in with a ticket (`pkg/pbs/ticket.go`: cookie plus
   `CSRFPreventionToken` on writes, a new sign-in after an hour or a 401). Without

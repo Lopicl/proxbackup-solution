@@ -285,21 +285,31 @@ func (c *Client) ByVersion(ctx context.Context, version string) (*Release, error
 // Sums downloads and parses the release's SHA256SUMS: file name → hex digest.
 // With a release key, its signature must check out too.
 func (c *Client) Sums(ctx context.Context, r *Release) (map[string]string, error) {
-	b, err := c.smallAsset(ctx, r, SumsAsset)
+	b, _, err := c.SignedSums(ctx, r)
 	if err != nil {
 		return nil, err
 	}
+	return ParseSums(b)
+}
+
+// SignedSums downloads the release's SHA256SUMS and its signature, checked
+// with the release key (sig is nil without one). Agents check them again
+// themselves (VerifyAsset).
+func (c *Client) SignedSums(ctx context.Context, r *Release) (sums, sig []byte, err error) {
+	b, err := c.smallAsset(ctx, r, SumsAsset)
+	if err != nil {
+		return nil, nil, err
+	}
 	if key := strings.TrimSpace(cmp.Or(c.Key, releaseKey)); key != "" {
 		version, _ := r.Version()
-		sig, err := c.smallAsset(ctx, r, SigAsset)
-		if err != nil {
-			return nil, fmt.Errorf("%w (releases must be signed)", err)
+		if sig, err = c.smallAsset(ctx, r, SigAsset); err != nil {
+			return nil, nil, fmt.Errorf("%w (releases must be signed)", err)
 		}
 		if err := verifySums(key, version, b, sig); err != nil {
-			return nil, fmt.Errorf("release %s: %w", r.Tag, err)
+			return nil, nil, fmt.Errorf("release %s: %w", r.Tag, err)
 		}
 	}
-	return ParseSums(b)
+	return b, sig, nil
 }
 
 func (c *Client) smallAsset(ctx context.Context, r *Release, name string) ([]byte, error) {

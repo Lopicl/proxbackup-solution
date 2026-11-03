@@ -17,18 +17,37 @@ import (
 	"time"
 
 	"proxbackup/internal/api"
+	"proxbackup/internal/update"
 )
 
 // Self-update: the server offers a newer agent in the poll response (see
-// api.AgentUpdate). When no job is running, the agent downloads it over the
-// mTLS connection, verifies size, SHA-256 and the version the binary reports,
-// swaps it in next to the running executable and exits; the service manager
-// restarts it (recovery action "restart", plus an explicit start on Windows).
+// api.AgentUpdate). The agent takes only newer versions, and only binaries
+// the release's signed SHA256SUMS lists (checked with the release key built
+// into the agent), so a compromised console can neither push a binary of its
+// own nor an older release. When no job is running, it downloads the update
+// over the mTLS connection, verifies size, SHA-256 and the version the binary
+// reports, swaps it in next to the running executable and exits; the service
+// manager restarts it (recovery action "restart", plus an explicit start on
+// Windows).
 
 // maybeUpdate starts installing an offered update unless one is in progress,
 // recently failed, or the agent is busy.
 func (r *Runner) maybeUpdate(ctx context.Context, u *api.AgentUpdate) {
-	if u.Version == r.version || runtime.GOOS != "windows" {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	if ok, err := r.checkOffer(u); !ok {
+		if err != nil {
+			r.mu.Lock()
+			warn := r.updateRejected != u.Version || time.Since(r.updateRejectedAt) > time.Hour
+			if warn {
+				r.updateRejected, r.updateRejectedAt = u.Version, time.Now()
+			}
+			r.mu.Unlock()
+			if warn {
+				r.log.Error("refusing the agent update the console offers", "version", u.Version, "err", err)
+			}
+		}
 		return
 	}
 	r.mu.Lock()
@@ -51,6 +70,17 @@ func (r *Runner) maybeUpdate(ctx context.Context, u *api.AgentUpdate) {
 			r.log.Error("agent update failed; retrying in an hour", "version", u.Version, "err", err)
 		}
 	}()
+}
+
+// checkOffer reports whether u is a newer release of this agent, signed with
+// the release key (an error says why not; none for an older or the same
+// version, or a development build, which never updates).
+func (r *Runner) checkOffer(u *api.AgentUpdate) (bool, error) {
+	if !update.Newer(u.Version, r.version) {
+		return false, nil
+	}
+	err := update.VerifyAsset(r.releaseKey, u.Version, update.AgentAsset(runtime.GOARCH), []byte(u.Sums), []byte(u.SumsSig), u.SHA256)
+	return err == nil, err
 }
 
 func (r *Runner) busyLocked() bool {

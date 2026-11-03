@@ -108,6 +108,9 @@ type updater struct {
 	status UpdateStatus
 	latest *update.Release
 	agents map[string]agentBinary // by arch, for s.cfg.Version
+	// agentSums and agentSig are the release's SHA256SUMS and signature,
+	// which agents check the binaries with.
+	agentSums, agentSig []byte
 	pushed map[int64]bool         // clients an admin pushed the agent update to (PushAgent)
 	busy   sync.Mutex             // one check/install at a time
 
@@ -291,10 +294,17 @@ func (u *updater) cacheAgents(ctx context.Context) {
 		if err != nil {
 			return err
 		}
-		sums, err := u.gh.Sums(ctx, r)
+		raw, sig, err := u.gh.SignedSums(ctx, r)
 		if err != nil {
 			return err
 		}
+		sums, err := update.ParseSums(raw)
+		if err != nil {
+			return err
+		}
+		u.mu.Lock()
+		u.agentSums, u.agentSig = raw, sig
+		u.mu.Unlock()
 		dir := filepath.Join(u.dir, "agent", v)
 		var errs []error
 		for _, arch := range []string{"amd64", "arm64"} {
@@ -345,11 +355,13 @@ func (u *updater) agentOffer(ctx context.Context, id int64, osArch, version stri
 		delete(u.pushed, id)
 		ok = false
 	}
+	sums, sig := u.agentSums, u.agentSig
 	u.mu.Unlock()
 	if !ok || !pushed && !u.settings(ctx).Agents {
 		return nil
 	}
-	return &api.AgentUpdate{Version: u.s.cfg.Version, URL: "/agent/v1/update/windows-" + arch, SHA256: b.sha256, Size: b.size, Force: pushed}
+	return &api.AgentUpdate{Version: u.s.cfg.Version, URL: "/agent/v1/update/windows-" + arch, SHA256: b.sha256, Size: b.size, Force: pushed,
+		Sums: string(sums), SumsSig: string(sig)}
 }
 
 // agentUpdate returns the version client c's agent can be updated to (the

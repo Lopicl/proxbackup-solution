@@ -47,9 +47,12 @@ type Runner struct {
 	condRead   bool // cond was read at least once (scheduleLoop only)
 	condWarned bool
 
-	updating       bool // self-update in progress (selfupdate.go)
-	updateFailed   string
-	updateFailedAt time.Time
+	updating         bool // self-update in progress (selfupdate.go)
+	updateFailed     string
+	updateFailedAt   time.Time
+	updateRejected   string // last offer that failed checkOffer, logged hourly
+	updateRejectedAt time.Time
+	releaseKey       string // tests: key releases are signed with (empty = built-in)
 
 	local localState // tray app view (local.go)
 

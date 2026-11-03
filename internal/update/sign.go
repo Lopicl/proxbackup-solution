@@ -4,6 +4,7 @@ package update
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/ed25519"
 	_ "embed"
 	"encoding/base64"
@@ -98,6 +99,35 @@ func verifySums(key string, version string, sums, sig []byte) error {
 	}
 	if want := SumsComment(version); comment != want {
 		return fmt.Errorf("%s: signed for %q, not %q", SigAsset, comment, want)
+	}
+	return nil
+}
+
+// VerifyAsset checks that sums is the SHA256SUMS of release version, signed
+// with the release key (key; empty is the built-in one), and lists asset with
+// the hex digest sha256. Agents check an update the console offers this way,
+// so a compromised console can't hand them a binary of its own.
+func VerifyAsset(key, version, asset string, sums, sig []byte, sha256 string) error {
+	key = strings.TrimSpace(cmp.Or(key, releaseKey))
+	if key == "" {
+		return errors.New("this build carries no release key")
+	}
+	if len(sig) == 0 {
+		return fmt.Errorf("unsigned release (no %s)", SigAsset)
+	}
+	if err := verifySums(key, version, sums, sig); err != nil {
+		return err
+	}
+	m, err := ParseSums(sums)
+	if err != nil {
+		return err
+	}
+	want, ok := m[asset]
+	if !ok {
+		return fmt.Errorf("%s isn't listed in %s of %s", asset, SumsAsset, version)
+	}
+	if !strings.EqualFold(want, sha256) {
+		return fmt.Errorf("%s of %s lists %s for %s, not %s", SumsAsset, version, want, asset, sha256)
 	}
 	return nil
 }

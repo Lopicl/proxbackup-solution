@@ -100,6 +100,10 @@ func TestUpdaterCheckAndAgentOffer(t *testing.T) {
 	if o == nil || o.Version != "0.1.0.1" || o.URL != "/agent/v1/update/windows-arm64" || o.Size != int64(len("agent 0.1.0.1")) {
 		t.Fatalf("offer = %+v", o)
 	}
+	// Agents check the binary against the release's signed SHA256SUMS themselves.
+	if err := update.VerifyAsset(releaseSigner.Pub, o.Version, update.AgentAsset("arm64"), []byte(o.Sums), []byte(o.SumsSig), o.SHA256); err != nil {
+		t.Fatalf("offer doesn't verify: %v", err)
+	}
 	for _, c := range [][2]string{{"windows/amd64", "0.1.0.1"}, {"windows/amd64", "0.2.0.0"}, {"windows/amd64", "dev"}, {"linux/amd64", "0.0.1.0"}} {
 		if o := s.updater.agentOffer(ctx, 1, c[0], c[1]); o != nil {
 			t.Errorf("unexpected offer for %v: %+v", c, o)

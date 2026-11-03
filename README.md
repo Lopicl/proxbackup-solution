@@ -331,7 +331,7 @@ between are shown.
 | --- | --- |
 | `.deb` | The unprivileged console writes a request; the root unit `proxbackup-server-update.service` (triggered by `.path`) downloads and verifies the package, refuses downgrades and runs `dpkg -i`. Logs: `journalctl -u proxbackup-server-update`. |
 | Standalone | The console downloads the new binary, swaps it in and re-executes itself. |
-| Agents | Follow the console: an older agent is offered the console's version over mTLS and, when idle, verifies it, replaces itself and restarts. |
+| Agents | Follow the console: an older agent is offered the console's version over mTLS and, when idle, checks it against the release's signed `SHA256SUMS` with its own built-in key, replaces itself and restarts. Agents never install an older version. |
 
 Consoles ≤ 0.1.13 must be upgraded by hand once. `PROXBACKUP_UPDATE_REPO` (in
 `/etc/proxbackup/proxbackup.env`) points updates at another repository.

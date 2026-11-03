@@ -262,6 +262,11 @@ type AgentUpdate struct {
 	// Force is set when an admin pushed the update: install it even if an
 	// earlier attempt failed within the hour.
 	Force bool `json:"force,omitempty"`
+	// Sums and SumsSig are the release's SHA256SUMS and its minisign
+	// signature. The agent checks them with its built-in release key, so it
+	// doesn't take the binary on the console's word alone.
+	Sums    string `json:"sums,omitempty"`
+	SumsSig string `json:"sums_sig,omitempty"`
 }
 
 // RunRegister announces a run the agent started on its own (scheduled or
