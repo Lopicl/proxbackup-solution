@@ -206,7 +206,7 @@ func TestTrimShortensErrors(t *testing.T) {
 func TestClipPoll(t *testing.T) {
 	huge := strings.Repeat("A", 1<<20)
 	req := api.PollRequest{Hostname: huge, OS: huge, AgentVersion: huge, ConfigRev: huge, TimeZone: huge, PausedBy: huge, TrayError: huge,
-		Features: make([]string, 1000), Schedule: make([]api.JobState, 5000)}
+		Features: make([]string, 1000), Schedule: make([]api.JobState, 5000), RunningRuns: make([]int64, 2<<20)}
 	for i := range req.Features {
 		req.Features[i] = huge
 	}
@@ -215,5 +215,34 @@ func TestClipPoll(t *testing.T) {
 	b, _ := json.Marshal(req)
 	if len(b) > 64<<10 {
 		t.Fatalf("clipped poll is %d bytes", len(b))
+	}
+}
+
+// The 2026-10-30 audit: MarkMissingLost added a placeholder per running run
+// with string +=, so a 4 MiB poll of ~2M ids cost half an hour of CPU.
+func TestMarkMissingLost(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	c := floodTestClient(t, s, "pc-1")
+	_, kept := registerRun(t, s, c, "0123456789abcdef-kept")
+	_, lost := registerRun(t, s, c, "0123456789abcdef-lost")
+	s.store.db.ExecContext(ctx, `UPDATE runs SET last_event_at=1`)
+
+	start := time.Now()
+	running := make([]int64, 2<<20)
+	running[len(running)-1] = kept
+	s.store.MarkMissingLost(ctx, c.ID, running)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("2M running ids took %v", d)
+	}
+	if r, _ := s.store.Run(ctx, kept); r.State != "running" {
+		t.Fatalf("listed run is %s", r.State)
+	}
+	if r, _ := s.store.Run(ctx, lost); r.State != "lost" {
+		t.Fatalf("unlisted run is %s", r.State)
+	}
+	s.store.MarkMissingLost(ctx, c.ID, nil) // an idle agent
+	if r, _ := s.store.Run(ctx, kept); r.State != "lost" {
+		t.Fatalf("run of an idle agent is %s", r.State)
 	}
 }

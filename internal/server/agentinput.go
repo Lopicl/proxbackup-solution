@@ -20,6 +20,7 @@ const (
 
 	maxAgentFeatures = 32   // PollRequest.Features entries
 	maxAgentJobState = 1000 // PollRequest.Schedule entries
+	maxAgentRunning  = 1000 // PollRequest.RunningRuns entries (an agent runs a handful at once)
 )
 
 // clip cuts s to at most n bytes (plus "…"), on a UTF-8 boundary.
@@ -50,6 +51,7 @@ func clipPoll(req *api.PollRequest) {
 	req.TimeZone, req.PausedBy = clip(req.TimeZone, maxAgentToken), clip(req.PausedBy, maxAgentName)
 	req.TrayError = clip(req.TrayError, maxAgentText)
 	req.Features = req.Features[:min(len(req.Features), maxAgentFeatures)]
+	req.RunningRuns = req.RunningRuns[:min(len(req.RunningRuns), maxAgentRunning)]
 	for i, f := range req.Features {
 		req.Features[i] = clip(f, maxAgentToken)
 	}

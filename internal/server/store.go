@@ -1517,14 +1517,11 @@ func (s *Store) MarkLost(ctx context.Context, olderThan time.Duration) ([]int64,
 
 // MarkMissingLost fails runs the agent says it isn't running (e.g. after an agent restart).
 func (s *Store) MarkMissingLost(ctx context.Context, clientID int64, running []int64) {
-	q := `UPDATE runs SET state='lost', finished_at=?, error='agent is no longer running this job'
-		WHERE client_id=? AND state IN ('dispatched','running') AND last_event_at<?`
-	args := []any{now(), clientID, now() - 120}
-	for _, id := range running {
-		q += ` AND id<>?`
-		args = append(args, id)
-	}
-	s.db.ExecContext(ctx, q, args...)
+	// One JSON parameter, not a placeholder per id: the list comes from the agent.
+	ids, _ := json.Marshal(append([]int64{}, running...))
+	s.db.ExecContext(ctx, `UPDATE runs SET state='lost', finished_at=?, error='agent is no longer running this job'
+		WHERE client_id=? AND state IN ('dispatched','running') AND last_event_at<?
+		AND id NOT IN (SELECT value FROM json_each(?))`, now(), clientID, now()-120, string(ids))
 }
 
 // A run's log holds at most this much, and a client's run logs together at
