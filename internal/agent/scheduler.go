@@ -23,6 +23,8 @@ import (
 //   - within the job's start window   → start it (trigger "schedule")
 //   - window passed (PC off/asleep)   → catch-up on: start once the network is up
 //     (trigger "catch-up", see catchUpNetWait); catch-up off: record as "missed"
+//   - within the window, job wakes the PC → start once the network is up as well;
+//     the agent keeps the PC awake meanwhile (Runner.holdAwake)
 //   - same job still running (busy)   → catch-up on: start it once the current run ends
 //     catch-up off: record as "missed"
 //   - backups paused from the tray     → catch-up on: start it once the pause ends
@@ -87,7 +89,8 @@ type jobState struct {
 	RetryOnline bool  `json:"retry_online,omitempty"`
 	RetryFrom   int64 `json:"retry_from,omitempty"`
 	// NetWait: the pending catch-up of a slot missed while the PC was off or
-	// asleep waits since then for the network to come up (catchUpNetWait).
+	// asleep, or the run the PC woke up for (Deferred, Reason reasonOffline),
+	// waits since then for the network to come up (catchUpNetWait).
 	NetWait int64 `json:"net_wait,omitempty"`
 	Running int64 `json:"running,omitempty"` // slot of the scheduled run in progress
 	// Deferred: the run of PendingSlot waits for the PC to leave battery
@@ -108,8 +111,13 @@ const (
 	offlineGrace = 5 * time.Minute
 	// catchUpNetWait: after boot or wake-up the network often isn't up yet, so
 	// a catch-up waits until the agent reaches the server again, but no longer
-	// than this (PBS may be reachable while the console is down).
+	// than this (PBS may be reachable while the console is down). A run the PC
+	// woke up for waits at most half its start window.
 	catchUpNetWait = 10 * time.Minute
+	// recentContact: a request to the server that succeeded this shortly
+	// before a run came due shows the network is up (the agent polls at least
+	// every 30s while online; the last poll before the PC slept is older).
+	recentContact = time.Minute
 )
 
 // NewScheduler loads the persisted configuration and state from dir.
@@ -280,26 +288,31 @@ func (s *Scheduler) Tick() {
 		if st.Deferred {
 			slot := time.Unix(st.PendingSlot, 0)
 			late := now.Sub(slot) > window(j)
+			ready, timedOut := s.netReady(st, j, now)
 			switch {
-			case blocked == "" && paused == "" && !s.busy(j.ID) && (!late || j.CatchUp):
+			case blocked == "" && paused == "" && !s.busy(j.ID) && (!late || j.CatchUp) && ready:
 				trigger, msg := api.TriggerSchedule, "starting the run that waited"
 				if late {
 					trigger, msg = api.TriggerCatchUp, "starting catch-up of the run that waited"
 				}
 				if s.start(s.cfg.Spec(j), j, trigger, slot) {
-					s.logf("info", "%s: no longer %s, %s", j.Name, st.Reason, msg)
-					st.Deferred, st.Reason, changed = false, "", true
+					if timedOut {
+						s.logf("info", "%s: the console is still unreachable, %s anyway", j.Name, msg)
+					} else {
+						s.logf("info", "%s: no longer %s, %s", j.Name, st.Reason, msg)
+					}
+					st.Deferred, st.Reason, st.NetWait, changed = false, "", 0, true
 				}
 			case late && !j.CatchUp:
 				s.missed(j, slot, "the PC was "+st.Reason+" during the start window")
-				st.Deferred, st.Reason, changed = false, "", true
+				st.Deferred, st.Reason, st.NetWait, changed = false, "", 0, true
 			}
 		}
 
 		// A catch-up deferred because the job was busy (or a run cut off by
 		// going offline): start it once it's free.
 		if st.CatchUpPending && paused == "" && blocked == "" && !s.busy(j.ID) && s.retryDue(st, now) {
-			if ready, timedOut := s.netReady(st, now); ready {
+			if ready, timedOut := s.netReady(st, j, now); ready {
 				msg := "starting deferred catch-up run"
 				switch {
 				case st.RetryOnline:
@@ -347,17 +360,22 @@ func (s *Scheduler) Tick() {
 			} else {
 				s.missed(j, due.Slot, "the previous run of this job was still in progress")
 			}
+		case due.OnTime && j.WakeToRun && s.waitNet(st, j, now):
+			// The PC may have just woken up for it: start once the network is up.
+			st.Deferred, st.PendingSlot, st.Reason = true, due.Slot.Unix(), reasonOffline
+			st.CatchUpPending, st.RetryOnline = false, false // coalesced into this run
+			s.logf("info", "%s: the network isn't up yet, the scheduled run waits for it", j.Name)
 		case due.OnTime:
 			s.start(s.cfg.Spec(j), j, api.TriggerSchedule, due.Slot)
-		case j.CatchUp:
+		case j.CatchUp && s.waitNet(st, j, now):
 			// The PC was off or asleep: start once the network is up (see above).
 			s.logf("info", "%s: scheduled time %s was missed%s, catching up once the network is up",
 				j.Name, due.Slot.Format(time.RFC1123), skipped)
 			st.CatchUpPending, st.PendingSlot, st.RetryOnline = true, due.Slot.Unix(), false
 			st.Deferred = false // coalesced into this catch-up
-			if st.NetWait == 0 {
-				st.NetWait = now.Unix()
-			}
+		case j.CatchUp:
+			s.logf("info", "%s: scheduled time %s was missed%s, catching up now", j.Name, due.Slot.Format(time.RFC1123), skipped)
+			s.start(s.cfg.Spec(j), j, api.TriggerCatchUp, due.Slot)
 		default:
 			s.missed(j, due.Slot, "the PC was off, asleep or the agent was not running at the scheduled time"+skipped)
 		}
@@ -415,22 +433,55 @@ func (s *Scheduler) retryDue(st *jobState, now time.Time) bool {
 	return !now.Before(since.Add(offlineRetryDelay))
 }
 
-// netReady reports whether a pending catch-up may start as far as the
-// network goes: one waiting for the network starts once a request to the
-// server succeeded after it came due (a connection from before the PC slept
-// doesn't count), or after catchUpNetWait regardless (timedOut).
-func (s *Scheduler) netReady(st *jobState, now time.Time) (ready, timedOut bool) {
+// waitNet reports whether a run coming due now has to wait for the network,
+// and if so starts the wait (NetWait).
+func (s *Scheduler) waitNet(st *jobState, j api.JobConfig, now time.Time) bool {
+	if st.NetWait == 0 {
+		st.NetWait = now.Unix()
+	}
+	if ready, _ := s.netReady(st, j, now); ready {
+		st.NetWait = 0
+		return false
+	}
+	return true
+}
+
+// netReady reports whether a pending run may start as far as the network
+// goes: one waiting for the network starts once a request to the server
+// succeeded shortly before or after it came due (the last connection before
+// the PC slept doesn't count), or after its maximum wait regardless (timedOut).
+func (s *Scheduler) netReady(st *jobState, j api.JobConfig, now time.Time) (ready, timedOut bool) {
 	if st.NetWait == 0 {
 		return true, false
 	}
 	from := time.Unix(st.NetWait, 0)
-	if s.contact != nil && !s.contact().Before(from) {
+	if s.contact != nil && !s.contact().Before(from.Add(-recentContact)) {
 		return true, false
 	}
-	if !now.Before(from.Add(catchUpNetWait)) {
+	limit := catchUpNetWait
+	if st.Deferred {
+		limit = min(limit, window(j)/2) // start within the start window
+	}
+	if !now.Before(from.Add(limit)) {
 		return true, true
 	}
 	return false, false
+}
+
+// HoldAwake reports whether a run of a job that may wake the PC waits for
+// the network: the PC must not go back to sleep meanwhile.
+func (s *Scheduler) HoldAwake() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg == nil {
+		return false
+	}
+	for _, j := range s.cfg.Jobs {
+		if st := s.state[j.ID]; j.WakeToRun && st != nil && st.NetWait != 0 && (st.Deferred || st.CatchUpPending) {
+			return true
+		}
+	}
+	return false
 }
 
 // RunStarted marks a scheduled or catch-up run as in progress, so a run cut
@@ -485,7 +536,7 @@ func (s *Scheduler) States() []api.JobState {
 			if st.Deferred || st.CatchUpPending {
 				js.Waiting, _ = cond.blockedBy(j)
 			}
-			if js.Waiting == "" && st.CatchUpPending && st.NetWait != 0 {
+			if js.Waiting == "" && (st.CatchUpPending || st.Deferred) && st.NetWait != 0 {
 				js.Waiting = reasonOffline
 			}
 		}

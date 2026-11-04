@@ -552,7 +552,7 @@ a slot.
 | Situation at a scheduled slot | `catch_up = on` (default) | `catch_up = off` |
 |---|---|---|
 | Agent free, within the job's **start window** (default 60 min) | start, trigger `schedule` | start, trigger `schedule` |
-| PC was off/asleep or the agent wasn't running, window passed | start once the agent reached the console again (network up), at most 10 min later, trigger `catch-up` | record a `missed` run |
+| PC was off/asleep or the agent wasn't running, window passed | start once the agent reached the console (network up; a poll from before sleep doesn't count), at most 10 min later, trigger `catch-up` | record a `missed` run |
 | Same job still running from the previous slot | start right after it finishes (`catch-up`) | record a `missed` run |
 | Waited in the queue behind another job past the window | run as `catch-up` | record a `missed` run |
 | PC on battery / metered network, job policy `defer` or `stop` | wait; start when the condition ends (`schedule` within the window, `catch-up` after it) | wait; start if the condition ends within the window, else record a `missed` run |
@@ -569,7 +569,9 @@ a slot.
   one waitable timer (`SetWaitableTimer` with resume) 30 s before the next scheduled run of such
   a job, skipping runs during a tray pause. It shows up in `powercfg /waketimers`. A run the PC
   woke up for always holds the keep-awake request, or Windows would sleep again after its
-  2-minute unattended idle timeout. Windows ignores the timer when *Allow wake timers* is off,
+  2-minute unattended idle timeout. Unless the agent reached the console in the last minute,
+  such a run first waits (awake, shown as *waits: offline*) until it does, at most 10 min or
+  half the start window, so it doesn't fail before the network is up. Windows ignores the timer when *Allow wake timers* is off,
   and it can't wake a PC that is shut down. On PCs with no sleep state it can wake from (most
   VMs) the agent logs one warning.
 * **Battery and metered networks:** each job has `on_battery` and `on_metered` policies for

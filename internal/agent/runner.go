@@ -40,6 +40,7 @@ type Runner struct {
 	queue      chan task
 	wakeAt     time.Time // armed wake time (scheduleLoop only)
 	wakeWarned bool
+	netAwake   func()     // releases the power request held while a run waits for the network (scheduleLoop only)
 	active     *activeRun // scheduled run in progress
 
 	cond       conditions // power and network state (condMu)
@@ -146,6 +147,7 @@ func (r *Runner) scheduleLoop(ctx context.Context) {
 		r.sched.Tick()
 		r.enforceConditions()
 		r.armWake()
+		r.holdAwake()
 		select {
 		case <-ctx.Done():
 			return
@@ -196,6 +198,23 @@ func (r *Runner) enforceConditions() {
 		r.log.Info("stopping scheduled run", "job", a.job.Name, "reason", reason)
 		a.stopped = reason
 		a.cancel()
+	}
+}
+
+// holdAwake keeps the PC awake while a run of a job that may wake it waits
+// for the network, or Windows sleeps again 2 minutes after a timed wake-up.
+func (r *Runner) holdAwake() {
+	switch hold := r.sched.HoldAwake(); {
+	case hold && r.netAwake == nil:
+		release, err := keepAwake("ProxBackup: a backup waits for the network")
+		if err != nil {
+			r.log.Warn("can't keep the PC awake while a backup waits for the network", "err", err)
+			return
+		}
+		r.netAwake = release
+	case !hold && r.netAwake != nil:
+		r.netAwake()
+		r.netAwake = nil
 	}
 }
 

@@ -521,3 +521,80 @@ func TestBlockedBy(t *testing.T) {
 		}
 	}
 }
+
+func wakeDaily() api.JobConfig {
+	j := daily(true)
+	j.WakeToRun = true
+	return j
+}
+
+func TestSchedulerWakeRunWaitsForNetwork(t *testing.T) {
+	h := newHarness(t, wakeDaily())
+	h.contact = time.Date(2026, 10, 12, 1, 0, 0, 0, time.Local) // last poll before the PC slept
+	h.at(12, 21, 0)                                             // woken by the timer
+	h.s.Tick()
+	if len(h.started) != 0 || !h.s.HoldAwake() {
+		t.Fatalf("must wait awake for the network: started %v", h.started)
+	}
+	if st := h.s.States(); st[0].Waiting != reasonOffline {
+		t.Fatalf("state %+v", st[0])
+	}
+	h.at(12, 21, 1)
+	h.contact = h.now
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:00" || h.s.HoldAwake() {
+		t.Fatalf("started %v hold %v", h.started, h.s.HoldAwake())
+	}
+	if st := h.s.States(); st[0].Waiting != "" {
+		t.Fatalf("state %+v", st[0])
+	}
+}
+
+func TestSchedulerWakeRunOnlineStartsAtOnce(t *testing.T) {
+	h := newHarness(t, wakeDaily())
+	h.at(12, 21, 0)
+	h.contact = h.now.Add(-30 * time.Second) // the PC was awake and polling
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:00" || h.s.HoldAwake() {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+func TestSchedulerWakeRunStartsWithinWindowWithoutConsole(t *testing.T) {
+	for _, c := range []struct{ window, start int }{{60, 10}, {8, 4}} { // at most 10 min or half the window
+		j := wakeDaily()
+		j.WindowMinutes = c.window
+		h := newHarness(t, j)
+		h.at(12, 21, 0)
+		h.s.Tick()
+		h.at(12, 21, c.start-1)
+		h.s.Tick()
+		if len(h.started) != 0 {
+			t.Fatalf("window %d: started early: %v", c.window, h.started)
+		}
+		h.at(12, 21, c.start)
+		h.s.Tick()
+		if strings.Join(h.started, ",") != "schedule@12 21:00" || len(h.missed) != 0 {
+			t.Fatalf("window %d: started %v missed %v", c.window, h.started, h.missed)
+		}
+	}
+}
+
+func TestSchedulerOnTimeWithoutWakeDoesNotWait(t *testing.T) {
+	h := newHarness(t, daily(true))
+	h.at(12, 21, 0) // no recent contact, but the job doesn't wake the PC
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "schedule@12 21:00" {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+func TestSchedulerCatchUpRecentContactStartsAtOnce(t *testing.T) {
+	h := newHarness(t, daily(true))
+	h.at(13, 8, 0)
+	h.contact = h.now.Add(-10 * time.Second) // the startup poll just succeeded
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "catch-up@12 21:00" {
+		t.Fatalf("started %v", h.started)
+	}
+}
