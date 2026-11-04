@@ -4,8 +4,11 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net"
+	"net/http/httptest"
 	"net/smtp"
 	"strings"
 	"testing"
@@ -83,5 +86,55 @@ func TestSMTPAuthMechanism(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", tc.mechs, g, tc.want)
 		}
 		c.Quit()
+	}
+}
+
+func TestSaveNotifyDropsPasswordOnHostChange(t *testing.T) {
+	s := newTestServer(t, "deb")
+	ctx := context.Background()
+	save := func(body string) notifyView {
+		r := httptest.NewRequest("PUT", "/api/settings/notifications", strings.NewReader(body))
+		r = r.WithContext(context.WithValue(ctx, auditKey, &auditInfo{}))
+		w := httptest.NewRecorder()
+		s.handleSaveNotify(w, r)
+		if w.Code != 200 {
+			t.Fatalf("save %s: %d %s", body, w.Code, w.Body)
+		}
+		var v notifyView
+		json.Unmarshal(w.Body.Bytes(), &v)
+		return v
+	}
+	// Store a password for the original server.
+	if v := save(`{"smtp_host":"smtp.example.com","smtp_user":"alerts","smtp_password":"s3cret","smtp_tls":"starttls"}`); !v.SMTPPassSet {
+		t.Fatal("password not stored")
+	}
+	// Repointing the host without a new password must drop the stored one, so
+	// it can't be sent to a server the saver chose (credential theft).
+	if v := save(`{"smtp_host":"attacker.example.net","smtp_user":"alerts","smtp_tls":"tls"}`); v.SMTPPassSet {
+		t.Fatal("stored SMTP password kept after a host change")
+	}
+	// Same host and user: the password is kept.
+	save(`{"smtp_host":"smtp.example.com","smtp_user":"alerts","smtp_password":"s3cret","smtp_tls":"starttls"}`)
+	if v := save(`{"smtp_host":"smtp.example.com","smtp_user":"alerts","smtp_tls":"tls"}`); !v.SMTPPassSet {
+		t.Fatal("password dropped although the server is unchanged")
+	}
+	// Changing just the user also drops it.
+	if v := save(`{"smtp_host":"smtp.example.com","smtp_user":"someone-else","smtp_tls":"tls"}`); v.SMTPPassSet {
+		t.Fatal("stored SMTP password kept after a user change")
+	}
+}
+
+func TestValidWebhookURL(t *testing.T) {
+	ok := []string{"", "https://hooks.example.com/x", "http://10.0.0.1:9000/y"}
+	bad := []string{"file:///etc/passwd", "gopher://x", "/just/a/path", "ftp://host/x", "not a url at all::"}
+	for _, u := range ok {
+		if err := validWebhookURL(u); err != nil {
+			t.Errorf("validWebhookURL(%q) = %v, want nil", u, err)
+		}
+	}
+	for _, u := range bad {
+		if err := validWebhookURL(u); err == nil {
+			t.Errorf("validWebhookURL(%q) = nil, want error", u)
+		}
 	}
 }

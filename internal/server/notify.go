@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -350,20 +352,46 @@ func (s *Server) handleSaveNotify(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 400, err)
 		return
 	}
+	if err := validWebhookURL(v.WebhookURL); err != nil {
+		httpError(w, 400, err)
+		return
+	}
 	old := s.notify.settings(r.Context())
 	ns := v.NotifySettings
+	// Keep the stored SMTP password only for the same server. Changing the
+	// host or user without re-entering it would otherwise send the stored
+	// secret to a server the saver chose, so anyone with notifications.manage
+	// could point it at their own host and collect it.
 	ns.SMTPPassEnc = old.SMTPPassEnc
+	if !strings.EqualFold(strings.TrimSpace(ns.SMTPHost), strings.TrimSpace(old.SMTPHost)) || ns.SMTPUser != old.SMTPUser {
+		ns.SMTPPassEnc = nil
+	}
 	if v.SMTPPassword != "" {
 		ns.SMTPPassEnc = s.sealer.Seal(v.SMTPPassword, colSMTPPass, 0)
 	}
 	if ns.SMTPPort == 0 {
 		ns.SMTPPort = 587
 	}
+	auditDetail(r, "webhook=%t, smtp=%s", ns.WebhookURL != "", cmp.Or(ns.SMTPHost, "none"))
 	if err := s.store.SetSetting(r.Context(), "notifications", ns); err != nil {
 		httpError(w, 500, err)
 		return
 	}
 	s.handleGetNotify(w, r)
+}
+
+// validWebhookURL keeps the webhook to an absolute http(s) URL with a host, so
+// notifications.manage can't point it at odd schemes (file:, gopher:) or a
+// bare path.
+func validWebhookURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("the webhook URL must be an http(s) URL, like https://hooks.example.com/…")
+	}
+	return nil
 }
 
 func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
