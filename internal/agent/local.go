@@ -34,6 +34,7 @@ type localState struct {
 	online   bool
 	since    time.Time // when the connection to the server was (re)established
 	drops    int       // how often the connection to the server was lost
+	contact  time.Time // when a request to the server last succeeded
 	current  *ipc.RunningRun
 	history  []ipc.RunInfo // newest first
 	pause    pauseState
@@ -191,7 +192,18 @@ func (r *Runner) setOnline(v bool) {
 		r.local.drops++
 	}
 	r.local.online = v
+	if v {
+		r.local.contact = time.Now()
+	}
 	r.local.mu.Unlock()
+}
+
+// lastContact is the Scheduler's network hook: unlike connection, it can't be
+// stale after the PC slept, as only a request that succeeded since sets it.
+func (r *Runner) lastContact() time.Time {
+	r.local.mu.Lock()
+	defer r.local.mu.Unlock()
+	return r.local.contact
 }
 
 // connection is the Scheduler's connectivity hook.

@@ -175,7 +175,7 @@ export interface Job extends JobDefinition {
   start_delay: number // seconds after the scheduled time this member starts
   next_run?: number
   catch_up_pending?: boolean
-  waiting?: string // a due run waits for the PC to leave battery power or a metered network ("on battery power")
+  waiting?: string // a due run waits for the PC to leave battery power or a metered network, or a catch-up for the network ("on battery power", "offline")
 }
 
 /** An encryption key a client backed up with before (it got a new one on re-enrollment), escrowed for those snapshots. */

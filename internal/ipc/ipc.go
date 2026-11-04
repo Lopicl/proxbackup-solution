@@ -77,7 +77,8 @@ type Status struct {
 	// limit on paused days in a row).
 	PauseOff bool `json:"pause_off,omitempty"`
 	// Waiting: a scheduled backup waits for the PC to leave battery power or
-	// a metered network (e.g. "on battery power"; "" = none waits).
+	// a metered network, or for the network after boot or wake-up (e.g. "on
+	// battery power", "offline"; "" = none waits).
 	Waiting string      `json:"waiting,omitempty"`
 	Running *RunningRun `json:"running,omitempty"`
 	Jobs    []Job       `json:"jobs"`

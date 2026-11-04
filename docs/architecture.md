@@ -552,7 +552,7 @@ a slot.
 | Situation at a scheduled slot | `catch_up = on` (default) | `catch_up = off` |
 |---|---|---|
 | Agent free, within the job's **start window** (default 60 min) | start, trigger `schedule` | start, trigger `schedule` |
-| PC was off/asleep or the agent wasn't running, window passed | start immediately, trigger `catch-up` | record a `missed` run |
+| PC was off/asleep or the agent wasn't running, window passed | start once the agent reached the console again (network up), at most 10 min later, trigger `catch-up` | record a `missed` run |
 | Same job still running from the previous slot | start right after it finishes (`catch-up`) | record a `missed` run |
 | Waited in the queue behind another job past the window | run as `catch-up` | record a `missed` run |
 | PC on battery / metered network, job policy `defer` or `stop` | wait; start when the condition ends (`schedule` within the window, `catch-up` after it) | wait; start if the condition ends within the window, else record a `missed` run |

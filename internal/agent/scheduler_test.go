@@ -18,6 +18,7 @@ type schedHarness struct {
 	missed  []string
 	since   time.Time // zero = offline
 	drops   int
+	contact time.Time // last successful request to the server
 	cond    conditions
 }
 
@@ -38,6 +39,7 @@ func newHarness(t *testing.T, jobs ...api.JobConfig) *schedHarness {
 		h.missed = append(h.missed, slot.Format("02 15:04")+" "+reason)
 	}
 	h.s.conn = func() (time.Time, int) { return h.since, h.drops }
+	h.s.contact = func() time.Time { return h.contact }
 	h.s.cond = func() conditions { return h.cond }
 	h.s.logf = func(string, string, ...any) {}
 	if err := h.s.Update(&api.AgentConfig{Rev: "r1", Jobs: jobs}); err != nil {
@@ -66,10 +68,58 @@ func TestSchedulerOnTime(t *testing.T) {
 
 func TestSchedulerCatchUpAfterOffline(t *testing.T) {
 	h := newHarness(t, daily(true))
-	h.at(15, 8, 30) // PC was off for three evenings
+	h.contact = time.Date(2026, 10, 12, 20, 30, 0, 0, time.Local) // before the PC slept
+	h.at(15, 8, 30)                                               // PC was off for three evenings
+	h.s.Tick()
+	if len(h.started) != 0 || len(h.missed) != 0 {
+		t.Fatalf("catch-up must wait for the network: started %v missed %v", h.started, h.missed)
+	}
+	if st := h.s.States(); !st[0].CatchUpPending || st[0].Waiting != reasonOffline {
+		t.Fatalf("state %+v", st[0])
+	}
+	h.at(15, 8, 31)
+	h.contact = h.now // the network is up: the server answered
 	h.s.Tick()
 	if strings.Join(h.started, ",") != "catch-up@14 21:00" || len(h.missed) != 0 {
 		t.Fatalf("started %v missed %v", h.started, h.missed)
+	}
+	if st := h.s.States(); st[0].CatchUpPending || st[0].Waiting != "" {
+		t.Fatalf("state %+v", st[0])
+	}
+}
+
+func TestSchedulerCatchUpStartsWithoutConsole(t *testing.T) {
+	h := newHarness(t, daily(true))
+	h.at(13, 8, 0)
+	h.s.Tick()
+	h.at(13, 8, 9)
+	h.s.Tick()
+	if len(h.started) != 0 {
+		t.Fatalf("started early: %v", h.started)
+	}
+	h.at(13, 8, 10) // console still unreachable: PBS may not be
+	h.s.Tick()
+	if strings.Join(h.started, ",") != "catch-up@12 21:00" {
+		t.Fatalf("started %v", h.started)
+	}
+}
+
+func TestSchedulerCatchUpNetWaitPersists(t *testing.T) {
+	h := newHarness(t, daily(true))
+	h.at(13, 8, 0)
+	h.s.Tick()
+	s2 := NewScheduler(h.s.dir) // agent restart
+	s2.now, s2.start, s2.busy, s2.missed, s2.logf = h.s.now, h.s.start, func(int64) bool { return false }, h.s.missed, h.s.logf
+	s2.contact = func() time.Time { return h.contact }
+	h.at(13, 8, 2)
+	s2.Tick()
+	if len(h.started) != 0 {
+		t.Fatalf("started without the network: %v", h.started)
+	}
+	h.contact = h.now
+	s2.Tick()
+	if strings.Join(h.started, ",") != "catch-up@12 21:00" {
+		t.Fatalf("started %v", h.started)
 	}
 }
 

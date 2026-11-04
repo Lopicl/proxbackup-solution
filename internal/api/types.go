@@ -203,7 +203,8 @@ type JobState struct {
 	CatchUpPending bool  `json:"catch_up_pending,omitempty"`
 	Running        bool  `json:"running,omitempty"`
 	// Waiting: a due run waits for the PC to leave battery power or a
-	// metered network (the reason, e.g. "on battery power"; "" = not waiting).
+	// metered network, or a catch-up for the network (the reason, e.g. "on
+	// battery power", "offline"; "" = not waiting).
 	Waiting string `json:"waiting,omitempty"`
 }
 

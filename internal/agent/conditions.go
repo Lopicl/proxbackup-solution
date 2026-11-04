@@ -15,6 +15,7 @@ type conditions struct {
 const (
 	reasonBattery = "on battery power"
 	reasonMetered = "on a metered network"
+	reasonOffline = "offline" // a catch-up waits for the network (Scheduler.netReady)
 )
 
 // blockedBy reports why job j may not run under c ("" = it may), and whether

@@ -106,6 +106,7 @@ func NewRunner(cfg *Config, version string, log *slog.Logger) (*Runner, error) {
 	r.sched.missed = r.reportMissed
 	r.sched.pausedBy = r.pausedBy
 	r.sched.conn = r.connection
+	r.sched.contact = r.lastContact
 	r.sched.cond = r.conditions
 	r.loadLocal()
 	r.applyPausePolicy(r.sched.Config())
@@ -272,6 +273,7 @@ func (r *Runner) pollLoop(ctx context.Context) {
 			online = true
 			go r.spool.drain(ctx, r)
 		}
+		r.sched.Tick() // start a catch-up that waited for the network
 		backoff = time.Second
 	}
 }
