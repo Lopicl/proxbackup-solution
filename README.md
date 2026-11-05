@@ -155,7 +155,9 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
   their own Windows permissions.
 - Restores never write through a junction or symbolic link in the target folder (that entry is
   skipped with a warning), and refuse a target whose path contains one. A folder the agent creates
-  directly on a drive (like `C:\Restore`) is open only to SYSTEM and administrators.
+  directly on a drive (like `C:\Restore`) is open only to SYSTEM and administrators. Backups never
+  read through one either: below a source it is skipped, and one on the way to a source fails the
+  source (back up the folder it points to instead).
 - **System folders.** The agent restores as SYSTEM, so a restore into Windows, Program Files,
   ProgramData, the agent's own folders, the Default user profile or a user's Startup folder could
   replace what the PC runs. Only console users with *Restore to system folders* (Administrator and

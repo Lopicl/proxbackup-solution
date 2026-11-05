@@ -25,6 +25,8 @@ func newSnapshotSet(useVSS bool, logf func(level, format string, args ...any)) *
 
 func (s *snapshotSet) Resolve(src string) (string, error) { return src, nil }
 
+func (s *snapshotSet) Source(src string) (string, *sourceGuard, error) { return src, nil, nil }
+
 func (s *snapshotSet) Close() {}
 
 // imageFSRoot: images are files or block devices here, with no mounted file

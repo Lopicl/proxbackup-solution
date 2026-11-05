@@ -98,7 +98,7 @@ func (j *job) backupSplit(ctx context.Context, sess *pbs.BackupSession, excl *Ex
 	if err != nil {
 		return nil, err
 	}
-	w := &walker{j: j, ctx: ctx, excl: excl, cat: cat, split: true}
+	w := &walker{j: j, ctx: ctx, excl: excl, cat: cat, guard: src.guard, split: true}
 	if prev != nil {
 		payload, meta := j.previousSplit(ctx, sess, prev, src)
 		if meta != nil {

@@ -7,12 +7,15 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"unsafe"
 
 	"github.com/mxk/go-vss"
 	"golang.org/x/sys/windows"
+
+	"proxbackup/internal/api"
 )
 
 // snapshotSet creates at most one VSS shadow copy per volume and maps live
@@ -30,33 +33,52 @@ func newSnapshotSet(useVSS bool, logf func(level, format string, args ...any)) *
 
 // Resolve returns the path to read src from (inside a snapshot when VSS is on).
 func (s *snapshotSet) Resolve(src string) (string, error) {
-	if !s.useVSS {
-		return src, nil
-	}
-	vol, rel, err := vss.SplitVolume(src)
+	root, rel, err := s.root(src)
+	return root + rel, err
+}
+
+// Source returns the path to read the file backup source src from, and the
+// guard that keeps the backup from following a link on the way to it or
+// below it (see sourceGuard).
+func (s *snapshotSet) Source(src string) (string, *sourceGuard, error) {
+	root, rel, err := s.root(src)
 	if err != nil {
-		return "", err
+		return "", nil, err
+	}
+	g, err := openSource(src, root, rel, !s.useVSS)
+	return root + rel, g, err
+}
+
+// root returns the root folder of src's drive, in its snapshot when VSS is
+// on, and src's path below it ("" for the drive itself). The volume is the
+// drive src names: GetVolumePathName would take a junction that a user made
+// to a volume (\??\Volume{...}) for a mount point and snapshot that volume.
+func (s *snapshotSet) root(src string) (root, rel string, err error) {
+	src = filepath.Clean(src)
+	if !api.LocalPath(src) {
+		return "", "", fmt.Errorf("%s is not a path on a local drive", api.QuotePath(src))
+	}
+	vol, rel := strings.ToUpper(src[:2])+`\`, strings.Trim(src[2:], `\`)
+	if !s.useVSS {
+		return vol, rel, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sc := s.byVol[strings.ToUpper(vol)]
+	sc := s.byVol[vol]
 	if sc == nil {
 		s.logf("info", "creating VSS snapshot of %s", vol)
 		id, err := vss.Create(vol)
 		if err != nil {
-			return "", fmt.Errorf("VSS snapshot of %s failed: %w", vol, err)
+			return "", "", fmt.Errorf("VSS snapshot of %s failed: %w", vol, err)
 		}
 		if sc, err = vss.Get(id); err != nil {
 			vss.Remove(id)
-			return "", err
+			return "", "", err
 		}
-		s.byVol[strings.ToUpper(vol)] = sc
+		s.byVol[vol] = sc
 		s.logf("info", "VSS snapshot %s ready at %s", sc.ID, sc.DeviceObject)
 	}
-	if rel == "." || rel == "" {
-		return sc.DeviceObject + `\`, nil
-	}
-	return sc.DeviceObject + `\` + rel, nil
+	return sc.DeviceObject + `\`, rel, nil
 }
 
 // VolumeDevice returns the raw device path for an image backup of vol ("C:").

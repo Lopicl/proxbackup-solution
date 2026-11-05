@@ -34,7 +34,7 @@ var errCloudReadOnlyVolume = errors.New("cloud operation not supported on a read
 
 // readExtras sets the inode change time of p with withChtime. There are no
 // NTFS security descriptors or alternate data streams to read.
-func readExtras(p string, m *winMeta, withChtime bool) []string {
+func readExtras(p string, m *winMeta, withChtime bool, _ *sourceGuard) []string {
 	var st unix.Stat_t
 	if withChtime && unix.Lstat(p, &st) == nil {
 		m.chtime = time.Unix(st.Ctim.Unix())

@@ -10,6 +10,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"proxbackup/internal/api"
 	"proxbackup/pkg/pbs"
@@ -18,6 +20,7 @@ import (
 
 type fileSource struct {
 	orig, read string
+	guard      *sourceGuard
 	archive    string // .pxar.didx, or the .mpxar.didx of a split archive
 	payload    string // .ppxar.didx of a split archive, "" for v1
 }
@@ -52,7 +55,7 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 	var sources []fileSource
 	seen := map[string]int{}
 	for _, src := range j.spec.Sources {
-		read, err := snaps.Resolve(src)
+		read, guard, err := snaps.Source(src)
 		if err != nil {
 			return res, err
 		}
@@ -62,7 +65,7 @@ func (j *job) runFiles(ctx context.Context) (api.Result, error) {
 			label = fmt.Sprintf("%s-%d", label, n+1)
 		}
 		seen[label]++
-		s := fileSource{orig: src, read: read, archive: label + ".pxar.didx"}
+		s := fileSource{orig: src, read: read, guard: guard, archive: label + ".pxar.didx"}
 		if mode != changeLegacy {
 			s.archive, s.payload = splitNames(label)
 		}
@@ -136,7 +139,7 @@ func (j *job) backupSource(ctx context.Context, sess *pbs.BackupSession, excl *E
 	if err != nil {
 		return pbs.Stats{}, err
 	}
-	w := &walker{j: j, ctx: ctx, excl: excl, cat: cat}
+	w := &walker{j: j, ctx: ctx, excl: excl, cat: cat, guard: src.guard}
 	err = w.encodeSource(src, fi, func(root pxar.Metadata) (*pxar.Encoder, error) { return pxar.NewEncoder(aw, root) })
 	st, cerr := aw.Close()
 	if err == nil {
@@ -156,7 +159,7 @@ func (w *walker) encodeSource(src fileSource, fi fs.FileInfo, newEnc func(root p
 		if err == nil {
 			w.j.dirs.Add(1)
 			var entries []os.DirEntry
-			if entries, err = os.ReadDir(src.read); err == nil {
+			if entries, err = w.readDir(src.read); err == nil {
 				err = w.walkEntries(src.read, "", entries)
 			}
 		}
@@ -190,11 +193,12 @@ func (w *walker) do(op func() error) error {
 }
 
 type walker struct {
-	j    *job
-	ctx  context.Context
-	enc  *pxar.Encoder
-	excl *Excluder
-	cat  *catalog // mirrors every entry written to enc
+	j     *job
+	ctx   context.Context
+	enc   *pxar.Encoder
+	excl  *Excluder
+	cat   *catalog     // mirrors every entry written to enc
+	guard *sourceGuard // the source's: what the walk opens must be what it listed
 
 	// Split archives: record change times; with change detection, the
 	// previous metadata archive and the chunk reuse for unchanged files.
@@ -206,9 +210,28 @@ type walker struct {
 // readExtras adds the NTFS security descriptor, alternate data streams and
 // (for split archives) change time of full to m, logging what's missing.
 func (w *walker) readExtras(full, rel string, m *winMeta) {
-	for _, warn := range readExtras(full, m, w.split) {
+	for _, warn := range readExtras(full, m, w.split, w.guard) {
 		w.j.logf("warn", "%s: not backed up: %s", rel, warn)
 	}
+}
+
+// readDir lists dir like os.ReadDir. Without a snapshot it first checks that
+// dir is still the folder that was listed (see sourceGuard).
+func (w *walker) readDir(dir string) ([]os.DirEntry, error) {
+	if !w.guard.live() {
+		return os.ReadDir(dir)
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if err := w.guard.checkFile(f, dir); err != nil {
+		return nil, err
+	}
+	entries, err := f.ReadDir(-1)
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return entries, err
 }
 
 // cloudSnapshotSkip explains errCloudReadOnlyVolume.
@@ -219,7 +242,7 @@ func (w *walker) skip(rel string, format string, args ...any) {
 	w.j.logf("warn", "skipped %s: %s", rel, fmt.Sprintf(format, args...))
 }
 
-// walkEntries encodes the contents of dir. os.ReadDir sorts names bytewise,
+// walkEntries encodes the contents of dir. readDir sorts names bytewise,
 // which is exactly the order pxar requires.
 func (w *walker) walkEntries(dir, rel string, entries []os.DirEntry) error {
 	if err := w.ctx.Err(); err != nil {
@@ -265,7 +288,7 @@ func (w *walker) addEntry(dir, rel string, fi fs.FileInfo) error {
 	case mode.IsDir():
 		// Read the listing before emitting the directory so unreadable
 		// directories are skipped as a whole.
-		entries, err := os.ReadDir(full)
+		entries, err := w.readDir(full)
 		if errors.Is(err, errCloudReadOnlyVolume) {
 			w.skip(crel, "%s", cloudSnapshotSkip)
 			return nil
@@ -341,6 +364,11 @@ func (w *walker) addFile(full, crel string, fi fs.FileInfo, pm pxar.Metadata) er
 	if errors.Is(err, errCloudReadOnlyVolume) {
 		w.skip(crel, "%s", cloudSnapshotSkip)
 		return nil
+	}
+	if err == nil {
+		if err = w.guard.checkFile(f, full); err != nil {
+			f.Close()
+		}
 	}
 	if err != nil {
 		w.skip(crel, "%v", err)

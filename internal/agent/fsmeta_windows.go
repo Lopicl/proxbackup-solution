@@ -77,9 +77,9 @@ func longPath(p string) string {
 }
 
 // readExtras fills in the security descriptor, the alternate data streams
-// and, with withChtime, the NTFS ChangeTime of p. It returns what couldn't be
-// read; the entry is still backed up.
-func readExtras(p string, m *winMeta, withChtime bool) (warns []string) {
+// and, with withChtime, the NTFS ChangeTime of p, which g must find where it
+// was listed. It returns what couldn't be read; the entry is still backed up.
+func readExtras(p string, m *winMeta, withChtime bool, g *sourceGuard) (warns []string) {
 	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
 	flags := uint32(windows.FILE_FLAG_BACKUP_SEMANTICS | windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	lp := windows.StringToUTF16Ptr(longPath(p))
@@ -92,6 +92,9 @@ func readExtras(p string, m *winMeta, withChtime bool) (warns []string) {
 		}
 	}
 	defer windows.CloseHandle(h)
+	if err := g.check(h, p); err != nil {
+		return append(warns, fmt.Sprintf("metadata: %v", err))
+	}
 	if withChtime {
 		var info fileBasicInfo
 		if err := windows.GetFileInformationByHandleEx(h, windows.FileBasicInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err == nil {
@@ -119,7 +122,7 @@ func readExtras(p string, m *winMeta, withChtime bool) (warns []string) {
 		case n.size > maxADSSize:
 			warns = append(warns, fmt.Sprintf("alternate data stream %q: %d bytes, larger than %d", n.name, n.size, maxADSSize))
 		default:
-			data, err := readStream(p, n.name)
+			data, err := readStream(p, n.name, h, g)
 			if err != nil {
 				warns = append(warns, fmt.Sprintf("alternate data stream %q: %v", n.name, err))
 				continue
@@ -175,7 +178,9 @@ func streamNames(h windows.Handle) ([]streamName, error) {
 	return out, nil
 }
 
-func readStream(p, name string) ([]byte, error) {
+// readStream reads the stream name of p, the file open as of. Without a
+// snapshot (g) it must be a stream of that very file.
+func readStream(p, name string, of windows.Handle, g *sourceGuard) ([]byte, error) {
 	h, err := windows.CreateFile(windows.StringToUTF16Ptr(longPath(p)+":"+name), windows.GENERIC_READ,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
 		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
@@ -184,6 +189,9 @@ func readStream(p, name string) ([]byte, error) {
 	}
 	f := os.NewFile(uintptr(h), name)
 	defer f.Close()
+	if g.live() && !sameFile(h, of) {
+		return nil, errRedirected
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxADSSize+1))
 	if err == nil && len(data) > maxADSSize {
 		err = fmt.Errorf("larger than %d bytes", maxADSSize)

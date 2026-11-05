@@ -97,7 +97,7 @@ restore`, and `pxar` FUSE mounts all work.
 | HIDDEN / SYSTEM / ARCHIVE | `flags`: `WITH_FLAG_HIDDEN 0x2000`, `WITH_FLAG_SYSTEM 0x4000`, `WITH_FLAG_ARCHIVE 0x8000` |
 | LastWriteTime | `mtime` (100 ns resolution → ns) |
 | Symlink reparse point | `SYMLINK` (no xattrs: Linux refuses `user.*` xattrs on symlinks; HIDDEN/SYSTEM stay in `flags`) |
-| Junctions / mount points | skipped (prevents loops and double-backup) |
+| Junctions / mount points | skipped (prevents loops and double-backup); one on the way to a source fails the source (see *Backup sources* under Security model) |
 | Security descriptor (NTFS ACL) | xattr `user.proxbackup.ntsd` (self-relative binary SD: owner, group, DACL) |
 | Alternate data streams | xattr `user.proxbackup.ads.<name>` for streams up to 64 KiB |
 | UTF-16 names | UTF-8 |
@@ -707,6 +707,19 @@ sequenceDiagram
   (client names can't contain dots), so a new client can neither own nor be granted the old
   snapshots. Admin enrollments under a revoked client's name are refused (409) until the
   user confirms a new client; setup tokens refuse such names.
+* **Backup sources:** file backups read as SYSTEM, but users can replace folders they own
+  with a junction to anything: in their profile, or in a folder created in `C:\` (which
+  inherits *Authenticated Users: Modify*). A junction's target is read from the live drive
+  even inside a VSS snapshot, and what the backup read through it would land under the
+  source's path, where its user restores from the tray (and the agent's own data directory
+  would land in PBS). So the agent (`sourcepath_windows.go`) snapshots the drive a source
+  names (`GetVolumePathName` would take a user's junction to `\??\Volume{...}` for a mount
+  point) and opens every folder on the way to the source relative to its parent's handle
+  without following reparse points: a junction, symbolic link or mount point there fails the
+  source. Below a source, junctions and links are never followed. Without VSS, the walk
+  checks every folder and file it opens by handle, as a user could swap a listed folder for a
+  junction before it is read: its final path must be the one listed, and alternate data
+  streams must belong to the file. A snapshot can't change, so with VSS that isn't needed.
 * **Agent data directory:** `%ProgramData%\proxbackup` holds the client key, `jobs.json`
   (PBS token, encryption key) and the spool of run reports the agent delivers to the console.
   Go's mode bits do nothing on Windows, and ProgramData lets every user read its subfolders
