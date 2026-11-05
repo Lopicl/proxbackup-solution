@@ -11,11 +11,11 @@
 package ipc
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"strings"
@@ -152,11 +152,15 @@ func Serve(ctx context.Context, l net.Listener, h Handler) error {
 	}
 }
 
+// maxRequest bounds what the agent reads of a request: any local user can
+// connect, and a Request is a few bytes.
+const maxRequest = 4 << 10
+
 func serveConn(ctx context.Context, c net.Conn, h Handler) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 	var req Request
-	if err := json.NewDecoder(bufio.NewReader(c)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(c, maxRequest)).Decode(&req); err != nil {
 		return
 	}
 	// Identify the caller now: impersonating a pipe client needs data read from it first.

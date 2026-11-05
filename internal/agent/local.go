@@ -271,14 +271,29 @@ func (r *Runner) jobName(id int64, kind string) string {
 	return kind
 }
 
-// serveLocal answers the tray app until ctx ends.
+// serveLocal answers the tray app until ctx ends. Any user can create a pipe
+// of that name while the service is stopped (the trays don't talk to it), so
+// creating it is retried until that program lets go.
 func (r *Runner) serveLocal(ctx context.Context) {
-	l, err := ipc.Listen(r.cfg.dir)
-	if err != nil {
-		r.log.Error("tray app channel unavailable", "err", err)
-		return
+	for failed := false; ; {
+		l, err := ipc.Listen(r.cfg.dir)
+		if err == nil {
+			if failed {
+				r.log.Info("tray app channel available")
+			}
+			ipc.Serve(ctx, l, r.handleLocal)
+			return
+		}
+		if !failed {
+			r.log.Error("tray app channel unavailable; retrying every minute", "err", err)
+			failed = true
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
 	}
-	ipc.Serve(ctx, l, r.handleLocal)
 }
 
 func (r *Runner) handleLocal(ctx context.Context, peer *ipc.Peer, req ipc.Request) ipc.Response {
