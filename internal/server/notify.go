@@ -116,15 +116,25 @@ func (n *Notifier) CheckStale(ctx context.Context) {
 			continue
 		}
 		if t == 0 || time.Since(time.Unix(t, 0)) > limit {
-			when := "never"
+			when, since := "never", c.CreatedAt
 			if t > 0 {
-				when = time.Unix(t, 0).Format(time.RFC1123)
+				when, since = time.Unix(t, 0).Format(time.RFC1123), t
 			}
 			n.send(ctx, ns, Message{Event: "client.stale", Severity: "warning", Client: c.Name,
-				Subject: fmt.Sprintf("[ProxBackup] %s has no backup for %d days", c.Name, ns.StaleDays),
+				Subject: fmt.Sprintf("[ProxBackup] %s has no backup for %d days", c.Name, staleDays(since, ns.StaleDays)),
 				Text:    fmt.Sprintf("Client %s: last successful backup %s. Last seen %s.\n", c.Name, when, time.Unix(c.LastSeen, 0).Format(time.RFC1123))})
 		}
 	}
+}
+
+// staleDays is the whole days since the Unix time since, at least min: the
+// alert fires past the limit, so it's never fewer days than that.
+func staleDays(since int64, min int) int {
+	d := int(time.Since(time.Unix(since, 0)) / (24 * time.Hour))
+	if d < min {
+		return min
+	}
+	return d
 }
 
 // DailyCap warns that a job had more backups in a day than its cap: a PC

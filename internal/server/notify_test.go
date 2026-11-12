@@ -12,6 +12,7 @@ import (
 	"net/smtp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeSMTP speaks just enough SMTP to authenticate. Like Exchange Online it
@@ -135,6 +136,23 @@ func TestValidWebhookURL(t *testing.T) {
 	for _, u := range bad {
 		if err := validWebhookURL(u); err == nil {
 			t.Errorf("validWebhookURL(%q) = nil, want error", u)
+		}
+	}
+}
+
+func TestStaleDays(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		ago  time.Duration
+		min  int
+		want int
+	}{
+		{3*24*time.Hour + time.Hour, 3, 3},
+		{10*24*time.Hour + time.Hour, 3, 10},
+		{time.Hour, 3, 3},
+	} {
+		if got := staleDays(now.Add(-c.ago).Unix(), c.min); got != c.want {
+			t.Errorf("staleDays(%v ago, %d) = %d, want %d", c.ago, c.min, got, c.want)
 		}
 	}
 }
