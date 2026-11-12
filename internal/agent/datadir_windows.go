@@ -8,8 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -60,14 +62,21 @@ func SecureDataDir(dir string, start bool) (removed []RemovedEntry, err error) {
 		return nil, err
 	}
 	s := &dirSecurer{root: root, sub: sub, file: file, start: start}
-	e, err := s.secure(dir, true)
+	h, e, err := s.secure(0, dir, true)
 	if err != nil {
 		return nil, fmt.Errorf("secure %s: %w", dir, err)
 	}
+	defer windows.CloseHandle(h)
 	if why := e.foreign(); why != "" {
 		return nil, fmt.Errorf("refusing to use %s as the data directory: %s; enroll this PC again to replace it", dir, why)
 	}
-	return s.removed, s.walk(dir, false)
+	d, err := reopen(h, dirAccess, windows.FILE_DIRECTORY_FILE)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", dir, err)
+	}
+	defer windows.CloseHandle(d)
+	err = s.walk(d, dir, false)
+	return s.removed, err
 }
 
 // PrepareDataDir makes sure an enrollment writes into a data dir the agent
@@ -159,60 +168,144 @@ type dirSecurer struct {
 	removed         []RemovedEntry
 }
 
-// walk secures the entries of dir and deletes those that must go. drop
-// deletes them all: dir is being removed.
-func (s *dirSecurer) walk(dir string, drop bool) error {
-	entries, err := os.ReadDir(dir)
+// walk secures the entries of the folder open as d (at path dir, for
+// messages) and deletes those that must go. drop deletes them all: d is
+// being removed. Nothing is opened, listed or deleted by path: a user who
+// planted a folder could otherwise swap it for a junction between a check
+// and the next use, and have SYSTEM delete files anywhere. Each entry is
+// opened relative to d without following reparse points, then listed and
+// deleted through its own handle.
+func (s *dirSecurer) walk(d windows.Handle, dir string, drop bool) error {
+	names, err := listDir(d)
 	if err != nil {
-		return err
+		return fmt.Errorf("list %s: %w", dir, err)
 	}
 	var errs []error
-	for _, de := range entries {
-		p := filepath.Join(dir, de.Name())
-		e, err := s.secure(p, false)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("secure %s: %w", p, err))
-			continue
-		}
-		why := ""
-		switch {
-		case e.link:
-			why = removedLink
-		case drop || !e.trusted():
-			why = removedForeign
-		case s.start && !e.isDir && isTempName(de.Name()):
-			why = removedTemp
-		}
-		if e.isDir && !e.link {
-			if err := s.walk(p, why != ""); err != nil {
-				errs = append(errs, err)
-				continue
-			}
-		}
-		if why == "" {
-			continue
-		}
-		if err := os.Remove(p); err != nil {
-			errs = append(errs, fmt.Errorf("remove %s: %w", p, err))
-		} else {
-			s.removed = append(s.removed, RemovedEntry{p, why})
+	for _, name := range names {
+		if err := s.walkEntry(d, dir, name, drop); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// secure sets the owner and DACL of p through a handle that doesn't follow
-// reparse points. Nothing is changed on a link (a reparse point, or a file
-// with more than one link), nor on a root that is foreign.
-func (s *dirSecurer) secure(p string, root bool) (dataEntry, error) {
-	h, err := windows.CreateFile(windows.StringToUTF16Ptr(p),
-		windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+func (s *dirSecurer) walkEntry(d windows.Handle, dir, name string, drop bool) error {
+	p := filepath.Join(dir, name)
+	h, e, err := s.secure(d, name, false)
 	if err != nil {
-		return dataEntry{}, err
+		return fmt.Errorf("secure %s: %w", p, err)
 	}
 	defer windows.CloseHandle(h)
+	if testAfterSecure != nil {
+		testAfterSecure(p)
+	}
+	why := ""
+	switch {
+	case e.link:
+		why = removedLink
+	case drop || !e.trusted():
+		why = removedForeign
+	case s.start && !e.isDir && isTempName(name):
+		why = removedTemp
+	}
+	if e.isDir && !e.link {
+		sub, err := reopen(h, dirAccess, windows.FILE_DIRECTORY_FILE)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", p, err)
+		}
+		err = s.walk(sub, p, why != "")
+		windows.CloseHandle(sub)
+		if err != nil {
+			return err
+		}
+	}
+	if why == "" {
+		return nil
+	}
+	del, err := reopen(h, windows.DELETE, 0)
+	if err == nil {
+		err = deleteByHandle(del)
+		windows.CloseHandle(del)
+	}
+	if err != nil {
+		return fmt.Errorf("remove %s: %w", p, err)
+	}
+	s.removed = append(s.removed, RemovedEntry{p, why})
+	return nil
+}
+
+// testAfterSecure lets tests act between securing an entry and using it.
+var testAfterSecure func(p string)
+
+// reopen opens the file or folder open as h again, with other access. It
+// is the same object whatever has been renamed meanwhile: an empty name
+// relative to a handle names that handle's file.
+func reopen(h windows.Handle, access, options uint32) (windows.Handle, error) {
+	return ntCreate(h, "", access, windows.FILE_OPEN, options, shareAll, nil)
+}
+
+// listDir returns the names in the folder open as d, which needs
+// FILE_LIST_DIRECTORY and synchronous I/O.
+func listDir(d windows.Handle) ([]string, error) {
+	// FILE_FULL_DIR_INFO: NextEntryOffset at 0, FileNameLength at 60 and
+	// FileName at 68 (bytes).
+	const nameLenOff, nameOff = 60, 68
+	buf := make([]uint64, 8<<10) // 64 KiB, 8-byte aligned
+	b := unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), len(buf)*8)
+	var names []string
+	class := uint32(windows.FileFullDirectoryRestartInfo)
+	for {
+		err := windows.GetFileInformationByHandleEx(d, class, &b[0], uint32(len(b)))
+		if err == windows.ERROR_NO_MORE_FILES {
+			slices.Sort(names)
+			return names, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		class = windows.FileFullDirectoryInfo
+		for off := uint32(0); ; {
+			next := *(*uint32)(unsafe.Pointer(&b[off]))
+			n := *(*uint32)(unsafe.Pointer(&b[off+nameLenOff])) / 2
+			name := string(utf16.Decode(unsafe.Slice((*uint16)(unsafe.Pointer(&b[off+nameOff])), n)))
+			if name != "." && name != ".." {
+				names = append(names, name)
+			}
+			if next == 0 {
+				break
+			}
+			off += next
+		}
+	}
+}
+
+// secure opens name in the folder d (the path name itself for the root,
+// d = 0) without following reparse points, and sets its owner and DACL
+// through that handle. Nothing is changed on a link (a reparse point, or a
+// file with more than one link), nor on a root that is foreign. The handle
+// stays open for the caller to close.
+func (s *dirSecurer) secure(d windows.Handle, name string, root bool) (windows.Handle, dataEntry, error) {
+	const access = windows.READ_CONTROL | windows.WRITE_DAC | windows.WRITE_OWNER | windows.FILE_READ_ATTRIBUTES
+	var h windows.Handle
+	var err error
+	if root {
+		h, err = windows.CreateFile(windows.StringToUTF16Ptr(name), access, shareAll, nil,
+			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	} else {
+		h, err = ntCreate(d, name, access, windows.FILE_OPEN, 0, shareAll, nil)
+	}
+	if err != nil {
+		return 0, dataEntry{}, err
+	}
+	e, err := s.setSecurity(h, root)
+	if err != nil {
+		windows.CloseHandle(h)
+		return 0, e, err
+	}
+	return h, e, nil
+}
+
+func (s *dirSecurer) setSecurity(h windows.Handle, root bool) (dataEntry, error) {
 	e, err := inspect(h)
 	if err != nil || e.link || (root && e.foreign() != "") {
 		return e, err

@@ -465,13 +465,20 @@ func renameByHandle(h, dir windows.Handle, name string, flags, class uint32) err
 	return err
 }
 
-func deleteByHandle(h windows.Handle) {
+// deleteByHandle deletes the file or (empty) folder open as h, which needs
+// DELETE access.
+func deleteByHandle(h windows.Handle) error {
 	var iosb windows.IO_STATUS_BLOCK
 	flags := uint32(windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_POSIX_SEMANTICS | windows.FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE)
-	if windows.NtSetInformationFile(h, &iosb, (*byte)(unsafe.Pointer(&flags)), 4, windows.FileDispositionInformationEx) != nil {
-		del := uint32(1)
-		windows.NtSetInformationFile(h, &iosb, (*byte)(unsafe.Pointer(&del)), 4, windows.FileDispositionInformation)
+	if windows.NtSetInformationFile(h, &iosb, (*byte)(unsafe.Pointer(&flags)), 4, windows.FileDispositionInformationEx) == nil {
+		return nil
 	}
+	del := uint32(1)
+	err := windows.NtSetInformationFile(h, &iosb, (*byte)(unsafe.Pointer(&del)), 4, windows.FileDispositionInformation)
+	if st, ok := err.(windows.NTStatus); ok {
+		return st.Errno()
+	}
+	return err
 }
 
 // clearReadonly clears the read-only attribute of the file name in dir so it

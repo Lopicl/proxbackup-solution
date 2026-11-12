@@ -162,6 +162,54 @@ func TestSecureDataDir(t *testing.T) {
 	}
 }
 
+// A user who planted a folder swaps it for a junction while the walk is
+// inside it: what the walk deletes next must still be in the folder it
+// checked, not where the junction points.
+func TestSecureDataDirSwap(t *testing.T) {
+	needAdmin(t)
+	base := t.TempDir()
+	dir := filepath.Join(base, "data")
+	outside := filepath.Join(base, "outside")
+	sub := filepath.Join(dir, "evil", "sub")
+	os.MkdirAll(sub, 0o700)
+	os.MkdirAll(outside, 0o700)
+	os.WriteFile(filepath.Join(sub, "canary.txt"), []byte("x"), 0o600)
+	os.WriteFile(filepath.Join(outside, "victim"), []byte("x"), 0o600)
+	giveToUsers(t, filepath.Join(dir, "evil"))
+	giveToUsers(t, sub)
+	swapped, renamed := false, false
+	testAfterSecure = func(p string) {
+		if p != sub || swapped {
+			return
+		}
+		swapped = true
+		if err := os.Rename(sub, sub+"-aside"); err != nil {
+			t.Logf("rename refused (no swap possible): %v", err)
+			return
+		}
+		renamed = true
+		mklinkJ(t, sub, outside)
+	}
+	t.Cleanup(func() { testAfterSecure = nil })
+
+	removed, err := SecureDataDir(dir, false)
+	t.Logf("removed %v, err %v", removed, err)
+	if !swapped {
+		t.Fatal("the walk never reached the planted folder")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "victim")); err != nil {
+		t.Errorf("deleted through a swapped-in junction: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(sub+"-aside", "canary.txt")); renamed && err == nil {
+		t.Error("the folder moved aside wasn't emptied")
+	}
+	// Without a swap, everything planted goes. After one, the junction left
+	// in evil keeps it until the next start.
+	if _, err := os.Lstat(filepath.Join(dir, "evil")); !renamed && err == nil {
+		t.Errorf("planted folder kept")
+	}
+}
+
 // A data dir a user created is refused, and left as it is.
 func TestSecureDataDirForeign(t *testing.T) {
 	needAdmin(t)
