@@ -76,6 +76,8 @@ for PCs (step 3).
 3. Sign in as `admin` (initial password in the log, or set `PROXBACKUP_ADMIN_PASSWORD`). Lost it?
    `proxbackup-server passwd [user]` sets a new one.
 4. Add the PBS datastore under *Console Settings* (gear icon) → *Datastores* → *Add datastore*.
+   If *Host* is a reverse proxy for agents that refuses password sign-ins
+   ([docs/network.md](docs/network.md)), set *Console address* to PBS itself (e.g. `pbs:8007`).
 
 ### 3. Check the target
 

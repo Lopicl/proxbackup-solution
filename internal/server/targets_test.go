@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -434,5 +435,85 @@ func TestLocalTargetsUseLoopbackAPI(t *testing.T) {
 	}
 	if h := s.pbsAPIHost("other.example:8007"); h != "other.example:8007" {
 		t.Fatalf("remote PBS rerouted to %s", h)
+	}
+}
+
+// A standalone console reaches a PBS behind the agents' reverse proxy at the
+// target's console address, and stored or local secrets only go there while
+// it stays the address they were entered for.
+func TestTargetConsoleHost(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	api, fp, auths := fakePBS(t)
+	evil, _, evilAuths := fakePBS(t)
+	apiHost, evilHost := api.Listener.Addr().String(), evil.Listener.Addr().String()
+	const proxy = "pbs.invalid:8443" // must never be dialed
+	tg := &Target{Name: "remote", Host: proxy, ConsoleHost: apiHost, Fingerprint: fp, Datastore: "ds", AdminAuthID: "proxbackup@pbs", PBSUser: "proxbackup@pbs"}
+	if err := s.store.SaveTarget(ctx, tg, s.sealer.sealFor("pw", colTargetSecret)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.store.Target(ctx, tg.ID); got.ConsoleHost != apiHost {
+		t.Fatalf("console host not stored: %+v", got)
+	}
+	pc, err := s.adminClient(tg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pc.Version(ctx); err != nil {
+		t.Fatalf("admin client via console host: %v", err)
+	}
+
+	call := func(h func(http.ResponseWriter, *http.Request), id int64, body map[string]any) int {
+		if id != 0 { // a save: the id is in the path
+			body = maps.Clone(body)
+			delete(body, "id")
+		}
+		b, _ := json.Marshal(body)
+		rec := httptest.NewRecorder()
+		r := asAdmin(httptest.NewRequest("PUT", "/api/targets/x", strings.NewReader(string(b))))
+		if id != 0 {
+			r.SetPathValue("id", strconv.FormatInt(id, 10))
+		}
+		h(rec, r)
+		return rec.Code
+	}
+	form := map[string]any{"id": tg.ID, "name": "remote", "host": proxy, "console_host": apiHost, "fingerprint": fp, "datastore": "ds", "admin_auth_id": "proxbackup@pbs"}
+	if c := call(s.handleTestTarget, 0, form); c != 200 {
+		t.Fatalf("test via console host: %d", c)
+	}
+	// Moving only the console address needs the secret again.
+	form["console_host"] = evilHost
+	if c := call(s.handleTestTarget, 0, form); c != 400 {
+		t.Fatalf("stored secret to a new console host: %d", c)
+	}
+	if c := call(s.handleSaveTarget, tg.ID, form); c != 400 {
+		t.Fatalf("save with new console host and no secret: %d", c)
+	}
+	// Clearing it means the agents' address, which isn't where the secret was used.
+	form["console_host"] = ""
+	if c := call(s.handleTestTarget, 0, form); c != 400 {
+		t.Fatalf("stored secret to the agents' host: %d", c)
+	}
+	if a := evilAuths(); len(a) != 0 {
+		t.Fatalf("other host received %q", a)
+	}
+	// The same form with the stored console address saves: the 400 above was the secret.
+	form["console_host"], form["name"] = apiHost, "renamed"
+	if c := call(s.handleSaveTarget, tg.ID, form); c != 200 {
+		t.Fatalf("save without changing the endpoint: %d", c)
+	}
+	if a := auths(); len(a) == 0 || slices.ContainsFunc(a, func(x string) bool { return x != "password:pw" }) {
+		t.Fatalf("console host received %q", a)
+	}
+
+	// The local PBS user's password only goes to a console address on this PBS.
+	secretFile := filepath.Join(t.TempDir(), "secret")
+	os.WriteFile(secretFile, []byte("local-password\n"), 0o600)
+	s.cfg.LocalPBS = &LocalPBS{APIAddr: apiHost, PublicHost: proxy, AuthID: "proxbackup@pbs", SecretFile: secretFile}
+	if c := call(s.handleTestTarget, 0, map[string]any{"host": proxy, "console_host": evilHost, "fingerprint": fp, "admin_auth_id": "proxbackup@pbs"}); c != 400 {
+		t.Fatalf("local secret to another console host: %d", c)
+	}
+	if a := evilAuths(); len(a) != 0 {
+		t.Fatalf("other host received %q", a)
 	}
 }

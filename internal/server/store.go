@@ -204,6 +204,8 @@ func (s *Store) migrate() error {
 		// How many days in a row PC users may pause the client's scheduled
 		// backups from the tray (NULL = the console's default, see pauselimit.go).
 		{"clients", "pause_days", "INTEGER"},
+		// The address the console itself uses for a target's PBS (see Target.ConsoleHost).
+		{"targets", "console_host", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -305,9 +307,14 @@ func now() int64 { return time.Now().Unix() }
 // ---- models ----
 
 type Target struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Host        string `json:"host"`
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	Host string `json:"host"`
+	// ConsoleHost, if set, is the address the console itself uses for this
+	// PBS instead of Host, which agents get: e.g. PBS's own port when Host is
+	// a reverse proxy refusing password sign-ins (docs/network.md). It must
+	// serve the same certificate.
+	ConsoleHost string `json:"console_host"`
 	Fingerprint string `json:"fingerprint"`
 	Datastore   string `json:"datastore"`
 	RootNS      string `json:"root_ns"`
@@ -483,11 +490,11 @@ type LogLine struct {
 
 // ---- targets ----
 
-const targetCols = `id, name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, local, created_at`
+const targetCols = `id, name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, local, created_at, console_host`
 
 func scanTarget(sc interface{ Scan(...any) error }) (*Target, error) {
 	t := &Target{}
-	err := sc.Scan(&t.ID, &t.Name, &t.Host, &t.Fingerprint, &t.Datastore, &t.RootNS, &t.AdminAuthID, &t.adminSecretEnc, &t.PBSUser, &t.Local, &t.CreatedAt)
+	err := sc.Scan(&t.ID, &t.Name, &t.Host, &t.Fingerprint, &t.Datastore, &t.RootNS, &t.AdminAuthID, &t.adminSecretEnc, &t.PBSUser, &t.Local, &t.CreatedAt, &t.ConsoleHost)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = errNotFound
 	}
@@ -520,8 +527,8 @@ func (s *Store) Target(ctx context.Context, id int64) (*Target, error) {
 func (s *Store) SaveTarget(ctx context.Context, t *Target, sealSecret func(id int64) []byte) error {
 	if t.ID == 0 {
 		t.CreatedAt = now()
-		id, err := s.insertSealed(ctx, colTargetSecret, sealSecret, &t.adminSecretEnc, `INSERT INTO targets(name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, local, created_at)
-			VALUES(?,?,?,?,?,?,COALESCE(?, X''),?,?,?)`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.Local, t.CreatedAt)
+		id, err := s.insertSealed(ctx, colTargetSecret, sealSecret, &t.adminSecretEnc, `INSERT INTO targets(name, host, fingerprint, datastore, root_ns, admin_auth_id, admin_secret_enc, pbs_user, local, created_at, console_host)
+			VALUES(?,?,?,?,?,?,COALESCE(?, X''),?,?,?,?)`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.Local, t.CreatedAt, t.ConsoleHost)
 		if err != nil {
 			return err
 		}
@@ -532,7 +539,8 @@ func (s *Store) SaveTarget(ctx context.Context, t *Target, sealSecret func(id in
 		t.adminSecretEnc = sealSecret(t.ID)
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE targets SET name=?, host=?, fingerprint=?, datastore=?, root_ns=?, admin_auth_id=?,
-		admin_secret_enc=?, pbs_user=?, local=? WHERE id=?`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc, t.PBSUser, t.Local, t.ID)
+		admin_secret_enc=?, pbs_user=?, local=?, console_host=? WHERE id=?`, t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.adminSecretEnc,
+		t.PBSUser, t.Local, t.ConsoleHost, t.ID)
 	return err
 }
 

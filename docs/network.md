@@ -85,6 +85,9 @@ Notes:
   through the proxy; `/`, the GUI scripts, token-less API calls and ticket logins return 403.
 - The console signs in to PBS with a password, which the proxy refuses, so its own PBS calls
   (retention, snapshot listing, datastore usage) go to PBS on loopback (`127.0.0.1:8007`).
+  A standalone console on another server can't use loopback: give the datastore a *Console
+  address* that reaches PBS directly (e.g. `10.0.4.10:8007`, firewalled to the console). Agents
+  keep using *Host*; changing either address needs the password again.
 - After PBS renews its certificate (ACME), `systemctl reload nginx`, e.g. from a renewal hook or a
   daily timer. The console picks up the new fingerprint by itself.
 

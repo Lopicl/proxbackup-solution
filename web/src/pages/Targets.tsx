@@ -24,7 +24,12 @@ export function Targets() {
             <button
               className="primary"
               onClick={() =>
-                setEdit({ pbs_user: 'proxbackup@pbs', admin_auth_id: 'proxbackup@pbs', root_ns: 'pcs', ...(local && { host: local.host, admin_auth_id: local.auth_id }) })
+                setEdit({
+                  pbs_user: 'proxbackup@pbs',
+                  admin_auth_id: 'proxbackup@pbs',
+                  root_ns: 'pcs',
+                  ...(local && { host: local.host, admin_auth_id: local.auth_id }),
+                })
               }
             >
               Add datastore
@@ -54,6 +59,11 @@ export function Targets() {
                   </td>
                   <td>
                     <code>{t.host}</code>
+                    {t.console_host && (
+                      <div className="muted-text">
+                        console: <code>{t.console_host}</code>
+                      </div>
+                    )}
                   </td>
                   <td>
                     <code>
@@ -135,10 +145,18 @@ function TargetEditor({ t: init, local, onClose }: { t: Form; local?: { auth_id:
           <Field label="Name">
             <input value={t.name ?? ''} onChange={(e) => set({ name: e.target.value })} required placeholder="pbs-main" />
           </Field>
-          <Field label="Host" hint="host or host:port (default 8007), as reachable from the PCs and this server.">
+          <Field label="Host" hint="host or host:port (default 8007), as reachable from the PCs (and this server, unless a console address is set).">
             <input value={t.host ?? ''} onChange={(e) => set({ host: e.target.value })} required placeholder="pbs.example.lan" />
           </Field>
         </div>
+        {!isLocal && (
+          <Field
+            label="Console address (optional)"
+            hint="Where this server reaches PBS, if not at Host: e.g. pbs.example.lan:8007 when Host is the agents' reverse proxy, which refuses password sign-ins. Must serve the same certificate."
+          >
+            <input value={t.console_host ?? ''} onChange={(e) => set({ console_host: e.target.value })} placeholder="same as Host" />
+          </Field>
+        )}
         <Field
           label="Certificate fingerprint (SHA-256)"
           hint={
@@ -180,7 +198,7 @@ function TargetEditor({ t: init, local, onClose }: { t: Form; local?: { auth_id:
               isLocal
                 ? 'Not needed: this is the PBS user created when the console was installed on this PBS.'
                 : t.id
-                  ? 'Leave empty to keep the stored one (enter it again when changing host, fingerprint or PBS admin).'
+                  ? 'Leave empty to keep the stored one (enter it again when changing host, console address, fingerprint or PBS admin).'
                   : 'Stored encrypted.'
             }
           >
@@ -193,7 +211,10 @@ function TargetEditor({ t: init, local, onClose }: { t: Form; local?: { auth_id:
             />
           </Field>
         </div>
-        <Field label="PBS user owning the agent tokens" hint="Must be the PBS admin when that is a user. With a token as admin, created if missing (without a password).">
+        <Field
+          label="PBS user owning the agent tokens"
+          hint="Must be the PBS admin when that is a user. With a token as admin, created if missing (without a password)."
+        >
           <input value={t.pbs_user ?? ''} onChange={(e) => set({ pbs_user: e.target.value })} placeholder="proxbackup@pbs" />
         </Field>
         {test && <div className="notice">{test}</div>}

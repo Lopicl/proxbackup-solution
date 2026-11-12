@@ -262,10 +262,10 @@ func (s *Server) localFingerprintFor(ctx context.Context, authID, host string) s
 // localSecretFor fills in the local PBS user's password when a target form uses
 // that user without a secret (the admin never sees it). It is only handed out
 // for this PBS's address and certificate fingerprint, so a form cannot send it
-// to another host.
-func (s *Server) localSecretFor(ctx context.Context, authID, host, fp string) string {
+// to another host. A console address, if set, must be this PBS too.
+func (s *Server) localSecretFor(ctx context.Context, authID, host, consoleHost, fp string) string {
 	l := s.cfg.LocalPBS
-	if l == nil || authID != l.AuthID || !l.isLocalHost(host) {
+	if l == nil || authID != l.AuthID || !l.isLocalHost(host) || consoleHost != "" && !l.isLocalHost(consoleHost) {
 		return ""
 	}
 	local, err := s.localFingerprint(ctx)
@@ -288,6 +288,25 @@ func (s *Server) pbsAPIHost(host string) string {
 	return host
 }
 
+// consoleAddr is the address the console itself uses for a target at host
+// with console address consoleHost (see Target.ConsoleHost): consoleHost if
+// set, else pbsAPIHost(host).
+func (s *Server) consoleAddr(host, consoleHost string) string {
+	if consoleHost != "" {
+		return consoleHost
+	}
+	return s.pbsAPIHost(host)
+}
+
+// orHost is the address the console's PBS calls go to as entered in a target
+// form, before pbsAPIHost: consoleHost, or host when that is empty.
+func orHost(consoleHost, host string) string {
+	if consoleHost != "" {
+		return consoleHost
+	}
+	return host
+}
+
 func (l *LocalPBS) isLocalHost(host string) bool {
 	return sameHost(host, l.PublicHost) || sameHost(host, l.APIAddr)
 }
@@ -305,8 +324,10 @@ func sameHost(a, b string) bool {
 }
 
 // sameEndpoint reports whether a target form still points at the PBS and token
-// the stored secret belongs to, so the stored secret may be reused.
-func (t *Target) sameEndpoint(host, fp, authID string) bool {
-	return sameHost(t.Host, host) && authID == t.AdminAuthID &&
+// the stored secret belongs to, so the stored secret may be reused. Both the
+// agents' and the console's address count: the console sends the secret to
+// the latter.
+func (t *Target) sameEndpoint(host, consoleHost, fp, authID string) bool {
+	return sameHost(t.Host, host) && sameHost(orHost(t.ConsoleHost, t.Host), orHost(consoleHost, host)) && authID == t.AdminAuthID &&
 		pbs.NormalizeFingerprint(t.Fingerprint) == pbs.NormalizeFingerprint(fp)
 }

@@ -211,6 +211,8 @@ export interface Target {
   id: number
   name: string
   host: string
+  // Where the console itself reaches PBS, if not host (e.g. a proxy in host refuses password sign-ins).
+  console_host: string
   fingerprint: string
   datastore: string
   root_ns: string

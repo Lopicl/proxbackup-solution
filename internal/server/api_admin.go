@@ -71,6 +71,7 @@ func orEmpty[T any](s []T) []T {
 type targetReq struct {
 	Name        string `json:"name"`
 	Host        string `json:"host"`
+	ConsoleHost string `json:"console_host"` // empty = Host
 	Fingerprint string `json:"fingerprint"`
 	Datastore   string `json:"datastore"`
 	RootNS      string `json:"root_ns"`
@@ -113,6 +114,7 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	auditTarget(r, "PBS server "+req.Name)
 	req.RootNS = strings.Trim(req.RootNS, "/")
+	req.ConsoleHost = strings.TrimSpace(req.ConsoleHost)
 	if req.PBSUser == "" {
 		req.PBSUser = "proxbackup@pbs"
 	}
@@ -145,8 +147,9 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	// un-revoked, re-enrolled, rotated), which can read their groups: a PBS
 	// account of the editor's choice must not get them either. A datastore or
 	// root namespace change sends future backups (and client tokens) to
-	// storage the editor may be able to read.
-	if t.ID != 0 && (!sameHost(t.Host, req.Host) ||
+	// storage the editor may be able to read. The console creates the client
+	// tokens at its own address, so that counts as the host too.
+	if t.ID != 0 && (!sameHost(t.Host, req.Host) || !sameHost(orHost(t.ConsoleHost, t.Host), orHost(req.ConsoleHost, req.Host)) ||
 		pbs.NormalizeFingerprint(t.Fingerprint) != pbs.NormalizeFingerprint(fp) ||
 		t.PBSUser != req.PBSUser || t.Datastore != req.Datastore || t.RootNS != req.RootNS) && !access(r).Global(PermRestore) {
 		n, err := s.store.TargetClientCount(ctx, t.ID)
@@ -155,15 +158,15 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if n > 0 {
-			httpError(w, http.StatusForbidden, fmt.Errorf("%d clients use this PBS server: changing its host, fingerprint, datastore, "+
+			httpError(w, http.StatusForbidden, fmt.Errorf("%d clients use this PBS server: changing its host, console address, fingerprint, datastore, "+
 				"root namespace or agent user also needs the permission Restore (for all clients)", n))
 			return
 		}
 	}
 	// The stored secret only stays with the PBS and admin it was entered for.
 	local := t.Local && req.AdminSecret == ""
-	if req.AdminSecret == "" && (t.ID == 0 || !t.sameEndpoint(req.Host, fp, req.AdminAuthID)) {
-		if req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, fp); req.AdminSecret == "" {
+	if req.AdminSecret == "" && (t.ID == 0 || !t.sameEndpoint(req.Host, req.ConsoleHost, fp, req.AdminAuthID)) {
+		if req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, req.ConsoleHost, fp); req.AdminSecret == "" {
 			httpError(w, 400, errMissingAdminSecret)
 			return
 		}
@@ -178,8 +181,8 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	// On this PBS, the console needs rights on it first (see pbsgrants.go).
 	needGrant := local && (t.ID == 0 || !t.Local || t.Datastore != req.Datastore || nsChanged)
 	wasLocal := t.Local
-	t.Name, t.Host, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser, t.Local =
-		req.Name, req.Host, fp, req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser, local
+	t.Name, t.Host, t.ConsoleHost, t.Fingerprint, t.Datastore, t.RootNS, t.AdminAuthID, t.PBSUser, t.Local =
+		req.Name, req.Host, req.ConsoleHost, fp, req.Datastore, req.RootNS, req.AdminAuthID, req.PBSUser, local
 	var sealSecret func(id int64) []byte
 	if req.AdminSecret != "" {
 		sealSecret = s.sealer.sealFor(req.AdminSecret, colTargetSecret)
@@ -191,7 +194,7 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	if nsChanged || needGrant {
 		var err error
 		if t.ID == 0 {
-			pc, err = pbs.NewClient(pbs.Config{Host: s.pbsAPIHost(t.Host), Fingerprint: t.Fingerprint, AuthID: t.AdminAuthID, Secret: req.AdminSecret})
+			pc, err = pbs.NewClient(pbs.Config{Host: s.consoleAddr(t.Host, t.ConsoleHost), Fingerprint: t.Fingerprint, AuthID: t.AdminAuthID, Secret: req.AdminSecret})
 		} else {
 			pc, err = s.adminClient(t)
 		}
@@ -264,20 +267,20 @@ func (s *Server) handleTestTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	// Stored and local secrets are only sent to the PBS they belong to.
 	if req.AdminSecret == "" && req.ID > 0 {
-		if t, err := s.store.Target(ctx, req.ID); err == nil && t.sameEndpoint(req.Host, req.Fingerprint, req.AdminAuthID) {
+		if t, err := s.store.Target(ctx, req.ID); err == nil && t.sameEndpoint(req.Host, req.ConsoleHost, req.Fingerprint, req.AdminAuthID) {
 			req.AdminSecret, _ = s.sealer.Open(t.adminSecretEnc, colTargetSecret, t.ID)
 		}
 	}
 	local := false
 	if req.AdminSecret == "" {
-		req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, req.Fingerprint)
+		req.AdminSecret = s.localSecretFor(ctx, req.AdminAuthID, req.Host, req.ConsoleHost, req.Fingerprint)
 		local = req.AdminSecret != ""
 	}
 	if req.AdminSecret == "" {
 		httpError(w, 400, errMissingAdminSecret)
 		return
 	}
-	pc, err := pbs.NewClient(pbs.Config{Host: s.pbsAPIHost(req.Host), Fingerprint: req.Fingerprint, AuthID: req.AdminAuthID, Secret: req.AdminSecret})
+	pc, err := pbs.NewClient(pbs.Config{Host: s.consoleAddr(req.Host, req.ConsoleHost), Fingerprint: req.Fingerprint, AuthID: req.AdminAuthID, Secret: req.AdminSecret})
 	if err != nil {
 		httpError(w, 400, err)
 		return
