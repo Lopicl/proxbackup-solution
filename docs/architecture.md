@@ -196,8 +196,11 @@ read on every run.
   server URL, a secret, and the server CA fingerprint. The agent generates an ECDSA key and
   CSR, and the server returns a client certificate signed by its internal CA. Every later
   call uses mTLS.
-* **Agent setup.** For rollouts, an admin creates a *setup token* instead: valid for any number
-  of PCs until it expires (4 h by default). The console serves its cached Windows agent with the
+* **Agent setup.** For rollouts, an admin creates a *setup token* instead: valid until it expires
+  (4 h by default) for any number of PCs, or up to an optional limit (`max_uses`; a use is taken
+  before the enrollment and given back if it fails, so concurrent setups can't exceed it). Each
+  token enrolls at most 30 PCs at once and 60 per hour (HTTP 429), so a leaked setup can't flood
+  the console and PBS with clients. The console serves its cached Windows agent with the
   token appended (`agent exe ‖ token ‖ u32 len ‖ "PBXSETUP"`, see `internal/api/setup.go`;
   Windows ignores data after the PE image). Started without arguments, the agent finds the
   token, elevates through UAC, and asks for the client name (default: hostname) and the console
@@ -301,8 +304,12 @@ read on every run.
   control and interactive users (console and RDP logons) read/write of data only: not
   `FILE_CREATE_PIPE_INSTANCE`, so no user can serve instances of the pipe. Network logons are
   denied. The agent identifies the caller by impersonating the pipe client (it takes the token,
-  user, profile folder and whether the user is in the local Administrators group, elevated or
-  not); nothing the tray sends is trusted for that. The tray checks before sending anything that
+  user, profile folder and whether the user is an administrator); nothing the tray sends is
+  trusted for that. Only an *enabled* Administrators group counts (an elevated process, or no
+  UAC). In an administrator's unelevated process the group is deny-only, so the caller is treated
+  like any other user (`Peer.Elevatable`; the tray says restores elsewhere go through the console).
+  Otherwise any process the admin runs unelevated could get a SYSTEM restore into System32 without
+  a UAC prompt. The tray checks before sending anything that
   the pipe is served from session 0, so a user process can't pose as the agent and impersonate
   the tray's user. Outside Windows the same protocol runs on a Unix socket in the data
   directory (development and tests).
@@ -391,7 +398,10 @@ read on every run.
   scope. Every API route states the permission it needs; handlers check the client they act
   on and filter lists, and the UI hides what the user can't do (from the scopes in `/api/me`).
   The console refuses changes that would leave no enabled user with `users.manage` for all
-  clients. `auth_source`/`external_id` on users leave room for OIDC (phase 5) mapping external
+  clients. `users.manage` stops at the holder's own permissions (`Access.Grants`): they can't
+  assign roles that give more than they have (or the same for more clients), change, delete or
+  reset the password of a user who has more, or create, edit or delete a role with permissions
+  they lack for all clients. With every permission it is equivalent to Administrator. `auth_source`/`external_id` on users leave room for OIDC (phase 5) mapping external
   identities onto the same users and roles.
 * **Audit log.** Sign-ins (also failed ones), sign-outs and every change made through the API
   (plus key downloads and showing enrollment/setup tokens) are recorded with user, action,
@@ -439,7 +449,10 @@ read on every run.
   backup group, as the target's PBS admin. It never prunes because a run was reported; see
   *Tamper-resistant retention* under [Security model](#security-model) for how it selects
   snapshots. Garbage collection is left to PBS's own schedule.
-* **Notifications.** SMTP and generic webhooks (JSON). Triggers: run failed or missed, run
+* **Notifications.** SMTP and generic webhooks (JSON). Webhooks follow no redirects and don't
+  connect to loopback, link-local (cloud metadata) or unspecified addresses, checked after name
+  resolution. LAN addresses stay allowed. Notifications cover all clients, whatever the clients
+  of the `notifications.manage` user's other roles. Triggers: run failed or missed, run
   succeeded (optional), last successful backup older than N days (checked daily), a job over
   its daily backup cap, console update installed or failed.
 * **Automatic updates.** The console checks GitHub releases every 6 hours and installs the
@@ -507,7 +520,8 @@ after an hour without use, and 8 hours after it was opened at the latest. An age
 ends the oldest), and over-long user, SID, scope or ref fields are refused. The page lists the
 PC's snapshots and reuses the console's file browser:
 
-* *Administrators of the PC* see and restore everything, written as SYSTEM like console restores.
+* *Administrators of the PC* (callers with the Administrators group enabled, see Local IPC) see and
+  restore everything, written as SYSTEM like console restores.
 * *Other users* see only what leads to or lies inside their profile folder (archives whose
   source is unknown are hidden). They restore only paths inside it, either back to the original
   location or to a folder inside it (default `<profile>\Restored\<snapshot time>`). Raw volume
@@ -524,7 +538,13 @@ requesting user.
 archive's owners and DACLs, so a restore into a system folder could plant or downgrade what the PC
 runs. `RestoreSpec.SystemFolders` allows it. The console sets it only for users with
 `restore.system` on the client, and the agent only for PC administrators' self-service restores.
-Without it:
+The PC has the last word on console restores (`internal/agent/policy.go`): `policy.json` in the
+data directory, which only SYSTEM and Administrators can write, holds `console_system_restores`.
+New installs write `false`, so the agent clears `SystemFolders` on console restores and reports
+`no-console-system-restores`, and the console then refuses targets in system folders even for
+`restore.system` users. A PC administrator allows them with `proxbackup-agent policy
+-console-system-restores on`. Installs from before the policy have no file, which means allowed;
+enrolling again keeps an existing choice. Without `SystemFolders`:
 
 * The console refuses targets in `api.ProtectedFolder`'s usual locations on any drive:
   `Windows`, `Program Files` (also `(x86)` and `(Arm)`), `ProgramData`, `Users\Default` and
@@ -538,9 +558,13 @@ Without it:
   name before opening (so a missing Startup folder isn't created) and by file ID after (so 8.3
   names, case and other drive letters don't get around it). A protected target fails the run. A
   protected folder below the target (target `C:\`, archive folder `Windows`) is skipped with
-  everything in it, and the run ends with a warning.
+  everything in it, and the run ends with a warning. Files and links directly in a drive root
+  are skipped too: standard users can't create files there, and one like `C:\Program.exe` runs
+  for a service whose path isn't quoted. Folders in the root are still created.
 * Users' own profiles stay writable, since restoring them is the role's purpose. A Restore-only
-  user can therefore still write into any profile on the PCs in their scope.
+  user can therefore still write into any profile on the PCs in their scope, and into other
+  folders outside the list, like PATH folders some installers create in the drive root
+  (`C:\Python3x`). The content still has to come from that PC's own backups.
 
 ## Client-side scheduling
 
@@ -682,8 +706,10 @@ sequenceDiagram
 
 * **Agent ↔ server:** mTLS using the internal CA. Enrollment codes are single-use and expire
   (24 h by default, up to 30 days). Setup tokens are multi-use, so they are short-lived (4 h by
-  default, up to 30 days) and can be revoked under Clients; anyone holding one can enroll PCs
-  until then. Revoking a client in the UI marks it revoked, so its
+  default, up to 30 days), can be revoked under Clients, can be limited to a number of PCs, and are
+  rate-limited (see Agent setup); anyone holding one can enroll PCs until then. Each such PC gets
+  its own PBS token and namespace, so a leaked setup also lets its holder store data on PBS and
+  take client names before the real PCs enroll. Revoking a client in the UI marks it revoked, so its
   certificate is no longer accepted, and deletes its PBS token. Existing snapshots stay.
   Bringing a revoked client back hands a PC its backups, so it needs `clients.revoked`
   (*Clients → Revoked clients*, which lists all of them). **Un-revoke**: the console remembers
@@ -872,7 +898,10 @@ sequenceDiagram
   offer carries the release's `SHA256SUMS` and signature, and the agent checks them with its
   own built-in key, takes the binary's hash from them, and installs only newer versions. So a
   compromised console (or its PBS host) can't push a binary of its own or an older release to
-  the PCs. They fetch the binary from the console over mTLS and verify its size, hash and
+  the PCs. That closes the update channel only: restores run as SYSTEM, and the console holds
+  DatastoreAdmin on the client namespaces (so it can plant a snapshot), so a compromised console
+  can still run code on PCs that allow console restores into system folders (see Protected
+  system folders; new installs don't). The PCs fetch the binary from the console over mTLS and verify its size, hash and
   reported version before swapping it in. The release workflow pins its actions to commit SHAs
   and only its publish job, which runs no build tooling, has `contents: write`.
 * **PBS credentials:** the console provisions as the agents' PBS user itself (`proxbackup@pbs`,
@@ -1282,6 +1311,7 @@ are regular `CLIENT`s linked to their cluster and node name; their jobs and runs
 | A bad release breaks every console and agent | Updates install only in the admin's window, refuse downgrades, and verify `SHA256SUMS`; agents update only when idle and back off for an hour after a failure. Prereleases are opt-in |
 | Locked files without VSS | VSS is the default; without it, files are skipped and warned about, never silently dropped |
 | Compromised console or PBS host deletes all backups (it holds an Admin token) | Lock via `protected` while retention keeps a snapshot (phase 2, implemented), plus a pull-synced second PBS (guided in phase 5) or tape that the primary can't reach |
+| Compromised console runs code on PCs through a restore into system folders (from a snapshot it planted) | Agent-local policy: new installs refuse console restores into system folders until a PC administrator allows them (`proxbackup-agent policy`); installs from before the policy allow them until changed |
 | A compromised PVE host deletes its own host backups *(phase 7)* | Its agent's PBS token has `DatastoreBackup` only, retention runs on the console, and the lock applies to host backups too |
 | Share credentials leak from the console *(phase 5)* | Sealed with the master key, used only by the console process, never sent to agents or the browser; admins use a dedicated read-only account. Write credentials for restores are never stored |
 | Share backups overload the PBS host *(phase 5)* | Low CPU/I/O priority for share jobs, a cap on parallel share jobs, per-job bandwidth limits, and share jobs kept out of verify/GC windows |

@@ -314,11 +314,31 @@ func (r *restoreRoot) Open(rel string) (*restoreEntry, error) {
 	return &restoreEntry{f: os.NewFile(uintptr(h), rel), h: h}, nil
 }
 
+// checkRootFile returns an error wrapping errProtected for a file in the
+// folder parent (relative to the root) if that is a drive root and the
+// restore keeps out of system folders. Standard users can create folders in
+// C:\ but no files, and a file there like C:\Program.exe runs for a
+// service with an unquoted path; restores run as SYSTEM.
+func (r *restoreRoot) checkRootFile(parent string) error {
+	if len(r.protect) == 0 {
+		return nil
+	}
+	dir := filepath.Join(r.path, parent)
+	vol := filepath.VolumeName(dir)
+	if strings.Trim(dir[len(vol):], `\`) != "" {
+		return nil
+	}
+	return fmt.Errorf(`files directly in %s\ are kept out like a %w: restoring them needs the "Restore to system folders" permission`, vol, errProtected)
+}
+
 // Create creates a new file that takes the name rel on Commit, replacing
 // what is there. No one else can open it until then.
 func (r *restoreRoot) Create(rel string) (*restoreEntry, error) {
 	parent, name := filepath.Split(rel)
 	if err := checkName(name); err != nil {
+		return nil, err
+	}
+	if err := r.checkRootFile(parent); err != nil {
 		return nil, err
 	}
 	d, err := r.dir(strings.TrimSuffix(parent, `\`), true)
@@ -344,6 +364,9 @@ func (r *restoreRoot) Create(rel string) (*restoreEntry, error) {
 func (r *restoreRoot) Symlink(rel, target string) error {
 	parent, name := filepath.Split(rel)
 	if err := checkName(name); err != nil {
+		return err
+	}
+	if err := r.checkRootFile(parent); err != nil {
 		return err
 	}
 	d, err := r.dir(strings.TrimSuffix(parent, `\`), true)

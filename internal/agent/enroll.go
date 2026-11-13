@@ -38,6 +38,9 @@ func EnrollWith(ctx context.Context, dir string, t *api.EnrollmentToken, clientN
 	if _, err := SecureDataDir(dir, false); err != nil {
 		return nil, err
 	}
+	if err := initPolicy(dir); err != nil {
+		return nil, err
+	}
 	hostname, _ := os.Hostname()
 	keyPEM, csrPEM, err := newKeyAndCSR(hostname)
 	if err != nil {

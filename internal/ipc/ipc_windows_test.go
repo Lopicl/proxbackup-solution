@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -81,5 +82,42 @@ func TestPipe(t *testing.T) {
 		t.Error("a test pipe passed the agent service check")
 	} else {
 		t.Logf("service check: %v", err)
+	}
+}
+
+var procCreateRestrictedToken = windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
+
+// An administrator counts as one only with the Administrators group enabled:
+// a UAC-filtered token (the group deny-only) gets a user's restore scope.
+func TestPeerAdminNeedsElevation(t *testing.T) {
+	proc := windows.GetCurrentProcessToken()
+	var tok windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ALL_ACCESS, &tok); err != nil {
+		t.Fatal(err)
+	}
+	defer tok.Close()
+	if !proc.IsElevated() {
+		t.Skip("needs an elevated test process")
+	}
+	full, err := peerFromToken(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !full.Admin || full.Elevatable {
+		t.Fatalf("elevated token: admin=%v elevatable=%v", full.Admin, full.Elevatable)
+	}
+	// LUA_TOKEN: what UAC gives an administrator's unelevated processes.
+	const luaToken = 0x4
+	var lua windows.Token
+	if r, _, err := procCreateRestrictedToken.Call(uintptr(tok), luaToken, 0, 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(&lua))); r == 0 {
+		t.Fatalf("CreateRestrictedToken: %v", err)
+	}
+	defer lua.Close()
+	p, err := peerFromToken(lua)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Admin || !p.Elevatable {
+		t.Fatalf("filtered token: admin=%v elevatable=%v", p.Admin, p.Elevatable)
 	}
 }

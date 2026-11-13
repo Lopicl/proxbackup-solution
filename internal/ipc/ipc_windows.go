@@ -172,12 +172,22 @@ func peerFromToken(tok windows.Token) (*Peer, error) {
 	if err != nil {
 		return nil, err
 	}
-	// With UAC the group is present but deny-only until the user elevates;
-	// they are an administrator either way.
+	// With UAC the group is present but deny-only until the user elevates.
+	// Only an enabled group counts: a restore for an administrator runs as
+	// SYSTEM and may write system folders, so a process the user didn't
+	// elevate mustn't get that without a UAC prompt. Until they elevate,
+	// they are treated like any other user (Elevatable tells the tray).
 	for _, g := range groups.AllGroups() {
 		if windows.EqualSid(g.Sid, admins) {
-			p.Admin = true
+			if g.Attributes&windows.SE_GROUP_ENABLED != 0 {
+				p.Admin = true
+			} else {
+				p.Elevatable = true
+			}
 		}
+	}
+	if p.Admin {
+		p.Elevatable = false
 	}
 	return p, nil
 }

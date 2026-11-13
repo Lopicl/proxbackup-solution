@@ -698,6 +698,7 @@ func (s *Server) handleCreateSetupToken(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		TargetID int64 `json:"target_id"`
 		TTLHours int   `json:"ttl_hours"`
+		MaxUses  int   `json:"max_uses"` // 0 = any number of PCs
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		httpError(w, 400, err)
@@ -706,6 +707,10 @@ func (s *Server) handleCreateSetupToken(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	if _, err := s.store.Target(ctx, req.TargetID); err != nil {
 		httpError(w, 400, errors.New("unknown target"))
+		return
+	}
+	if req.MaxUses < 0 || req.MaxUses > 100000 {
+		httpError(w, 400, errors.New("max_uses must be between 0 (any number) and 100000"))
 		return
 	}
 	ttl := defaultSetupTTL
@@ -721,12 +726,12 @@ func (s *Server) handleCreateSetupToken(w http.ResponseWriter, r *http.Request) 
 	tok, _ := json.Marshal(api.EnrollmentToken{URL: s.cfg.PublicURL, Code: code, CAFingerprint: s.pki.CAFingerprint(),
 		Multi: true, Expires: expires, Host: s.agentFacingIP(ctx)})
 	enc := base64.RawURLEncoding.EncodeToString(tok)
-	id, err := s.store.CreateSetupToken(ctx, hashToken(code), req.TargetID, expires, s.sealer.sealFor(enc, colSetupToken))
+	id, err := s.store.CreateSetupToken(ctx, hashToken(code), req.TargetID, expires, req.MaxUses, s.sealer.sealFor(enc, colSetupToken))
 	if err != nil {
 		httpError(w, 500, err)
 		return
 	}
-	s.log.Info("setup token created", "id", id, "target", req.TargetID, "expires", time.Unix(expires, 0))
+	s.log.Info("setup token created", "id", id, "target", req.TargetID, "expires", time.Unix(expires, 0), "max_uses", req.MaxUses)
 	writeJSON(w, map[string]any{"id": id, "expires": expires, "token": enc, "command": setupCommand(enc)})
 }
 

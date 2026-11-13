@@ -83,6 +83,9 @@ type Status struct {
 	Running *RunningRun `json:"running,omitempty"`
 	Jobs    []Job       `json:"jobs"`
 	Recent  []RunInfo   `json:"recent"` // newest first
+	// Elevatable: an administrator whose tray isn't elevated, so they
+	// restore only their profile folder from it.
+	Elevatable bool `json:"elevatable,omitempty"`
 }
 
 // Job is a backup job of this PC.
@@ -122,8 +125,11 @@ type Peer struct {
 	User    string // DOMAIN\name
 	SID     string
 	Profile string // profile folder, e.g. C:\Users\alice
-	Admin   bool   // member of the local Administrators group (elevated or not)
+	Admin   bool   // in the local Administrators group with the group enabled (elevated, or no UAC)
 	token   peerToken
+	// Elevatable: in the Administrators group, but deny-only (a UAC token
+	// that isn't elevated). They are treated like other users.
+	Elevatable bool
 }
 
 // Handler answers one request from peer.

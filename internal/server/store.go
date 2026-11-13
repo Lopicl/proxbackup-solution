@@ -206,6 +206,8 @@ func (s *Store) migrate() error {
 		{"clients", "pause_days", "INTEGER"},
 		// The address the console itself uses for a target's PBS (see Target.ConsoleHost).
 		{"targets", "console_host", "TEXT NOT NULL DEFAULT ''"},
+		// How many PCs a setup token may enroll (0 = any number).
+		{"setup_tokens", "max_uses", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range cols {
 		if ok, err := s.tableExists(c.table); err != nil {
@@ -1122,26 +1124,27 @@ func (s *Store) ReleaseEnrollment(ctx context.Context, id int64) {
 
 // ---- setup tokens ----
 
-// SetupToken enrolls any number of PCs until it expires; each PC picks its
-// own client name.
+// SetupToken enrolls up to MaxUses PCs (0 = any number) until it expires;
+// each PC picks its own client name.
 type SetupToken struct {
 	ID        int64 `json:"id"`
 	TargetID  int64 `json:"target_id"`
 	Expires   int64 `json:"expires"`
 	Uses      int   `json:"uses"`
+	MaxUses   int   `json:"max_uses"`
 	CreatedAt int64 `json:"created_at"`
 }
 
 // CreateSetupToken stores a new token. sealToken seals the token string,
 // kept so the setup can be downloaded again until it expires.
-func (s *Store) CreateSetupToken(ctx context.Context, codeHash string, targetID, expires int64, sealToken func(id int64) []byte) (int64, error) {
-	return s.insertSealed(ctx, colSetupToken, sealToken, nil, `INSERT INTO setup_tokens(code_hash, target_id, expires, token_enc, created_at) VALUES(?,?,?,X'',?)`,
-		codeHash, targetID, expires, now())
+func (s *Store) CreateSetupToken(ctx context.Context, codeHash string, targetID, expires int64, maxUses int, sealToken func(id int64) []byte) (int64, error) {
+	return s.insertSealed(ctx, colSetupToken, sealToken, nil, `INSERT INTO setup_tokens(code_hash, target_id, expires, max_uses, token_enc, created_at) VALUES(?,?,?,?,X'',?)`,
+		codeHash, targetID, expires, maxUses, now())
 }
 
 // SetupTokens lists the tokens that haven't expired.
 func (s *Store) SetupTokens(ctx context.Context) ([]SetupToken, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, expires, uses, created_at FROM setup_tokens WHERE expires>? ORDER BY id DESC`, now())
+	rows, err := s.db.QueryContext(ctx, `SELECT id, target_id, expires, uses, max_uses, created_at FROM setup_tokens WHERE expires>? ORDER BY id DESC`, now())
 	if err != nil {
 		return nil, err
 	}
@@ -1149,7 +1152,7 @@ func (s *Store) SetupTokens(ctx context.Context) ([]SetupToken, error) {
 	var out []SetupToken
 	for rows.Next() {
 		var t SetupToken
-		if err := rows.Scan(&t.ID, &t.TargetID, &t.Expires, &t.Uses, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.TargetID, &t.Expires, &t.Uses, &t.MaxUses, &t.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -1170,16 +1173,33 @@ func (s *Store) SetupTokenSealed(ctx context.Context, id int64) ([]byte, error) 
 // SetupTokenByCode returns a valid setup token.
 func (s *Store) SetupTokenByCode(ctx context.Context, codeHash string) (*SetupToken, error) {
 	t := &SetupToken{}
-	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, expires, uses, created_at FROM setup_tokens WHERE code_hash=? AND expires>?`,
-		codeHash, now()).Scan(&t.ID, &t.TargetID, &t.Expires, &t.Uses, &t.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, target_id, expires, uses, max_uses, created_at FROM setup_tokens WHERE code_hash=? AND expires>?`,
+		codeHash, now()).Scan(&t.ID, &t.TargetID, &t.Expires, &t.Uses, &t.MaxUses, &t.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
 	return t, err
 }
 
-func (s *Store) CountSetupTokenUse(ctx context.Context, id int64) {
-	s.db.ExecContext(ctx, `UPDATE setup_tokens SET uses=uses+1 WHERE id=?`, id)
+// errSetupUsedUp: the setup token enrolled as many PCs as it may.
+var errSetupUsedUp = errors.New("this setup has enrolled as many PCs as it may; create a new one in the ProxBackup Console")
+
+// TakeSetupTokenUse counts an enrollment with the token before it happens,
+// so concurrent setups can't exceed its limit; ReleaseSetupTokenUse gives
+// the use back if the enrollment fails.
+func (s *Store) TakeSetupTokenUse(ctx context.Context, id int64) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE setup_tokens SET uses=uses+1 WHERE id=? AND (max_uses=0 OR uses<max_uses)`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errSetupUsedUp
+	}
+	return nil
+}
+
+func (s *Store) ReleaseSetupTokenUse(ctx context.Context, id int64) {
+	s.db.ExecContext(ctx, `UPDATE setup_tokens SET uses=uses-1 WHERE id=? AND uses>0`, id)
 }
 
 // DeleteSetupToken revokes a token (and drops expired ones).

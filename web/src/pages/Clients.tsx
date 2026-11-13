@@ -189,7 +189,7 @@ export function Clients() {
                   <td>{targetLabel(targets.data, t.target_id)}</td>
                   <td>{ago(t.created_at)}</td>
                   <td>{ago(t.expires)}</td>
-                  <td>{t.uses}</td>
+                  <td>{t.max_uses ? `${t.uses} of ${t.max_uses}` : t.uses}</td>
                   <td className="row-actions">
                     <button className="small" onClick={() => setShowingSetup(t)}>
                       Download
@@ -440,7 +440,9 @@ function SetupInstructions({ id, command, expires }: { id: number; command: stri
       <pre className="copy" onClick={(ev) => navigator.clipboard?.writeText((ev.target as HTMLElement).innerText)}>
         {command}
       </pre>
-      <small className="muted-text">Anyone with the setup can enroll PCs until it expires; revoke it under Clients when you are done.</small>
+      <small className="muted-text">
+        Anyone with the setup can enroll PCs until it expires or reaches its PC limit; revoke it under Clients when you are done.
+      </small>
     </>
   )
 }
@@ -448,6 +450,7 @@ function SetupInstructions({ id, command, expires }: { id: number; command: stri
 function CreateSetup({ targets, onClose }: { targets?: Target[] | null; onClose: () => void }) {
   const [targetId, setTargetId] = useState(0)
   const [ttl, setTtl] = useState(4)
+  const [maxUses, setMaxUses] = useState('')
   const [error, setError] = useState('')
   const [result, setResult] = useState<{ id: number; expires: number; command: string } | null>(null)
   const tid = targetId || targets?.[0]?.id || 0
@@ -468,13 +471,13 @@ function CreateSetup({ targets, onClose }: { targets?: Target[] | null; onClose:
           onSubmit={async (e) => {
             e.preventDefault()
             try {
-              setResult(await api.createSetupToken(tid, ttl))
+              setResult(await api.createSetupToken(tid, ttl, Number(maxUses) || 0))
             } catch (err) {
               setError((err as Error).message)
             }
           }}
         >
-          <p>A setup enrolls any number of PCs with a temporary token. Each PC chooses its own client name during setup.</p>
+          <p>A setup enrolls PCs with a temporary token. Each PC chooses its own client name during setup.</p>
           <Field label="Datastore">
             <select value={tid} onChange={(e) => setTargetId(Number(e.target.value))}>
               {targets?.map((t) => (
@@ -486,6 +489,9 @@ function CreateSetup({ targets, onClose }: { targets?: Target[] | null; onClose:
           </Field>
           <Field label="Valid for (hours)">
             <input type="number" min={1} max={720} value={ttl} onChange={(e) => setTtl(Number(e.target.value))} required />
+          </Field>
+          <Field label="PCs it may enroll" hint="Empty: any number. A leaked setup can enroll PCs until it expires or reaches this limit.">
+            <input type="number" min={1} max={100000} value={maxUses} placeholder="any number" onChange={(e) => setMaxUses(e.target.value)} />
           </Field>
           <ErrorBox error={error} />
           <div className="buttons">

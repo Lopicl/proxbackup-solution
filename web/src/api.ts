@@ -459,6 +459,7 @@ export interface SetupToken {
   target_id: number
   expires: number
   uses: number
+  max_uses: number // 0 = any number of PCs
   created_at: number
 }
 
@@ -583,8 +584,8 @@ export const api = {
 
   setupTokens: () => request<SetupToken[]>('GET', '/setup-tokens'),
   setupToken: (id: number) => request<{ token: string; command: string }>('GET', `/setup-tokens/${id}`),
-  createSetupToken: (target_id: number, ttl_hours: number) =>
-    request<{ id: number; expires: number; token: string; command: string }>('POST', '/setup-tokens', { target_id, ttl_hours }),
+  createSetupToken: (target_id: number, ttl_hours: number, max_uses: number) =>
+    request<{ id: number; expires: number; token: string; command: string }>('POST', '/setup-tokens', { target_id, ttl_hours, max_uses }),
   deleteSetupToken: (id: number) => request('DELETE', `/setup-tokens/${id}`),
   // Saves the setup .exe for arch through the browser.
   downloadSetup: (id: number, arch: 'amd64' | 'arm64') => download(`/setup-tokens/${id}/download/${arch}`, `proxbackup-agent-setup-${arch}.exe`),

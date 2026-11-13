@@ -104,8 +104,9 @@ only**. Running the command again re-enrolls the PC.
 **Many PCs:** *Clients → Create agent setup* creates a temporary token (4 h by default) and a setup
 `.exe`. On each PC, double-click it, confirm the client name and console address, and it enrolls
 the PC, installs the agent to `C:\Program Files\ProxBackup` and starts the service
-(equivalent: `proxbackup-agent.exe setup <token>`). Revoke the setup when done. A setup can't use
-the name of a revoked client.
+(equivalent: `proxbackup-agent.exe setup <token>`). Optionally limit how many PCs it may enroll;
+each setup enrolls at most 60 PCs per hour. Revoke the setup when done. A setup can't use the name
+of a revoked client.
 
 **Revoked clients:** *Clients → Revoked clients* (needs the *Manage revoked clients* permission,
 Administrators only by default) lists every revoked client. Revoked clients keep their backups.
@@ -153,8 +154,9 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
   (NTFS is read straight from the image), encrypted or not. Whole volume images can be restored as
   a `.img` file.
 - **On the PC:** tray icon → *Restore files…* opens the same browser without a console login.
-  Administrators can restore anything; other users only their own profile folder, written with
-  their own Windows permissions.
+  Administrators can restore anything when the tray runs elevated; other users, and
+  administrators whose tray isn't elevated (the usual case with UAC), only their own profile
+  folder, written with their own Windows permissions.
 - Restores never write through a junction or symbolic link in the target folder (that entry is
   skipped with a warning), and refuse a target whose path contains one. A folder the agent creates
   directly on a drive (like `C:\Restore`) is open only to SYSTEM and administrators. Backups never
@@ -163,8 +165,11 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 - **System folders.** The agent restores as SYSTEM, so a restore into Windows, Program Files,
   ProgramData, the agent's own folders, the Default user profile or a user's Startup folder could
   replace what the PC runs. Only console users with *Restore to system folders* (Administrator and
-  Operator roles) and PC administrators may do that. For everyone else, the console and the agent
-  refuse such targets and skip what would land in them (a restore to `C:\` skips `C:\Windows`).
+  Operator roles) and PC administrators may do that, and from the console only on PCs that allow
+  it: new installs don't, until a PC administrator runs `proxbackup-agent policy
+  -console-system-restores on` (PCs installed before this policy existed allow it until changed). For everyone
+  else, the console and the agent refuse such targets and skip what would land in them (a restore
+  to `C:\` skips `C:\Windows` and files directly in `C:\`).
   Older agents can't enforce this, so they only take restores from users with that permission
   until they are updated.
 - On Windows, backup sources, volumes and restore targets must be on a local drive (`C:\...`). Network paths
@@ -176,7 +181,9 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 *Console Settings* (gear icon) → *Users* adds console users and gives them roles: Administrator, Operator, Restore-only,
 Read-only or custom ones, each for all clients or only chosen clients and tags. Restore-only users
 can restore files anywhere except system folders (see *Restore*); they can still write into users'
-profiles, so give the role only to people you'd trust with those users' accounts. The *Audit log* tab lists
+profiles, so give the role only to people you'd trust with those users' accounts. Users with
+*Manage users* can only grant permissions they have themselves, and can't change users who have
+more; with every permission it amounts to Administrator. The *Audit log* tab lists
 sign-ins and every change for two years; it keeps only the newest 100,000 failed sign-ins. Users change their own password under the profile menu. Repeated failed
 sign-ins from one address or for one username are slowed down (HTTP 429 with the time to wait).
 Users who signed in from an address before aren't slowed down by others' failures there (shared

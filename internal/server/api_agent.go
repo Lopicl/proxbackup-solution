@@ -130,9 +130,21 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 // and with them its snapshots.
 func (s *Server) enrollWithSetupToken(w http.ResponseWriter, r *http.Request, st *SetupToken, req api.EnrollRequest) {
 	ctx := r.Context()
+	if !s.setupEnrolls.allow(st.ID, time.Now()) {
+		s.log.Warn("setup enrollment rate-limited", "setup_token", st.ID, "remote", r.RemoteAddr)
+		w.Header().Set("Retry-After", "60")
+		httpError(w, http.StatusTooManyRequests, errors.New("too many PCs enrolled with this setup recently; try again in a few minutes"))
+		return
+	}
+	if err := s.store.TakeSetupTokenUse(ctx, st.ID); err != nil {
+		s.log.Warn("setup enrollment refused", "setup_token", st.ID, "remote", r.RemoteAddr, "err", err)
+		httpError(w, http.StatusForbidden, err)
+		return
+	}
 	e := &Enrollment{ClientName: cmp.Or(strings.TrimSpace(req.ClientName), req.Hostname), TargetID: st.TargetID}
 	c, certPEM, err := s.enrollClient(ctx, e, req, true)
 	if err != nil {
+		s.store.ReleaseSetupTokenUse(ctx, st.ID)
 		s.log.Warn("setup enrollment failed", "client", e.ClientName, "setup_token", st.ID, "remote", r.RemoteAddr, "err", err)
 		code := http.StatusInternalServerError
 		switch {
@@ -144,7 +156,6 @@ func (s *Server) enrollWithSetupToken(w http.ResponseWriter, r *http.Request, st
 		httpError(w, code, err)
 		return
 	}
-	s.store.CountSetupTokenUse(ctx, st.ID)
 	s.log.Info("client enrolled", "client", c.Name, "id", c.ID, "hostname", req.Hostname, "setup_token", st.ID, "remote", r.RemoteAddr)
 	writeJSON(w, api.EnrollResponse{ClientID: c.ID, ClientName: c.Name, CertPEM: string(certPEM), CAPEM: string(s.pki.CAPEM)})
 }

@@ -71,6 +71,8 @@ type Server struct {
 	logins   loginLimiter  // sign-in throttling (loginlimit.go)
 	runRegs  clientLimiter // agent run registrations (runlimit.go)
 	restores clientLimiter // self-service restore pages opened by agents
+	// setupEnrolls: enrollments per setup token (runlimit.go)
+	setupEnrolls rateLimiter[int64]
 
 	grantTimeout time.Duration // how long saving a local target waits for its PBS rights (pbsgrants.go)
 	grantHelper  func()        // tests: runs the root helper on each request
@@ -102,8 +104,9 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, store: store, pki: pki, sealer: sealer, log: log, wake: map[int64]chan struct{}{}, grantTimeout: time.Minute, proxyCertEvery: 10 * time.Second,
 		rotateFailed: map[int64]time.Time{}, replacedAlerted: map[int64]time.Time{},
-		runRegs:  clientLimiter{perHour: runRegsPerHour, burst: runRegsBurst},
-		restores: clientLimiter{perHour: restoreSessionsPerHour, burst: restoreSessionsBurst}}
+		runRegs:      clientLimiter{perHour: runRegsPerHour, burst: runRegsBurst},
+		restores:     clientLimiter{perHour: restoreSessionsPerHour, burst: restoreSessionsBurst},
+		setupEnrolls: rateLimiter[int64]{perHour: setupEnrollsPerHour, burst: setupEnrollsBurst}}
 	s.notify = &Notifier{s: s}
 	s.updater = newUpdater(s)
 	return s, nil
@@ -353,6 +356,7 @@ func (s *Server) housekeeping(ctx context.Context) {
 		s.store.PruneRestoreSessions(ctx)
 		s.logins.prune(time.Now())
 		s.runRegs.prune(time.Now())
+		s.setupEnrolls.prune(time.Now())
 		s.restores.prune(time.Now())
 		s.catalogs.prune(time.Now())
 		if time.Since(lastLogTrim) > 10*time.Minute {

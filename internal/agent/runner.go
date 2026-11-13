@@ -391,6 +391,9 @@ func (r *Runner) poll(ctx context.Context, base string, wait int) (*api.PollResp
 	if runtime.GOOS == "windows" {
 		req.Features = append(req.Features, api.FeatureProtectedRestore)
 	}
+	if pol, err := LoadPolicy(r.cfg.dir); err != nil || !pol.SystemRestoresAllowed() {
+		req.Features = append(req.Features, api.FeatureNoConsoleSystemRestores)
+	}
 	var resp api.PollResponse
 	if err := postJSON(ctx, r.client(), fmt.Sprintf("%s/agent/v1/poll?wait=%d", base, wait), req, &resp); err != nil {
 		return nil, err
@@ -590,7 +593,7 @@ func (r *Runner) execute(parent context.Context, t task) {
 	if rs := t.spec.Restore; rs != nil && rs.Session != "" {
 		res = r.restoreAs(ctx, t.spec, tapReporter{rep, r})
 	} else {
-		res = Run(ctx, t.spec, tapReporter{rep, r})
+		res = Run(ctx, r.consolePolicy(t.spec, rep), tapReporter{rep, r})
 	}
 	r.runEnded()
 	stopped := ""
@@ -632,4 +635,28 @@ func (r *Runner) register(ctx context.Context, reg *api.RunRegister) (int64, err
 
 func (r *Runner) postEvents(ctx context.Context, runID int64, events []api.Event) error {
 	return postJSON(ctx, r.client(), fmt.Sprintf("%s/agent/v1/runs/%d/events", r.serverURL(), runID), events, nil)
+}
+
+// consolePolicy applies this PC's policy to a run the console asked for:
+// without ConsoleSystemRestores (or with an unreadable policy) a restore
+// keeps out of system folders whatever the console's user may do.
+func (r *Runner) consolePolicy(spec api.JobSpec, rep Reporter) api.JobSpec {
+	rs := spec.Restore
+	if rs == nil || !rs.SystemFolders {
+		return spec
+	}
+	pol, err := LoadPolicy(r.cfg.dir)
+	if err == nil && pol.SystemRestoresAllowed() {
+		return spec
+	}
+	if err != nil {
+		rep.Log("warn", "can't read this PC's policy, so the restore keeps out of system folders: "+err.Error())
+	} else {
+		rep.Log("warn", "this PC doesn't allow restores into system folders from the console, so the restore keeps out of them "+
+			"(a PC administrator can allow it with: proxbackup-agent policy -console-system-restores on)")
+	}
+	own := *rs
+	own.SystemFolders = false
+	spec.Restore = &own
+	return spec
 }

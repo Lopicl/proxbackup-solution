@@ -338,7 +338,7 @@ func (r *Runner) handleLocal(ctx context.Context, peer *ipc.Peer, req ipc.Reques
 }
 
 func (r *Runner) localStatus(peer *ipc.Peer) *ipc.Status {
-	st := &ipc.Status{Version: r.version, Client: r.cfg.ClientName, Server: r.serverURL(), User: peer.User, Admin: peer.Admin,
+	st := &ipc.Status{Version: r.version, Client: r.cfg.ClientName, Server: r.serverURL(), User: peer.User, Admin: peer.Admin, Elevatable: peer.Elevatable,
 		Jobs: []ipc.Job{}, Recent: []ipc.RunInfo{}}
 	st.Exe, _ = os.Executable()
 	st.PausedUntil, st.PausedBy = r.pauseInfo()

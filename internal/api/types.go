@@ -244,6 +244,10 @@ const (
 	// FeaturePauseLimit: the agent honours AgentConfig.PauseDays. Older
 	// agents let PC users pause scheduled backups whatever the console says.
 	FeaturePauseLimit = "pause-limit"
+	// FeatureNoConsoleSystemRestores: the PC's administrators don't allow
+	// console restores into system folders (agent policy.json); the agent
+	// ignores RestoreSpec.SystemFolders on restores from the console.
+	FeatureNoConsoleSystemRestores = "no-console-system-restores"
 )
 
 // PollResponse carries config updates, on-demand work and cancellations.

@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -38,6 +39,8 @@ Usage:
   proxbackup-agent uninstall              remove the Windows service
   proxbackup-agent start | stop           start (restart if running) / stop the service
   proxbackup-agent run                    run in the foreground (what the service executes)
+  proxbackup-agent policy [flags]         show or change what this PC allows the console
+                                          (-console-system-restores on|off; administrators only)
   proxbackup-agent tray                   the notification-area icon (the service starts it in each user session)
   proxbackup-agent backup  [flags]        ad-hoc file backup straight to PBS (no server needed)
   proxbackup-agent image   [flags]        ad-hoc volume image backup
@@ -94,6 +97,8 @@ func main() {
 			fatalf("usage: proxbackup-agent setup <token>")
 		}
 		runSetup(*dataDir, fs.Arg(0))
+	case "policy":
+		err = policyCommand(fs, args, *dataDir)
 	case "tray":
 		replace := fs.Bool("replace", false, "take over from the tray of an older agent version")
 		fs.Parse(args)
@@ -389,5 +394,34 @@ func adhoc(cmd string, fs *flag.FlagSet, args []string, _ *string) error {
 	if res.State == api.RunFailed || res.State == api.RunCanceled {
 		return fmt.Errorf("%s: %s", res.State, res.Error)
 	}
+	return nil
+}
+
+// policyCommand shows this PC's policy (agent.Policy) or changes it. Only
+// administrators can write the data dir; the service reads it at each poll
+// and restore, so no restart is needed.
+func policyCommand(fs *flag.FlagSet, args []string, dataDir string) error {
+	sys := fs.String("console-system-restores", "", "on: console users with the \"Restore to system folders\" permission may restore into Windows, Program Files and other system folders (restores run as SYSTEM, so they can then run code on this PC); off: such restores keep out of them")
+	fs.Parse(args)
+	pol, err := agent.LoadPolicy(dataDir)
+	if err != nil {
+		return err
+	}
+	switch *sys {
+	case "":
+	case "on", "off":
+		v := *sys == "on"
+		pol.ConsoleSystemRestores = &v
+		if err := agent.SavePolicy(dataDir, pol); err != nil {
+			return fmt.Errorf("saving the policy (run this as an administrator): %w", err)
+		}
+	default:
+		return errors.New("-console-system-restores must be on or off")
+	}
+	state := "off"
+	if pol.SystemRestoresAllowed() {
+		state = "on"
+	}
+	fmt.Println("console-system-restores:", state)
 	return nil
 }

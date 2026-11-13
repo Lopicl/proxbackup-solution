@@ -126,3 +126,47 @@ func shortName(p string) (string, error) {
 	}
 	return windows.UTF16ToString(buf[:n]), nil
 }
+
+// Files directly in a drive root (C:\Program.exe against an unquoted
+// service path) are refused unless the restore may write system folders.
+func TestRestoreKeepsFilesOutOfDriveRoot(t *testing.T) {
+	pf, err := loadProtected()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drive := os.Getenv("SystemDrive") + `\`
+	r, err := openRestoreRoot(drive, pf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := r.Create("Program.exe"); !errors.Is(err, errProtected) {
+		t.Errorf("file in %s: %v", drive, err)
+	}
+	if err := r.Symlink("proxbackup-test-link", `C:\Windows`); !errors.Is(err, errProtected) {
+		t.Errorf("link in %s: %v", drive, err)
+	}
+	if _, err := os.Lstat(drive + "Program.exe"); err == nil {
+		t.Errorf("%sProgram.exe exists", drive)
+	}
+	// Below the root, and with system folders allowed, files are fine.
+	dir := t.TempDir()
+	sub, err := openRestoreRoot(dir, pf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	f, err := sub.Create("file.txt")
+	if err != nil {
+		t.Fatalf("file below the root: %v", err)
+	}
+	f.Discard()
+	free, err := openRestoreRoot(drive, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer free.Close()
+	if err := free.checkRootFile(""); err != nil {
+		t.Errorf("system folders allowed: %v", err)
+	}
+}

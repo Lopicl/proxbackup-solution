@@ -59,10 +59,12 @@ var permissions = []PermInfo{
 	{PermRestoreSystem, "Restore to system folders", "With Restore: restore into Windows, Program Files, ProgramData, the Default user profile and users' Startup folders. " +
 		"Restores run as SYSTEM, so this lets the user replace what the PC runs. Without it, restores there are refused or skipped.", true},
 	{PermTargets, "Manage datastores", "Add, change and remove the PBS datastores clients back up to. Pointing a datastore in use at another host or fingerprint also needs Restore for all clients.", false},
-	{PermNotifications, "Manage notifications", "Email and webhook notification settings.", false},
+	{PermNotifications, "Manage notifications", "Email and webhook notification settings. Notifications carry client and job details for all clients, " +
+		"whatever clients the user's other permissions cover.", false},
 	{PermUpdates, "Manage updates", "Console update settings and installing updates.", false},
 	{PermEncryption, "Manage encryption", "The master key for client-side encryption.", false},
-	{PermUsers, "Manage users", "Users, roles and their permissions.", false},
+	{PermUsers, "Manage users", "Users, roles and their permissions, up to the user's own: they can't grant, or change users and roles with, " +
+		"permissions they don't have. With all permissions it is equivalent to Administrator.", false},
 	{PermAudit, "View audit log", "Sign-ins and administrative changes.", false},
 }
 
@@ -192,6 +194,46 @@ func newAccess(as []RoleAssignment, roles map[int64][]Perm) *Access {
 	}
 	return a
 }
+
+// Grants returns an error naming a permission o has that a doesn't, or
+// has for clients a doesn't have it for. Users who manage users can only
+// grant (and only change users with) what they have themselves, so the
+// permission doesn't lift them to Administrator.
+func (a *Access) Grants(o *Access) error {
+	if o == nil {
+		return nil
+	}
+	for p, osc := range o.grants {
+		sc := (*scope)(nil)
+		if a != nil {
+			sc = a.grants[p]
+		}
+		ok := sc != nil && (sc.all || !osc.all)
+		if ok && !sc.all {
+			for c := range osc.clients {
+				ok = ok && sc.clients[c]
+			}
+			for t := range osc.tags {
+				ok = ok && sc.tags[t]
+			}
+		}
+		if !ok {
+			label := string(p)
+			if info, found := permInfo(p); found {
+				label = info.Label
+			}
+			if sc == nil {
+				return fmt.Errorf("%w: %s", errBeyondOwnAccess, label)
+			}
+			return fmt.Errorf("%w: %s for more clients than you have it for", errBeyondOwnAccess, label)
+		}
+	}
+	return nil
+}
+
+// errBeyondOwnAccess refuses user and role changes beyond the changer's own
+// permissions.
+var errBeyondOwnAccess = errors.New("you can only grant or change permissions you have yourself")
 
 // Has reports whether p is granted for at least some clients.
 func (a *Access) Has(p Perm) bool { return a != nil && a.grants[p] != nil }
@@ -409,6 +451,11 @@ func (s *Store) UserAccess(ctx context.Context, userID int64) (*Access, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.AccessFor(ctx, as)
+}
+
+// AccessFor evaluates the permissions role assignments give.
+func (s *Store) AccessFor(ctx context.Context, as []RoleAssignment) (*Access, error) {
 	roles := map[int64][]Perm{}
 	for _, a := range as {
 		if _, ok := roles[a.RoleID]; ok {

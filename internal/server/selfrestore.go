@@ -340,15 +340,20 @@ func validateRestore(req *api.RestoreSpec, c *Client) error {
 
 // restoreSystemAllowed decides whether a console restore to client c may
 // write into protected system folders (see api.ProtectedFolder): only if the
-// user has the "Restore to system folders" permission (system). Without it,
+// user has the "Restore to system folders" permission (system) and the PC
+// allows it (no api.FeatureNoConsoleSystemRestores). Otherwise,
 // targets there are refused, and the agent skips what would land in them;
 // Windows agents that can't do that get no such restores.
 func restoreSystemAllowed(req *api.RestoreSpec, c *Client, system bool) error {
-	if system {
+	pcRefuses := slices.Contains(c.Features, api.FeatureNoConsoleSystemRestores)
+	if system && !pcRefuses {
 		req.SystemFolders = true
 		return nil
 	}
 	if f := api.ProtectedFolder(req.TargetDir); f != "" {
+		if system {
+			return fmt.Errorf(`%s is a protected system folder, and this PC doesn't allow restores there from the console (a PC administrator can allow it on the PC: proxbackup-agent policy -console-system-restores on)`, f)
+		}
 		return fmt.Errorf(`%s is a protected system folder: restoring there needs the "Restore to system folders" permission`, f)
 	}
 	// The OS is unknown until the agent first connects.

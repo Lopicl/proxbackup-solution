@@ -23,6 +23,14 @@ const (
 	restoreSessionsBurst   = 10
 )
 
+// A setup token may enroll this many PCs per hour, in bursts of up to as
+// many (a rollout to a room of PCs at once). A leaked setup can't flood the
+// console and PBS with clients faster than that.
+const (
+	setupEnrollsPerHour = 60
+	setupEnrollsBurst   = 30
+)
+
 // rateLimiter is a token bucket per key: burst tokens, refilled at perHour.
 type rateLimiter[K comparable] struct {
 	perHour, burst float64

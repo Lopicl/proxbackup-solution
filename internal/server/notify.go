@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/smtp"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"proxbackup/internal/api"
@@ -209,6 +211,44 @@ func (n *Notifier) send(ctx context.Context, ns NotifySettings, m Message) []err
 	return errs
 }
 
+// webhookClient posts notifications. It follows no redirects and connects
+// to no loopback, link-local (cloud metadata) or unspecified address, so a
+// webhook URL can't make the console call its own services or the PBS API
+// on the host. Addresses on the LAN stay allowed (chat servers, ntfy).
+var webhookClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+			return webhookAddrCheck(address)
+		}}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+	},
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return errors.New("the webhook answered with a redirect; use the URL it redirects to")
+	},
+}
+
+// webhookAddrCheck is webhookAddrAllowed; tests with webhooks on loopback replace it.
+var webhookAddrCheck = webhookAddrAllowed
+
+// webhookAddrAllowed checks the ip:port a webhook connection dials (after
+// name resolution, so a name can't point back at the host either).
+func webhookAddrAllowed(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return err
+	}
+	ip = ip.Unmap()
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return fmt.Errorf("webhooks can't go to %s (loopback, link-local or unspecified address)", ip)
+	}
+	return nil
+}
+
 func postWebhook(ctx context.Context, url string, m Message) error {
 	b, _ := json.Marshal(m)
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -218,7 +258,7 @@ func postWebhook(ctx context.Context, url string, m Message) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := webhookClient.Do(req)
 	if err != nil {
 		return err
 	}

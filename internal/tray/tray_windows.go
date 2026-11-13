@@ -170,6 +170,12 @@ func (t *app) apply(st *ipc.Status) {
 		t.backup.SetTitle("Back up now")
 	}
 	enable(t.restore, st != nil)
+	if st != nil && st.Elevatable {
+		// Without elevation an administrator restores like any other user.
+		t.restore.SetTooltip("Choose files to restore into your profile folder, in your browser. This tray isn't elevated, so restores elsewhere go through the ProxBackup Console")
+	} else {
+		t.restore.SetTooltip("Choose files to restore from a backup, in your browser")
+	}
 	enable(t.pause, st != nil && st.Configured)
 	switch {
 	case st != nil && st.PauseOff:

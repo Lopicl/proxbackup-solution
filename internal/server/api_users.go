@@ -67,6 +67,41 @@ func (s *Server) cleanAssignments(r *http.Request, in []RoleAssignment) ([]RoleA
 	return out, nil
 }
 
+// grantable fails unless the signed-in user has every permission the
+// assignments give, for the same clients (see Access.Grants).
+func (s *Server) grantable(r *http.Request, as []RoleAssignment) error {
+	o, err := s.store.AccessFor(r.Context(), as)
+	if err != nil {
+		return err
+	}
+	return access(r).Grants(o)
+}
+
+// changeable fails unless the signed-in user has every permission user id
+// has: otherwise they could take over a more privileged account.
+func (s *Server) changeable(r *http.Request, id int64) error {
+	o, err := s.store.UserAccess(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	return access(r).Grants(o)
+}
+
+// roleChangeable fails unless the signed-in user has the permissions perms
+// for all clients: a role applies to everyone it is assigned to.
+func roleChangeable(r *http.Request, perms []Perm) error {
+	return access(r).Grants(newAccess([]RoleAssignment{{RoleID: 1, AllClients: true}}, map[int64][]Perm{1: perms}))
+}
+
+// grantError writes err from grantable, changeable or roleChangeable.
+func grantError(w http.ResponseWriter, err error) {
+	code := http.StatusInternalServerError
+	if errors.Is(err, errBeyondOwnAccess) {
+		code = http.StatusForbidden
+	}
+	httpError(w, code, err)
+}
+
 func describeAssignments(as []RoleAssignment) string {
 	var parts []string
 	for _, a := range as {
@@ -114,6 +149,10 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	roles, err := s.cleanAssignments(r, req.Roles)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.grantable(r, roles); err != nil {
+		grantError(w, err)
 		return
 	}
 	u := &User{Username: req.Username, Enabled: req.Enabled, MustChange: req.MustChange, Roles: roles}
@@ -165,6 +204,14 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	if err := s.changeable(r, id); err != nil {
+		grantError(w, err)
+		return
+	}
+	if err := s.grantable(r, roles); err != nil {
+		grantError(w, err)
+		return
+	}
 	if err := s.store.UpdateUser(ctx, id, req.Enabled, roles); err != nil {
 		code := statusFor(err)
 		if errors.Is(err, errLastAdmin) {
@@ -196,6 +243,10 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	auditTarget(r, "user "+u.Username)
 	if id == sessionUser(r).ID {
 		httpError(w, http.StatusBadRequest, errors.New("you can't delete your own account"))
+		return
+	}
+	if err := s.changeable(r, id); err != nil {
+		grantError(w, err)
 		return
 	}
 	if err := s.store.DeleteUser(ctx, id); err != nil {
@@ -233,6 +284,10 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auditTarget(r, "user "+u.Username)
+	if err := s.changeable(r, id); err != nil {
+		grantError(w, err)
+		return
+	}
 	if err := checkNewPassword(req.Password); err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
@@ -287,6 +342,10 @@ func (s *Server) handleSaveRole(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusBadRequest, errors.New("built-in roles can't be changed; create a custom role instead"))
 			return
 		}
+		if err := roleChangeable(r, old.Permissions); err != nil {
+			grantError(w, err)
+			return
+		}
 		role.ID = id
 	}
 	if role.Name == "" || len(role.Name) > 64 {
@@ -301,6 +360,10 @@ func (s *Server) handleSaveRole(w http.ResponseWriter, r *http.Request) {
 		if !slices.Contains(role.Permissions, p) {
 			role.Permissions = append(role.Permissions, p)
 		}
+	}
+	if err := roleChangeable(r, role.Permissions); err != nil {
+		grantError(w, err)
+		return
 	}
 	if err := s.store.SaveRole(r.Context(), role); err != nil {
 		code := statusFor(err)
@@ -333,6 +396,10 @@ func (s *Server) handleDeleteRole(w http.ResponseWriter, r *http.Request) {
 	auditTarget(r, "role "+role.Name)
 	if role.Builtin != "" {
 		httpError(w, http.StatusBadRequest, errors.New("built-in roles can't be deleted"))
+		return
+	}
+	if err := roleChangeable(r, role.Permissions); err != nil {
+		grantError(w, err)
 		return
 	}
 	if err := s.store.DeleteRole(r.Context(), id); err != nil {
