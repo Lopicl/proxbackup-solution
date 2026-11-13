@@ -147,7 +147,7 @@ func TestRestoreRootRefusesLinks(t *testing.T) {
 	if err := root.MkdirAll(filepath.Join("a", "b")); !errors.Is(err, errNotFollowed) {
 		t.Errorf("MkdirAll through a link: %v", err)
 	}
-	if f, err := root.Create(filepath.Join("a", "x")); !errors.Is(err, errNotFollowed) {
+	if f, err := root.Create(filepath.Join("a", "x"), false); !errors.Is(err, errNotFollowed) {
 		if err == nil {
 			f.Discard()
 		}

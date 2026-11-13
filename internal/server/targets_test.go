@@ -409,6 +409,65 @@ func TestTargetRepointNeedsRestore(t *testing.T) {
 	}
 }
 
+// PCs that enroll later get the target's settings too: a pending enrollment
+// code, a setup token or a revoked client (it can be re-enrolled) count as
+// clients when repointing it.
+func TestTargetRepointCountsFutureClients(t *testing.T) {
+	s := newTestServer(t, "")
+	ctx := context.Background()
+	newTarget := func(name string) *Target {
+		tg := &Target{Name: name, Host: "pbs:8007", Fingerprint: "aa", Datastore: "ds", AdminAuthID: "admin@pbs!t", PBSUser: "proxbackup@pbs"}
+		if err := s.store.SaveTarget(ctx, tg, s.sealer.sealFor("x", colTargetSecret)); err != nil {
+			t.Fatal(err)
+		}
+		return tg
+	}
+	enrolling, token, revoked, spent := newTarget("enrolling"), newTarget("token"), newTarget("revoked"), newTarget("spent")
+	if _, err := s.store.CreateEnrollment(ctx, "h1", "pc-1", enrolling.ID, 0, false, time.Hour, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.CreateSetupToken(ctx, "h2", token.ID, time.Now().Add(time.Hour).Unix(), 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{Name: "pc-2", TargetID: revoked.ID, CertSerial: "02", Namespace: "pcs/pc-2", TokenID: "proxbackup@pbs!pc-2"}
+	if err := s.store.CreateClient(ctx, c, s.sealer.sealFor("tok", colClientToken)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.RevokeClient(ctx, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Expired codes and used-up setup tokens enroll no one.
+	if _, err := s.store.CreateEnrollment(ctx, "h3", "pc-3", spent.ID, 0, false, -time.Hour, nil); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.store.CreateSetupToken(ctx, "h4", spent.ID, time.Now().Add(time.Hour).Unix(), 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.store.TakeSetupTokenUse(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	a := newAccess([]RoleAssignment{{RoleID: 1, AllClients: true}}, map[int64][]Perm{1: {PermTargets}})
+	save := func(tg *Target) int {
+		b, _ := json.Marshal(map[string]any{"name": tg.Name, "host": "evil:8007", "fingerprint": "bb", "datastore": "ds",
+			"admin_auth_id": "admin@pbs!t", "admin_secret": "made-up", "pbs_user": "proxbackup@pbs"})
+		r := httptest.NewRequest("PUT", "/api/targets/x", strings.NewReader(string(b)))
+		r = r.WithContext(context.WithValue(r.Context(), sessionUserKey, &SessionUser{ID: 2, Name: "u", Access: a}))
+		r.SetPathValue("id", strconv.FormatInt(tg.ID, 10))
+		rec := httptest.NewRecorder()
+		s.handleSaveTarget(rec, r)
+		return rec.Code
+	}
+	for _, tg := range []*Target{enrolling, token, revoked} {
+		if c := save(tg); c != 403 {
+			t.Fatalf("%s: repointed without restore: %d", tg.Name, c)
+		}
+	}
+	if c := save(spent); c != 200 {
+		t.Fatalf("expired code and used-up token: %d", c)
+	}
+}
+
 // The console reaches this PBS on loopback even when agents get a reverse
 // proxy that refuses password sign-ins (docs/network.md).
 func TestLocalTargetsUseLoopbackAPI(t *testing.T) {

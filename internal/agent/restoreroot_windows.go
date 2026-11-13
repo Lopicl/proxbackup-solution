@@ -66,6 +66,10 @@ const (
 // instead of the Authenticated Users: Modify they would inherit from C:\.
 const topLevelSDDL = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
+// privateFileSDDL is what restored files with their own permissions have
+// until SetSecurity (see Create).
+const privateFileSDDL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+
 // ntCreate opens or creates name relative to the folder dir (or the file
 // dir, for a ":stream" name) without following reparse points.
 func ntCreate(dir windows.Handle, name string, access, disposition, options, share uint32, sd *windows.SECURITY_DESCRIPTOR) (windows.Handle, error) {
@@ -332,8 +336,12 @@ func (r *restoreRoot) checkRootFile(parent string) error {
 }
 
 // Create creates a new file that takes the name rel on Commit, replacing
-// what is there. No one else can open it until then.
-func (r *restoreRoot) Create(rel string) (*restoreEntry, error) {
+// what is there. No one else can open it for data until then. With private,
+// only SYSTEM and Administrators can open it at all until SetSecurity gives
+// it its own permissions: share mode 0 doesn't stop opens for WRITE_DAC
+// alone, and someone who may create files in the folder (and so would
+// inherit rights on it) could grant themselves access to a restricted file.
+func (r *restoreRoot) Create(rel string, private bool) (*restoreEntry, error) {
 	parent, name := filepath.Split(rel)
 	if err := checkName(name); err != nil {
 		return nil, err
@@ -345,11 +353,18 @@ func (r *restoreRoot) Create(rel string) (*restoreEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	var sd *windows.SECURITY_DESCRIPTOR
+	if private {
+		if sd, err = windows.SecurityDescriptorFromString(privateFileSDDL); err != nil {
+			windows.CloseHandle(d)
+			return nil, err
+		}
+	}
 	tmp := fmt.Sprintf("%s.proxbackup-restore-%08x", name, rand.Uint32())
 	var h windows.Handle
 	for _, access := range []uint32{windows.WRITE_OWNER, 0} {
 		access |= windows.GENERIC_WRITE | windows.DELETE | metaAccess
-		if h, err = ntCreate(d, tmp, access, windows.FILE_CREATE, windows.FILE_NON_DIRECTORY_FILE, 0, nil); err != windows.ERROR_ACCESS_DENIED {
+		if h, err = ntCreate(d, tmp, access, windows.FILE_CREATE, windows.FILE_NON_DIRECTORY_FILE, 0, sd); err != windows.ERROR_ACCESS_DENIED {
 			break
 		}
 	}
@@ -385,7 +400,7 @@ func (r *restoreRoot) Symlink(rel, target string) error {
 			dest = filepath.Join(r.path, parent, target)
 		}
 	}
-	if fi, err := os.Stat(dest); err == nil && fi.IsDir() {
+	if plainLocalDir(dest) {
 		opts = windows.FILE_DIRECTORY_FILE
 	}
 	h, err := ntCreate(d, name, windows.GENERIC_WRITE|windows.DELETE, windows.FILE_CREATE, opts, 0, nil)
@@ -400,6 +415,32 @@ func (r *restoreRoot) Symlink(rel, target string) error {
 		return err
 	}
 	return nil
+}
+
+// plainLocalDir reports whether p is a folder on a local drive reached
+// without any reparse point. The archive doesn't say whether a link points
+// to a folder, so Symlink looks. Following a UNC target, or a link on the
+// way to one, would make SYSTEM authenticate to that server as the PC (NTLM
+// relay), so it gives up on anything but local paths and plain folders: such
+// links are restored as file links.
+func plainLocalDir(p string) bool {
+	if !api.LocalPath(p) {
+		return false
+	}
+	p = filepath.Clean(p)
+	vol := filepath.VolumeName(p)
+	cur := vol + `\`
+	for _, name := range strings.Split(strings.Trim(p[len(vol):], `\`), `\`) {
+		if name == "" {
+			continue
+		}
+		cur = filepath.Join(cur, name)
+		fi, err := os.Lstat(cur)
+		if err != nil || !fi.IsDir() || fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // symlinkReparseData is the REPARSE_DATA_BUFFER CreateSymbolicLink writes

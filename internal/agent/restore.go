@@ -93,7 +93,7 @@ func (j *job) runRestore(ctx context.Context) (api.Result, error) {
 
 	if strings.HasSuffix(archive, ".img.fidx") {
 		name := strings.TrimSuffix(archive, ".fidx")
-		f, err := root.Create(name)
+		f, err := root.Create(name, false)
 		if err != nil {
 			return res, err
 		}
@@ -302,7 +302,7 @@ func (j *job) writeRestored(root *restoreRoot, path, rel, overwrite string, src 
 			return false, nil
 		}
 	}
-	f, err := root.Create(rel)
+	f, err := root.Create(rel, len(nt.sd) > 0)
 	if err != nil {
 		j.skipped.Add(1)
 		j.logf("warn", "cannot create %s: %v", path, err)

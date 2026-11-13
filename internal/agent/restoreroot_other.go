@@ -108,7 +108,7 @@ func (r *restoreRoot) Open(rel string) (*restoreEntry, error) {
 	return &restoreEntry{path: p}, nil
 }
 
-func (r *restoreRoot) Create(rel string) (*restoreEntry, error) {
+func (r *restoreRoot) Create(rel string, _ bool) (*restoreEntry, error) {
 	p, err := r.entry(rel, true)
 	if err != nil {
 		return nil, err

@@ -152,13 +152,15 @@ func (s *Server) handleSaveTarget(w http.ResponseWriter, r *http.Request) {
 	if t.ID != 0 && (!sameHost(t.Host, req.Host) || !sameHost(orHost(t.ConsoleHost, t.Host), orHost(req.ConsoleHost, req.Host)) ||
 		pbs.NormalizeFingerprint(t.Fingerprint) != pbs.NormalizeFingerprint(fp) ||
 		t.PBSUser != req.PBSUser || t.Datastore != req.Datastore || t.RootNS != req.RootNS) && !access(r).Global(PermRestore) {
-		n, err := s.store.TargetClientCount(ctx, t.ID)
+		// PCs enrolling later (pending codes, setup tokens, re-enrolled
+		// revoked clients) get the new settings too.
+		n, err := s.store.TargetUseCount(ctx, t.ID)
 		if err != nil {
 			httpError(w, 500, err)
 			return
 		}
 		if n > 0 {
-			httpError(w, http.StatusForbidden, fmt.Errorf("%d clients use this PBS server: changing its host, console address, fingerprint, datastore, "+
+			httpError(w, http.StatusForbidden, fmt.Errorf("this PBS server has clients, pending enrollments or setup tokens (%d): changing its host, console address, fingerprint, datastore, "+
 				"root namespace or agent user also needs the permission Restore (for all clients)", n))
 			return
 		}

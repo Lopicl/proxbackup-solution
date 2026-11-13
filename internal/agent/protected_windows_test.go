@@ -140,7 +140,7 @@ func TestRestoreKeepsFilesOutOfDriveRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	if _, err := r.Create("Program.exe"); !errors.Is(err, errProtected) {
+	if _, err := r.Create("Program.exe", false); !errors.Is(err, errProtected) {
 		t.Errorf("file in %s: %v", drive, err)
 	}
 	if err := r.Symlink("proxbackup-test-link", `C:\Windows`); !errors.Is(err, errProtected) {
@@ -156,7 +156,7 @@ func TestRestoreKeepsFilesOutOfDriveRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sub.Close()
-	f, err := sub.Create("file.txt")
+	f, err := sub.Create("file.txt", false)
 	if err != nil {
 		t.Fatalf("file below the root: %v", err)
 	}

@@ -553,6 +553,18 @@ func (s *Store) TargetClientCount(ctx context.Context, id int64) (int, error) {
 	return n, err
 }
 
+// TargetUseCount counts everything that can bring a PC to a target: its
+// clients (revoked ones too: they can be re-enrolled), enrollment codes no PC
+// has used yet and setup tokens that can still enroll PCs.
+func (s *Store) TargetUseCount(ctx context.Context, id int64) (int, error) {
+	var n int
+	t := now()
+	err := s.db.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM clients WHERE target_id=?)
+		+ (SELECT COUNT(*) FROM enrollments WHERE target_id=? AND used_at=0 AND expires>?)
+		+ (SELECT COUNT(*) FROM setup_tokens WHERE target_id=? AND expires>? AND (max_uses=0 OR uses<max_uses))`, id, id, t, id, t).Scan(&n)
+	return n, err
+}
+
 func (s *Store) DeleteTarget(ctx context.Context, id int64) error {
 	if n, _ := s.TargetClientCount(ctx, id); n > 0 {
 		return fmt.Errorf("target is used by %d clients", n)

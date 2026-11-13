@@ -189,8 +189,9 @@ more; with every permission it amounts to Administrator. The *Audit log* tab lis
 sign-ins and every change for two years; it keeps only the newest 100,000 failed sign-ins. Users change their own password under the profile menu. Repeated failed
 sign-ins from one address or for one username are slowed down (HTTP 429 with the time to wait).
 Users who signed in from an address before aren't slowed down by others' failures there (shared
-NAT); only their own failed attempts count. Changing the host or
-fingerprint of a datastore that clients use needs *Restore* for all clients too, because clients send their
+NAT); only their own failed attempts count. Changing the host,
+fingerprint, datastore, namespace or agent user of a datastore that has clients (revoked ones included),
+pending enrollment codes or setup tokens needs *Restore* for all clients too, because clients send their
 PBS tokens to that host.
 
 ### 8. Monitor
