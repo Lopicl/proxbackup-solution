@@ -91,12 +91,27 @@ func (c *catalog) upload(ctx context.Context, sess *pbs.BackupSession, res *api.
 // addTree lists the tree under dir into the current catalog directory. It is
 // used for volume images, whose archive has no file list of its own. Reparse
 // points (junctions, symlinks) are listed but not followed; unreadable
-// directories are listed empty.
-func (c *catalog) addTree(ctx context.Context, dir string) error {
-	entries, err := os.ReadDir(dir)
+// directories are listed empty. Without a snapshot, a user could swap a
+// folder for a junction between its listing and its opening and get another
+// folder's file names listed under theirs (the self-service restore page
+// shows them): each folder is read through its handle, after g checked that
+// it is the one listed. A folder that fails the check is listed empty.
+func (c *catalog) addTree(ctx context.Context, dir string, g *sourceGuard) error {
+	f, err := os.Open(dir)
 	if err != nil {
 		return nil
 	}
+	if err := g.checkFile(f, dir); err != nil {
+		f.Close()
+		c.j.logf("warn", "%s: %v", dir, err)
+		return nil
+	}
+	entries, err := f.ReadDir(-1)
+	f.Close()
+	if err != nil && len(entries) == 0 {
+		return nil
+	}
+	slices.SortFunc(entries, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	for _, de := range entries {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -110,7 +125,7 @@ func (c *catalog) addTree(ctx context.Context, dir string) error {
 			c.AddSymlink(fi.Name())
 		case mode.IsDir():
 			c.StartDirectory(fi.Name())
-			if err := c.addTree(ctx, filepath.Join(dir, fi.Name())); err != nil {
+			if err := c.addTree(ctx, filepath.Join(dir, fi.Name()), g); err != nil {
 				return err
 			}
 			c.EndDirectory()

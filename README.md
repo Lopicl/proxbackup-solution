@@ -156,7 +156,9 @@ On the client page create a *Files* job (default `C:\Users`, daily, with retenti
 - **On the PC:** tray icon → *Restore files…* opens the same browser without a console login.
   Administrators can restore anything when the tray runs elevated; other users, and
   administrators whose tray isn't elevated (the usual case with UAC), only their own profile
-  folder, written with their own Windows permissions.
+  folder, written with their own Windows permissions, and only files their account could read
+  when they were backed up (older backups without recorded permissions need an administrator).
+  The page works for up to 8 hours (1 hour for administrators).
 - Restores never write through a junction or symbolic link in the target folder (that entry is
   skipped with a warning), and refuse a target whose path contains one. A folder the agent creates
   directly on a drive (like `C:\Restore`) is open only to SYSTEM and administrators. Backups never

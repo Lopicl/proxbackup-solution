@@ -6,12 +6,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
+	"strings"
 	"testing"
 )
 
@@ -216,5 +219,40 @@ func TestFragmentedFileHasManyRuns(t *testing.T) {
 func TestNotNTFS(t *testing.T) {
 	if _, err := Open(bytes.NewReader(make([]byte, 4096))); err == nil {
 		t.Fatal("zeros opened as NTFS")
+	}
+}
+
+func TestSecurityDescriptors(t *testing.T) {
+	v := openTestVolume(t)
+	owner := func(sd []byte) string {
+		off := binary.LittleEndian.Uint32(sd[4:])
+		if off == 0 {
+			return ""
+		}
+		sid := sd[off:]
+		s := fmt.Sprintf("S-%d-%d", sid[0], binary.BigEndian.Uint64(append([]byte{0, 0}, sid[2:8]...)))
+		for i := 0; i < int(sid[1]); i++ {
+			s += fmt.Sprintf("-%d", binary.LittleEndian.Uint32(sid[8+4*i:]))
+		}
+		return s
+	}
+	for _, p := range []string{"", "docs", "docs/small.txt", "comp/compressed.bin", "docs/deep/er/still/nested.bin"} {
+		f, err := v.Lookup(p)
+		if err != nil {
+			t.Fatal(p, err)
+		}
+		sd, err := f.SecurityDescriptor()
+		if err != nil {
+			t.Fatalf("%q: %v", p, err)
+		}
+		if ctl := binary.LittleEndian.Uint16(sd[2:]); ctl&0x4 == 0 || binary.LittleEndian.Uint32(sd[16:]) == 0 {
+			t.Errorf("%q: no DACL (control %#x)", p, ctl)
+		}
+		if o := owner(sd); !strings.HasPrefix(o, "S-1-5-") {
+			t.Errorf("%q: owner %q", p, o)
+		}
+	}
+	if len(v.sds) < 2 {
+		t.Errorf("only %d descriptors in $SDS", len(v.sds))
 	}
 }

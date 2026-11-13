@@ -187,7 +187,10 @@ read on every run.
   `proxbackup-agent enroll <token>` right after enrolling (or by `proxbackup-agent install`
   alone). That copies the agent to `%ProgramFiles%\ProxBackup` and installs
   and starts the service from there, or repoints an existing one, so SYSTEM never runs a binary
-  from a folder users can write to (such as Downloads). A service that an older `install` left
+  from a folder users can write to (such as Downloads). Program Files and ProgramData are
+  the known folders (`SHGetKnownFolderPath`, set in HKLM), not `%ProgramFiles%`/`%ProgramData%`:
+  an unelevated process can override those in `HKCU\Environment`, and the elevated setup would
+  inherit them. A service that an older `install` left
   elsewhere moves itself on start: it copies its binary to Program Files, repoints the service,
   and exits so the service manager restarts it from there (like after a self-update); the tray
   follows it to the new path. Re-running the enrollment command on an enrolled PC keeps the
@@ -252,6 +255,9 @@ read on every run.
   Afterwards it lists the volume's files from the same shadow copy into the catalog, so the
   image can be browsed in the PBS GUI like a file backup (downloads need a pxar archive, so
   per-file restore from images is not possible there; see *File restore from images*).
+  Without VSS the live drive is listed: each folder is read through its own handle after the
+  `sourceGuard` check, so a folder swapped for a junction mid-listing is listed empty instead
+  of putting another folder's file names under the user's path.
 * **Catalog.** Image and v1 file snapshots carry `catalog.pcat1.didx`, the file list the PBS
   GUI file browser reads. Its root holds one folder per archive. v1 file backups fill it while
   encoding the pxar; a catalog failure only costs browsability, never the backup. v2 (split)
@@ -515,7 +521,8 @@ scope = their profile folder, or none for administrators). The console returns
 `https://<console>/#/restore/<token>` and the tray opens it. The page needs no console login.
 The token sits in the URL fragment, so it never reaches a request line or log, and the page
 sends it in an `X-Restore-Session` header. It opens nothing of the admin API. A session expires
-after an hour without use, and 8 hours after it was opened at the latest. An agent opens at most
+after an hour without use, and 8 hours after it was opened at the latest (1 hour for a PC
+administrator's session: its URL alone restores anything as SYSTEM). An agent opens at most
 30 sessions per hour (bursts of 10, then HTTP 429); a client keeps at most 10 live ones (a new one
 ends the oldest), and over-long user, SID, scope or ref fields are refused. The page lists the
 PC's snapshots and reuses the console's file browser:
@@ -530,6 +537,13 @@ PC's snapshots and reuses the console's file browser:
   impersonates the user (the token kept from the pipe connection), so Windows applies the
   user's own permissions to every file it writes, junctions included. A restore arriving after
   an agent restart (token gone) fails and asks the user to open the page again.
+  The scope is a path, and a new account can get a deleted one's profile folder. So the agent
+  also checks every file against its backed-up security descriptor (`AccessCheck` for
+  `FILE_READ_DATA` with the user's kept token, `ipc.Peer.CanRead`) and skips, with a warning,
+  files the user couldn't read and files with no descriptor recorded (backups from before ACL
+  support, 2026-10-21). File restores from images read the descriptor from the image's
+  `$Secure` (`pkg/ntfs`). Directories are always created; their alternate data streams follow
+  the same check.
 
 Restores from the page are ordinary restore runs in the client history, recorded with the
 requesting user.

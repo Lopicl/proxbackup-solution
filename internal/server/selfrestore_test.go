@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"proxbackup/internal/api"
 )
@@ -131,5 +132,33 @@ func TestSelfRestore(t *testing.T) {
 	s.store.db.Exec(`UPDATE restore_sessions SET expires=1`)
 	if w := call("GET", "/api/self-restore/runs", token, nil); w.Code != http.StatusUnauthorized {
 		t.Fatalf("expired session: %d", w.Code)
+	}
+}
+
+// A PC administrator's restore page lasts at most restoreSessionAdminMax,
+// whatever the agent asks for; other users' pages up to restoreSessionMax.
+func TestAdminRestoreSessionIsShort(t *testing.T) {
+	s := newTestServer(t, "")
+	c := groupTestClients(t, s, "pc-1")[0]
+	for _, tc := range []struct {
+		req  api.RestoreSessionRequest
+		want time.Duration
+	}{
+		{api.RestoreSessionRequest{Ref: "0123456789abcdef", User: `PC\admin`, Admin: true, TTL: 8 * 3600}, restoreSessionAdminMax},
+		{api.RestoreSessionRequest{Ref: "0123456789abcdeg", User: `PC\alice`, Scope: `C:\Users\Alice`, TTL: 8 * 3600}, restoreSessionMax},
+	} {
+		b, _ := json.Marshal(tc.req)
+		w := httptest.NewRecorder()
+		s.handleCreateRestoreSession(w, httptest.NewRequest("POST", "https://console:8077/agent/v1/restore-sessions", bytes.NewReader(b)), c)
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", tc.req.User, w.Code, w.Body)
+		}
+		var created, maxExp int64
+		if err := s.store.db.QueryRow(`SELECT created_at, max_expires FROM restore_sessions WHERE user_name=?`, tc.req.User).Scan(&created, &maxExp); err != nil {
+			t.Fatal(err)
+		}
+		if got := time.Duration(maxExp-created) * time.Second; got != tc.want {
+			t.Errorf("%s: session lasts %s, want %s", tc.req.User, got, tc.want)
+		}
 	}
 }

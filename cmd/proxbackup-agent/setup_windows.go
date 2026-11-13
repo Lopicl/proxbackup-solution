@@ -3,7 +3,6 @@
 package main
 
 import (
-	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -142,9 +141,17 @@ func installAgent(dataDir string) (retErr error) {
 	return nil
 }
 
-// installPath is where the agent service runs from.
+// installPath is where the agent service runs from. Program Files comes
+// from the system configuration (HKLM), not %ProgramFiles%: the elevated
+// setup inherits the admin's environment, which an unelevated process can
+// change in HKCU\Environment to put the SYSTEM service binary in a folder
+// it can write.
 func installPath() string {
-	return filepath.Join(cmp.Or(os.Getenv("ProgramFiles"), `C:\Program Files`), "ProxBackup", "proxbackup-agent.exe")
+	pf, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
+	if err != nil || pf == "" {
+		pf = `C:\Program Files`
+	}
+	return filepath.Join(pf, "ProxBackup", "proxbackup-agent.exe")
 }
 
 func servicePath(exe, dataDir string) string {

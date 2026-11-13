@@ -71,6 +71,9 @@ type Volume struct {
 	indexSize   int64 // default index record size from the boot sector
 	clusters    int64 // clusters in the file system (from the boot sector)
 	mft         *Stream
+
+	sds    map[uint32][]byte // $Secure's descriptors by security ID, loaded on first use
+	sdsErr error
 }
 
 // Open reads the boot sector and the $MFT's own record.
@@ -317,6 +320,7 @@ type File struct {
 	Ctime, Mtime, Atime time.Time
 	ReparseTag          uint32
 	attrs               []*attribute
+	securityID          uint32 // into $Secure; 0 = none (NTFS 1.x)
 }
 
 // Get loads the MFT record ref with all its attributes.
@@ -342,6 +346,9 @@ func (v *Volume) Get(ref uint64) (*File, error) {
 		f.Mtime = filetime(si.value[8:])
 		f.Atime = filetime(si.value[24:])
 		f.Attrs = binary.LittleEndian.Uint32(si.value[32:])
+		if len(si.value) >= 56 {
+			f.securityID = binary.LittleEndian.Uint32(si.value[52:])
+		}
 	}
 	if rp := findAttr(f.attrs, attrReparsePoint, ""); rp != nil && rp.resident && len(rp.value) >= 4 {
 		f.ReparseTag = binary.LittleEndian.Uint32(rp.value)

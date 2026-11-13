@@ -117,6 +117,15 @@ func (j *job) restoreImageFiles(ctx context.Context, r *pbs.ReaderSession, idx *
 				}
 				return nil
 			}
+			if j.canRead != nil {
+				sd, err := f.SecurityDescriptor()
+				if err != nil {
+					j.logf("info", "%s: permissions not readable from the image: %v", rel, err)
+				}
+				if !j.mayRead(rel, sd, "") {
+					return nil
+				}
+			}
 			data, err := f.Open()
 			if err != nil {
 				return fmt.Errorf("%s: %w", rel, err)

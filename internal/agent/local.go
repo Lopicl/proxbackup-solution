@@ -26,6 +26,9 @@ const (
 	historyKeep    = 20
 	maxPause       = 24 * time.Hour
 	restoreSessTTL = 8 * time.Hour // how long a "Restore files…" page works
+	// An administrator's page restores anything anywhere as SYSTEM, and its
+	// URL is all it takes: it works for a shorter time.
+	adminRestoreSessTTL = time.Hour
 )
 
 // localState is the part of the runner the tray reads.
@@ -405,7 +408,11 @@ func (r *Runner) restoreLink(ctx context.Context, peer *ipc.Peer) (string, error
 	if err != nil {
 		return "", err
 	}
-	sess := &restoreSession{peer: kept, expires: time.Now().Add(restoreSessTTL)}
+	ttl := restoreSessTTL
+	if peer.Admin {
+		ttl = adminRestoreSessTTL
+	}
+	sess := &restoreSession{peer: kept, expires: time.Now().Add(ttl)}
 	if !peer.Admin {
 		if peer.Profile == "" {
 			kept.Close()
@@ -414,7 +421,7 @@ func (r *Runner) restoreLink(ctx context.Context, peer *ipc.Peer) (string, error
 		sess.scope = peer.Profile
 	}
 	ref := newUUID()
-	req := api.RestoreSessionRequest{Ref: ref, User: peer.User, SID: peer.SID, Admin: peer.Admin, Scope: sess.scope, TTL: int64(restoreSessTTL / time.Second)}
+	req := api.RestoreSessionRequest{Ref: ref, User: peer.User, SID: peer.SID, Admin: peer.Admin, Scope: sess.scope, TTL: int64(ttl / time.Second)}
 	var resp api.RestoreSessionResponse
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
@@ -468,7 +475,12 @@ func (r *Runner) restoreAs(ctx context.Context, spec api.JobSpec, rep Reporter) 
 		rep.Log("info", fmt.Sprintf("restore requested on the PC by administrator %s", sess.peer.User))
 		return Run(ctx, spec, rep)
 	}
-	rep.Log("info", fmt.Sprintf("restore requested on the PC by %s; files are written with their rights", sess.peer.User))
+	rep.Log("info", fmt.Sprintf("restore requested on the PC by %s; files are written with their rights, "+
+		"and only files they could read when they were backed up are restored", sess.peer.User))
+	// The scope is a path: a new account can get the profile folder of a
+	// deleted one, and with it that account's backups. The archive's
+	// permissions say whose files they are.
+	ctx = withReadCheck(ctx, sess.peer.CanRead)
 	var res api.Result
 	if err := sess.peer.RunAs(func() error { res = Run(ctx, spec, rep); return nil }); err != nil {
 		return api.Result{State: api.RunFailed, Error: err.Error()}

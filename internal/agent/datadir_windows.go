@@ -29,6 +29,17 @@ const (
 	dataFileSDDL   = "O:BAD:AI(A;ID;FA;;;SY)(A;ID;FA;;;BA)"
 )
 
+// programData is the ProgramData folder as the system configures it
+// (HKLM). %ProgramData% comes from the caller's environment, which an
+// unelevated process can change in HKCU\Environment before an admin's
+// elevated setup reads it, and steer the data dir somewhere it can write.
+func programData() string {
+	if p, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0); err == nil && p != "" {
+		return p
+	}
+	return `C:\ProgramData`
+}
+
 // SecureDataDir creates dir readable by SYSTEM and Administrators only, or
 // resets the owner and permissions of an existing one and everything in it.
 //

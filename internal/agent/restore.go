@@ -135,6 +135,26 @@ func (j *job) skipEntry(path string, err error) bool {
 	return true
 }
 
+// mayRead reports whether the user a restore runs for (job.canRead) could
+// read the entry at path, whose backed-up security descriptor is sd. If not,
+// what (the entry itself if "") is skipped with a warning.
+func (j *job) mayRead(path string, sd []byte, what string) bool {
+	if j.canRead == nil {
+		return true
+	}
+	err := j.canRead(sd)
+	if err == nil {
+		return true
+	}
+	if what == "" {
+		j.skipped.Add(1)
+		j.logf("warn", "skipped %s: %v", path, err)
+	} else {
+		j.logf("warn", "%s: %s not restored: %v", path, what, err)
+	}
+	return false
+}
+
 // withinDir reports whether the cleaned path target is root or below it. A
 // drive root like `C:\` already ends in a separator.
 func withinDir(root, target string) bool {
@@ -200,7 +220,7 @@ func (j *job) restorePxar(ctx context.Context, root *restoreRoot, dec *pxar.Deco
 			dirs = append(dirs, dirMeta{rel, e.Meta})
 			// The archive root is the target folder itself: it keeps its own
 			// permissions and streams.
-			if nt := ntFromPxar(e.Meta); e.Path != "" && len(nt.streams) > 0 {
+			if nt := ntFromPxar(e.Meta); e.Path != "" && len(nt.streams) > 0 && j.mayRead(e.Path, nt.sd, "its alternate data streams") {
 				f, err := root.Open(rel)
 				if err == nil {
 					err = f.WriteStreams(nt)
@@ -211,6 +231,9 @@ func (j *job) restorePxar(ctx context.Context, root *restoreRoot, dec *pxar.Deco
 				}
 			}
 		case pxar.KindFile:
+			if !j.mayRead(e.Path, ntFromPxar(e.Meta).sd, "") {
+				continue
+			}
 			if err := j.restoreFile(root, dec, e, rel, spec.Overwrite); err != nil {
 				return err
 			}

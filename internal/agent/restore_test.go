@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"proxbackup/internal/api"
+	"proxbackup/internal/ipc"
 	"proxbackup/pkg/pxar"
 )
 
@@ -167,5 +168,61 @@ func TestRestoreRootRefusesLinks(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "restore")); err == nil {
 		t.Error("target folder created through a link")
+	}
+}
+
+// A restore for a PC user without administrator rights (job.canRead) skips
+// files whose backed-up permissions don't let them read, and those that have
+// none recorded.
+func TestRestoreSkipsUnreadable(t *testing.T) {
+	var buf bytes.Buffer
+	dm := pxar.Metadata{Mode: pxar.ModeIFDIR | 0o755, MtimeSecs: 1700000000}
+	meta := func(sd string) pxar.Metadata {
+		m := pxar.Metadata{Mode: pxar.ModeIFREG | 0o644, MtimeSecs: 1700000001}
+		if sd != "" {
+			m.Xattrs = []pxar.Xattr{{Name: []byte(xattrSD), Value: []byte(sd)}}
+		}
+		return m
+	}
+	enc, err := pxar.NewEncoder(&buf, dm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range [][2]string{{"mine.txt", "mine"}, {"none.txt", ""}, {"theirs.txt", "theirs"}} {
+		if _, err := enc.AddFile([]byte(f[0]), meta(f[1]), 4, strings.NewReader("data")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	j := &job{rep: nopReporter{}, canRead: func(sd []byte) error {
+		switch string(sd) {
+		case "mine":
+			return nil
+		case "":
+			return ipc.ErrNoSecurity
+		}
+		return ipc.ErrNoReadAccess
+	}}
+	root, err := openRestoreRoot(target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := j.restorePxar(context.Background(), root, pxar.NewDecoder(&buf), &api.RestoreSpec{TargetDir: target, Overwrite: "overwrite"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(target, "mine.txt")); err != nil || string(b) != "data" {
+		t.Errorf("mine.txt = %q, %v", b, err)
+	}
+	for _, name := range []string{"theirs.txt", "none.txt"} {
+		if _, err := os.Stat(filepath.Join(target, name)); err == nil {
+			t.Errorf("%s restored", name)
+		}
+	}
+	if n := j.skipped.Load(); n != 2 {
+		t.Errorf("skipped = %d, want 2", n)
 	}
 }

@@ -121,3 +121,45 @@ func TestPeerAdminNeedsElevation(t *testing.T) {
 		t.Fatalf("filtered token: admin=%v elevatable=%v", p.Admin, p.Elevatable)
 	}
 }
+
+// CanRead checks a security descriptor against the peer's token: the
+// owner alone doesn't read, an ACE for the user (or Everyone) does.
+func TestCanRead(t *testing.T) {
+	var proc, imp windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY, &proc); err != nil {
+		t.Fatal(err)
+	}
+	defer proc.Close()
+	if err := windows.DuplicateTokenEx(proc, windows.MAXIMUM_ALLOWED, nil, windows.SecurityImpersonation, windows.TokenImpersonation, &imp); err != nil {
+		t.Fatal(err)
+	}
+	p := &Peer{token: imp}
+	defer p.Close()
+	tu, err := imp.GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := tu.User.Sid.String()
+	sd := func(sddl string) []byte {
+		s, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return unsafe.Slice((*byte)(unsafe.Pointer(s)), s.Length())
+	}
+	for sddl, want := range map[string]error{
+		"O:" + me + "G:SYD:(A;;FA;;;SY)":          ErrNoReadAccess, // owner, but no ACE: a deleted user's file under a reused profile path
+		"O:SYG:SYD:(A;;FR;;;" + me + ")":          nil,
+		"O:SYG:SYD:(A;;0x1;;;WD)":                 nil,
+		"O:SYG:SYD:(A;;FA;;;SY)":                  ErrNoReadAccess,
+		"O:SYG:SYD:(D;;0x1;;;WD)(A;;FA;;;WD)":     ErrNoReadAccess,
+		"O:SYG:SYD:(A;;FA;;;S-1-5-21-1-2-3-1001)": ErrNoReadAccess,
+	} {
+		if got := p.CanRead(sd(sddl)); got != want {
+			t.Errorf("%s: %v, want %v", sddl, got, want)
+		}
+	}
+	if got := p.CanRead(nil); got != ErrNoSecurity {
+		t.Errorf("no descriptor: %v", got)
+	}
+}

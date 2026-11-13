@@ -31,7 +31,7 @@ func (s *snapshotSet) Close() {}
 
 // imageFSRoot: images are files or block devices here, with no mounted file
 // system to list.
-func (s *snapshotSet) imageFSRoot(vol string) (string, bool) { return "", false }
+func (s *snapshotSet) imageFSRoot(vol string) (string, *sourceGuard, bool) { return "", nil, false }
 
 // openImageSource opens a file or block device path for an image backup.
 func (s *snapshotSet) openImageSource(vol string) (imageSource, uint64, string, error) {

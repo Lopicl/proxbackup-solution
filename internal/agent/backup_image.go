@@ -113,12 +113,12 @@ func (j *job) runImage(ctx context.Context) (api.Result, error) {
 			}
 			j.logf("info", "%s: listing files through Windows: %v", v.archive, err)
 		}
-		root, ok := snaps.imageFSRoot(v.name)
+		root, guard, ok := snaps.imageFSRoot(v.name)
 		if !ok {
 			continue
 		}
 		cat.StartDirectory(v.archive)
-		if err := cat.addTree(ctx, root); err != nil {
+		if err := cat.addTree(ctx, root, guard); err != nil {
 			return res, err
 		}
 		cat.EndDirectory()

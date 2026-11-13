@@ -44,6 +44,9 @@ func PrepareDataDir(dir string) (aside, why string, err error) {
 	return "", "", nil
 }
 
+// programData is only used on Windows.
+func programData() string { return "" }
+
 func readSecret(p string) ([]byte, error) {
 	return os.ReadFile(p)
 }

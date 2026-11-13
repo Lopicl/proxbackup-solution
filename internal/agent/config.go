@@ -41,11 +41,7 @@ type Config struct {
 // DefaultDataDir is where the agent keeps its config and credentials.
 func DefaultDataDir() string {
 	if runtime.GOOS == "windows" {
-		pd := os.Getenv("ProgramData")
-		if pd == "" {
-			pd = `C:\ProgramData`
-		}
-		return filepath.Join(pd, "proxbackup")
+		return filepath.Join(programData(), "proxbackup")
 	}
 	return "/var/lib/proxbackup-agent"
 }

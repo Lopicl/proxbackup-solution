@@ -46,5 +46,8 @@ func (p *Peer) Keep() (*Peer, error) { k := *p; return &k, nil }
 // Close releases the peer.
 func (p *Peer) Close() {}
 
+// CanRead allows everything (Windows only; see ipc_windows.go).
+func (p *Peer) CanRead(sd []byte) error { return nil }
+
 // RunAs runs fn (there is no impersonation outside Windows).
 func (p *Peer) RunAs(fn func() error) error { return fn() }

@@ -132,6 +132,12 @@ type Peer struct {
 	Elevatable bool
 }
 
+// Errors of Peer.CanRead.
+var (
+	ErrNoReadAccess = errors.New("your Windows account had no right to read it when it was backed up; an administrator can restore it")
+	ErrNoSecurity   = errors.New("the backup has no record of who could read it; an administrator can restore it")
+)
+
 // Handler answers one request from peer.
 type Handler func(ctx context.Context, peer *Peer, req Request) Response
 

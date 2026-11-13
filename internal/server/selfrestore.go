@@ -35,6 +35,9 @@ const (
 	restoreSessionHeader = "X-Restore-Session"
 	restoreSessionIdle   = time.Hour
 	restoreSessionMax    = 8 * time.Hour
+	// A PC administrator's page restores anything as SYSTEM to anyone who
+	// has its URL, so it lasts less, whatever the agent asks.
+	restoreSessionAdminMax = time.Hour
 	// A client has at most this many live restore pages; opening another
 	// one ends its oldest.
 	maxLiveRestoreSessions = 10
@@ -121,9 +124,12 @@ func (s *Server) handleCreateRestoreSession(w http.ResponseWriter, r *http.Reque
 		httpError(w, http.StatusTooManyRequests, errors.New("too many restore pages opened on this PC; try again in a few minutes"))
 		return
 	}
-	ttl := time.Duration(req.TTL) * time.Second
-	if ttl <= 0 || ttl > restoreSessionMax {
-		ttl = restoreSessionMax
+	ttl, maxTTL := time.Duration(req.TTL)*time.Second, restoreSessionMax
+	if req.Admin {
+		maxTTL = restoreSessionAdminMax
+	}
+	if ttl <= 0 || ttl > maxTTL {
+		ttl = maxTTL
 	}
 	token := randToken(32)
 	expires, err := s.store.CreateRestoreSession(r.Context(), hashToken(token), c.ID, req, ttl)

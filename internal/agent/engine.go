@@ -41,6 +41,19 @@ type job struct {
 	bytesRead, uploaded  atomic.Uint64
 	bytesTotal           atomic.Uint64
 	phase, archive       atomic.Value
+
+	// canRead, for a restore a PC user started without administrator
+	// rights, checks a backed-up security descriptor against their account
+	// (ipc.Peer.CanRead); nil = everything may be restored.
+	canRead func(sd []byte) error
+}
+
+type canReadKey struct{}
+
+// withReadCheck makes the restore run with ctx restore only files whose
+// backed-up security descriptor passes canRead.
+func withReadCheck(ctx context.Context, canRead func(sd []byte) error) context.Context {
+	return context.WithValue(ctx, canReadKey{}, canRead)
 }
 
 func (j *job) logf(level, format string, args ...any) {
@@ -66,6 +79,7 @@ func (j *job) setPhase(p string) { j.phase.Store(p) }
 // Run executes spec and always returns a Result (errors are folded into it).
 func Run(ctx context.Context, spec api.JobSpec, rep Reporter) api.Result {
 	j := &job{spec: spec, rep: rep}
+	j.canRead, _ = ctx.Value(canReadKey{}).(func([]byte) error)
 	j.setPhase("starting")
 	stop := make(chan struct{})
 	go func() {

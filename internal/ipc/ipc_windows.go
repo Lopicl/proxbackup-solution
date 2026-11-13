@@ -212,6 +212,41 @@ func (p *Peer) Close() {
 	}
 }
 
+var procAccessCheck = advapi32.NewProc("AccessCheck")
+
+// fileMapping is the GENERIC_MAPPING of files.
+var fileMapping = [4]uint32{windows.FILE_GENERIC_READ, windows.FILE_GENERIC_WRITE, windows.FILE_GENERIC_EXECUTE, 0x1F01FF}
+
+// CanRead checks that the security descriptor sd (self-relative, as backed
+// up) grants the peer FILE_READ_DATA, so a user restores from their profile
+// only what they could read when it was backed up: not the files of a
+// deleted account whose profile folder they now have. It returns
+// ErrNoReadAccess or ErrNoSecurity otherwise.
+func (p *Peer) CanRead(sd []byte) error {
+	if len(sd) < 20 {
+		return ErrNoSecurity
+	}
+	// Aligned copies: the descriptor may come from anywhere in an archive.
+	buf := make([]uint64, (len(sd)+7)/8)
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&buf[0])), len(sd)), sd)
+	var privs [64]uint32 // PRIVILEGE_SET
+	plen := uint32(unsafe.Sizeof(privs))
+	var granted, ok uint32
+	r, _, err := procAccessCheck.Call(uintptr(unsafe.Pointer(&buf[0])), uintptr(p.token), windows.FILE_READ_DATA,
+		uintptr(unsafe.Pointer(&fileMapping)), uintptr(unsafe.Pointer(&privs[0])), uintptr(unsafe.Pointer(&plen)),
+		uintptr(unsafe.Pointer(&granted)), uintptr(unsafe.Pointer(&ok)))
+	if r == 0 {
+		if errors.Is(err, windows.ERROR_INVALID_SECURITY_DESCR) {
+			return ErrNoSecurity
+		}
+		return fmt.Errorf("AccessCheck: %w", err)
+	}
+	if ok == 0 || granted&windows.FILE_READ_DATA == 0 {
+		return ErrNoReadAccess
+	}
+	return nil
+}
+
 // RunAs runs fn on a thread that impersonates the peer, so files it creates
 // are checked against, and owned by, the user. fn must not hand file system
 // work to other goroutines: those run with the service's rights.
