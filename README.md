@@ -201,7 +201,9 @@ year) and how much data each client's latest backups hold. *Runs* lists active a
 A run's log keeps at most 20,000 lines (8 MiB). Each client keeps at most 256 MiB of run logs and
 results, and the oldest are removed first. The console also cuts every other string an agent sends to
 a short length, and a PC opens at most 30 restore pages per hour (10 live at once), so a misbehaving
-agent can't fill the console's disk.
+agent can't fill the console's disk. Nor its memory: a PC's agent has at most 8 requests open at
+once and its restore pages 16 (more get HTTP 429 and are retried), and request bodies are refused
+before decoding when they hold more than 25,000 array elements.
 
 ### Troubleshooting
 

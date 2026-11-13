@@ -41,6 +41,8 @@ const (
 	// A client has at most this many live restore pages; opening another
 	// one ends its oldest.
 	maxLiveRestoreSessions = 10
+	// A restore request names an archive, a target and the paths picked.
+	maxRestorePageBody = 1 << 20
 )
 
 type restoreSession struct {
@@ -177,6 +179,12 @@ func (s *Server) requireRestoreSession(h selfRestoreHandler) http.HandlerFunc {
 			httpError(w, http.StatusUnauthorized, errors.New("this PC is no longer managed by the console"))
 			return
 		}
+		// Any user of the PC can open a restore page and reuse its token.
+		end, ok := s.admit(w, &s.restoreReqs, c, "restore page")
+		if !ok {
+			return
+		}
+		defer end()
 		h(w, r, rs, c)
 	}
 }
@@ -255,6 +263,7 @@ func (s *Server) handleSelfCatalog(w http.ResponseWriter, r *http.Request, rs *r
 
 func (s *Server) handleSelfRestore(w http.ResponseWriter, r *http.Request, rs *restoreSession, c *Client) {
 	var req api.RestoreSpec
+	r.Body = http.MaxBytesReader(w, r.Body, maxRestorePageBody)
 	if err := decodeJSON(r, &req); err != nil {
 		httpError(w, 400, err)
 		return

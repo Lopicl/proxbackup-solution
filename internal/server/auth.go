@@ -22,6 +22,10 @@ const (
 	sessionTTL    = 12 * time.Hour
 	csrfHeader    = "X-PROXBACKUP-Request" // custom header: browsers won't send it cross-origin without CORS
 	minPassword   = 10
+	// maxPublicBody bounds the bodies of requests anyone can send (sign-in,
+	// enrollment): they are decoded before any throttling, and decoding a
+	// 4 MiB string takes 20 MiB.
+	maxPublicBody = 64 << 10
 )
 
 var errInvalidLogin = errors.New("invalid username or password")
@@ -284,6 +288,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxPublicBody)
 	if err := decodeJSON(r, &req); err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return

@@ -6,6 +6,7 @@
 package server
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/tls"
@@ -71,6 +72,8 @@ type Server struct {
 	logins   loginLimiter  // sign-in throttling (loginlimit.go)
 	runRegs  clientLimiter // agent run registrations (runlimit.go)
 	restores clientLimiter // self-service restore pages opened by agents
+	// Requests open per client: from its agent, and from its restore pages.
+	agentReqs, restoreReqs requestLimiter
 	// setupEnrolls: enrollments per setup token (runlimit.go)
 	setupEnrolls rateLimiter[int64]
 
@@ -106,6 +109,8 @@ func New(cfg Config, log *slog.Logger) (*Server, error) {
 		rotateFailed: map[int64]time.Time{}, replacedAlerted: map[int64]time.Time{},
 		runRegs:      clientLimiter{perHour: runRegsPerHour, burst: runRegsBurst},
 		restores:     clientLimiter{perHour: restoreSessionsPerHour, burst: restoreSessionsBurst},
+		agentReqs:    requestLimiter{max: maxAgentRequests},
+		restoreReqs:  requestLimiter{max: maxRestorePageRequests},
 		setupEnrolls: rateLimiter[int64]{perHour: setupEnrollsPerHour, burst: setupEnrollsBurst}}
 	s.notify = &Notifier{s: s}
 	s.updater = newUpdater(s)
@@ -358,6 +363,8 @@ func (s *Server) housekeeping(ctx context.Context) {
 		s.runRegs.prune(time.Now())
 		s.setupEnrolls.prune(time.Now())
 		s.restores.prune(time.Now())
+		s.agentReqs.prune(time.Now())
+		s.restoreReqs.prune(time.Now())
 		s.catalogs.prune(time.Now())
 		if time.Since(lastLogTrim) > 10*time.Minute {
 			lastLogTrim = time.Now()
@@ -405,12 +412,56 @@ func decodeJSON(r *http.Request, v any) error {
 			return fmt.Errorf("invalid request body: Content-Type must be application/json, not %q", ct)
 		}
 	}
-	dec := json.NewDecoder(io.LimitReader(r.Body, 4<<20))
+	b, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	if err == nil {
+		err = checkJSONItems(b)
+	}
+	if err != nil {
+		return fmt.Errorf("invalid request body: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("invalid request body: %w", err)
 	}
 	return nil
+}
+
+// maxJSONItems is how many array elements a request body may hold in all.
+// Decoded, an element costs far more than its bytes: 4 MiB of empty objects
+// ([{},{},…]) are 1.4 million run events, over 300 MiB in memory. The largest
+// real arrays are the events an agent buffered (at most 20000).
+const maxJSONItems = 25000
+
+// checkJSONItems fails if the JSON value b starts with has more than
+// maxJSONItems array elements, before anything is decoded. Syntax errors are
+// left to the decoder.
+func checkJSONItems(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	var open []bool // containers open, innermost last: true for an array
+	items := 0
+	for {
+		t, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		d, delim := t.(json.Delim)
+		if delim && (d == ']' || d == '}') {
+			open = open[:len(open)-1]
+		} else {
+			if len(open) > 0 && open[len(open)-1] {
+				if items++; items > maxJSONItems {
+					return fmt.Errorf("more than %d array elements", maxJSONItems)
+				}
+			}
+			if delim {
+				open = append(open, d == '[')
+			}
+		}
+		if len(open) == 0 {
+			return nil
+		}
+	}
 }
 
 func pathID(r *http.Request) (int64, error) {

@@ -903,6 +903,19 @@ sequenceDiagram
   account before ignores that account's backoff, so a flood can't lock its owner out. At most
   4 argon2id hashes (64 MiB each) run at once, and the systemd unit caps the console at
   `MemoryMax=1G`, so a sign-in flood can't exhaust the PBS host's memory.
+* **Request limits** (`internal/server/runlimit.go`): decoded JSON can cost far more than its
+  bytes (4 MiB of `[{},{},…]` are 1.4 million run events, over 300 MiB), so every body is refused
+  before decoding if its arrays hold more than 25,000 elements in all (an agent sends at most
+  20,001 events at once). Bodies anyone can send (sign-in, enrollment) may be 64 KiB, as they are
+  decoded before any throttling; restore page requests 1 MiB; all others 4 MiB. A client's agent
+  may have 8 requests open at once and its restore pages 16 (any PC user can open one), beyond that
+  HTTP 429, which agents retry (run reports stay spooled). At most 2 of its polls wait: a newer one
+  ends the oldest at once, so an agent whose connection dropped isn't refused because of its old
+  poll. Requests count after the certificate check and the switch to a renewed certificate, so a
+  copy of the certificate holding all of them can't keep the renewed agent from cutting it off.
+  Before that, such a copy can keep the client's agent out (it can act as the client anyway):
+  revoke the client. There is no limit across clients: unauthenticated connections could fill it
+  and lock every agent out.
 * **Updates:** releases are signed: `internal/update/release.pub` holds the minisign public
   key, and builds accept only releases whose `SHA256SUMS.minisig` checks out with a trusted
   comment naming the release's version. The secret key stays off GitHub

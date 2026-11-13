@@ -66,8 +66,31 @@ func (s *Server) requireAgent(h agentHandler) http.Handler {
 			s.wakeClient(c.ID) // a poll waiting with the old certificate ends at once
 			c.CertSerial, c.pendingSerial, c.CertRenew = serial, "", false
 		}
+		// After the switch above: a copy of the certificate holding all of the
+		// client's requests can't keep the renewed agent from cutting it off.
+		end, ok := s.admit(w, &s.agentReqs, c, "agent")
+		if !ok {
+			return
+		}
+		defer end()
 		h(w, r, c)
 	})
+}
+
+// admit takes one of the requests l allows client c (see requestLimiter),
+// or refuses the request with 429.
+func (s *Server) admit(w http.ResponseWriter, l *requestLimiter, c *Client, from string) (end func(), ok bool) {
+	end, ok, warn := l.begin(c.ID, time.Now())
+	if ok {
+		return end, true
+	}
+	if warn {
+		s.log.Warn("too many requests open for a client; refusing more (a misbehaving or compromised PC, or a copy of its certificate)",
+			"client", c.Name, "id", c.ID, "from", from, "max", l.max)
+	}
+	w.Header().Set("Retry-After", "10")
+	httpError(w, http.StatusTooManyRequests, errors.New("too many requests open for this PC; try again shortly"))
+	return nil, false
 }
 
 // connSerial is the serial of the client certificate r came with.
@@ -95,6 +118,7 @@ var (
 
 func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	var req api.EnrollRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxPublicBody)
 	if err := decodeJSON(r, &req); err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
@@ -230,6 +254,12 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
 	wait = min(max(wait, 0), 55)
 	deadline := time.After(time.Duration(wait) * time.Second)
+	var ended <-chan struct{} // a newer poll of this client took its place
+	if wait > 0 {
+		var done func()
+		ended, done = s.agentReqs.waitPoll(c.ID)
+		defer done()
+	}
 	for {
 		wake := s.wakeChan(c.ID)
 		if fresh, err := s.store.Client(ctx, c.ID); err == nil {
@@ -282,6 +312,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request, c *Client) {
 		select {
 		case <-wake:
 		case <-deadline:
+			writeJSON(w, resp)
+			return
+		case <-ended:
 			writeJSON(w, resp)
 			return
 		case <-ctx.Done():
